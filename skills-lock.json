@@ -1,0 +1,197 @@
+{
+  "version": 1,
+  "skills": {
+    "assembly-arm": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/low-level-programming/assembly-arm/SKILL.md",
+      "computedHash": "af3bd8f1c70c26756eff83d0040d4d62375b13f6e1a1bf9463381ac17ff85dec"
+    },
+    "assembly-x86": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/low-level-programming/assembly-x86/SKILL.md",
+      "computedHash": "588c3d24c870f2c6aa25d3d32d7e281746eb89deb93776e1110ac3080573f973"
+    },
+    "binutils": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/binaries/binutils/SKILL.md",
+      "computedHash": "326f0e05666f05ff51d83090fa0731276087950bcee21fb1d4c43d0bf7507ce4"
+    },
+    "clang": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/compilers/clang/SKILL.md",
+      "computedHash": "8ab6e99d2bdf0244aace28c4509cff1d6d153196185c472985ccb698e139e6e6"
+    },
+    "cmake": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/build-systems/cmake/SKILL.md",
+      "computedHash": "934820a54d2e3a0be75b3b5cd219ff55a4f4e48904a324014e5c1cd6186844c2"
+    },
+    "conan-vcpkg": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/build-systems/conan-vcpkg/SKILL.md",
+      "computedHash": "49537d3134fa3f66ce0c7209e4805f29dcd99f25c8bacda37f494e854419c200"
+    },
+    "core-dumps": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/debuggers/core-dumps/SKILL.md",
+      "computedHash": "b317ee7653eb728dba9724306fdfec710b06587c7f3f61111c8d1e467f8fc88e"
+    },
+    "cpu-cache-opt": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/low-level-programming/cpu-cache-opt/SKILL.md",
+      "computedHash": "48690a246ca6f69deff9db624cb75ce04eb7fccec2eae5ec20a2c2cf3b5a94f2"
+    },
+    "cross-gcc": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/compilers/cross-gcc/SKILL.md",
+      "computedHash": "2b0956f2c93c30cc73ab14b52466a040c4d2178b0acec52b0e809c35779ee8b0"
+    },
+    "dynamic-linking": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/binaries/dynamic-linking/SKILL.md",
+      "computedHash": "990cd7452a19347bd36e05e914fb5f9a1af3e9ef2fa2c94c60c952d49c9bac64"
+    },
+    "elf-inspection": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/binaries/elf-inspection/SKILL.md",
+      "computedHash": "92dd85c264f3d3dd1cd1d69576379f6d91ec510b08c91f92b06e4c73aecdb630"
+    },
+    "flamegraphs": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/profilers/flamegraphs/SKILL.md",
+      "computedHash": "ecea21df375044e5538228d5c02021a6a87a162df872f636398dccff316e4cbb"
+    },
+    "fuzzing": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/runtimes/fuzzing/SKILL.md",
+      "computedHash": "ddefadb1e87fcfd5f3954af5fd4f2258e470fbbe89674721a7bb3fcf3fcf3ef2"
+    },
+    "gcc": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/compilers/gcc/SKILL.md",
+      "computedHash": "469efe0ac11fc61f93f8e7f76c4e1b8fa1b2fbefc08b96f1e6581b69e3962dd6"
+    },
+    "gdb": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/debuggers/gdb/SKILL.md",
+      "computedHash": "bf2dc98dbacb8fa23ebcd6c73da54b8a284178935f316ebb3aef9bbfc4dcad47"
+    },
+    "heaptrack": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/profilers/heaptrack/SKILL.md",
+      "computedHash": "3cc1958064f7f94a9c4156bf461de7f4fdc7544f67d1eeadf080bbfd143bc973"
+    },
+    "interpreters": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/low-level-programming/interpreters/SKILL.md",
+      "computedHash": "2ea68d3ff7f88c458704f980a2abe9b917029e917aaaaf659ae66ad79fd30cb5"
+    },
+    "linkers-lto": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/binaries/linkers-lto/SKILL.md",
+      "computedHash": "c8e3a5ef184899b2d9508721d784b0f5dacbe6681f461384ef52d4c3538020ab"
+    },
+    "linux-perf": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/profilers/linux-perf/SKILL.md",
+      "computedHash": "1a072a746c942b6f41d30aca7a0c15fd63a82a681d13a0d6f005d55b7a5b84fb"
+    },
+    "lldb": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/debuggers/lldb/SKILL.md",
+      "computedHash": "b013fb31b2316709c73d2de188566edc212879cedddb70e3d570862920fb60ea"
+    },
+    "llvm": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/compilers/llvm/SKILL.md",
+      "computedHash": "1f329978177c55407f1f546fe1bdef0b91c69125592770ced5fbfb4b213723d8"
+    },
+    "make": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/build-systems/make/SKILL.md",
+      "computedHash": "0e57558f8a6abe130531e5028f2fd1af281822a80fa5cb761d1c1d44df0d3562"
+    },
+    "memory-model": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/low-level-programming/memory-model/SKILL.md",
+      "computedHash": "101d02eb5c7e53d33b6b536d4578557ba00ef9e7b12fb7753b819c4421b5dd4d"
+    },
+    "meson": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/build-systems/meson/SKILL.md",
+      "computedHash": "3b41903017923fd8a25773c7f217bbca1972eb6cfbbcf9d6c3967680128996c3"
+    },
+    "msvc-cl": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/compilers/msvc-cl/SKILL.md",
+      "computedHash": "6ea1e30e428a918e52aaaccf99982d4132b76a16fa055fb55b855b1ba863ab9f"
+    },
+    "ninja": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/build-systems/ninja/SKILL.md",
+      "computedHash": "907756fb857329c13a6ad9281febc33ceef14cf2bd8913e2b740810f92c6cf3f"
+    },
+    "pgo": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/compilers/pgo/SKILL.md",
+      "computedHash": "e237d16657e3f6f820153852ff86df37e0971d9087d4498f14b03ea5c11a901d"
+    },
+    "sanitizers": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/runtimes/sanitizers/SKILL.md",
+      "computedHash": "93796aa472b912596f4604bd8e0ab4952bfed346e466800f3eae03fbcd1e85d8"
+    },
+    "simd-intrinsics": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/low-level-programming/simd-intrinsics/SKILL.md",
+      "computedHash": "8e4069b9a2ae2ad464226675d88507903e5bd1accd94df7cf4df93ae0da7c3c8"
+    },
+    "static-analysis": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/build-systems/static-analysis/SKILL.md",
+      "computedHash": "2f3b7119b9c9795182310e8e101a651d6363ff5eed66eb70a4b5041cd0d1c764"
+    },
+    "strace-ltrace": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/profilers/strace-ltrace/SKILL.md",
+      "computedHash": "70fd4adb2f866dab1a87ca813972fa6463bc23a51a6be3778a26fc6a404e282f"
+    },
+    "valgrind": {
+      "source": "mohitmishra786/low-level-dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/profilers/valgrind/SKILL.md",
+      "computedHash": "a567388c7304953cd11b455354730f27cb08cd16044f07f29d338dfa31efef85"
+    }
+  }
+}
