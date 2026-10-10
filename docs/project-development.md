@@ -2,9 +2,15 @@
 
 MadCat 是一个使用自研 ECS 和 Vulkan 的渲染引擎。前期服务渲染算法研究和图形效果实验，长期考虑游戏与仿真用途。开发者应能加载模型、用 C++ 编写渲染 Pass、连接多个 Pass，并在运行时调整参数、查看中间结果。
 
-本文为开发范围、架构建议、半年计划和验收方法，供项目开发者及协作编码助手使用。文档更新日期为 2026 年 10 月 4 日，状态为需求确认后的初版开发方案。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。本文不表示相关功能已经实现。**
+本文为开发范围、架构建议、半年计划和验收方法，供项目开发者及协作编码助手使用。文档更新日期为 2026 年 10 月 10 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
 
-当前仓库处于初始化阶段，尚无引擎实现。
+## 当前实现进度
+
+已完成第一个代码增量：CMake 构建入口和最小 GLFW 窗口程序。程序创建 1280 × 720 的 MadCat 窗口，使用 `GLFW_NO_API`，等待窗口事件，并在关闭后释放窗口与 GLFW。初始化和窗口创建失败时输出诊断并返回失败状态。
+
+GLFW 3.4 由 CMake FetchContent 获取，固定到提交 `7b6aead9fb88b3623e3b3725ebb42670cbe4c579`。构建目标要求 C++23。使用本机 CMake 3.31.6-msvc6 与 MSVC 19.44.35228 完成 Debug 构建，运行检查确认窗口标题为 MadCat，发送关闭事件后进程返回 0，未输出 GLFW 错误。
+
+构建和运行命令见 [README](../README.md)。此增量尚未加入渲染、Vulkan、ECS 或窗口抽象类；完整半年验收仍按后续计划推进。
 
 ## 项目目标和开发约束
 
@@ -271,10 +277,10 @@ Slang 对 SPIR-V 提供 Ray Query 能力，但项目锁定的编译器、目标 
 
 | 用途 | 建议候选和官方参考 | 采用理由与边界 |
 |---|---|---|
-| 构建 | [CMake Presets](https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html) | 建议统一配置与构建入口；生成器和版本在首个构建增量验证 |
+| 构建 | CMake 已使用；[Presets](https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html) 后续按需加入 | 当前使用 Visual Studio 2022 x64 生成器，命令见 README |
 | Windows C++ 工具链 | 支持项目实际使用的 C++23 特性的 MSVC 工具链 | 建议先采用 Windows 常用工具链；不假定所有 C++23 库能力都已具备 |
 | 依赖管理 | [vcpkg Manifest 模式](https://learn.microsoft.com/en-us/vcpkg/concepts/manifest-mode) | 建议锁定依赖基线；Slang SDK 的分发方式可独立安排 |
-| 窗口和输入 | [GLFW Vulkan 支持](https://www.glfw.org/docs/latest/vulkan_guide.html) | 处理窗口、输入和 Surface 支持，减少平台代码 |
+| 窗口和输入 | GLFW 3.4 已使用；[Vulkan 支持](https://www.glfw.org/docs/latest/vulkan_guide.html) 后续接入 | 当前实现窗口创建、事件等待和关闭；Surface 与其他输入能力后续增加 |
 | 调试界面 | [Dear ImGui](https://github.com/ocornut/imgui) | 提供参数面板及官方 Vulkan 适配，当前不建设完整编辑器 |
 | 数学 | [GLM](https://github.com/g-truc/glm) | 向量、矩阵与四元数；统一并验证坐标、深度和布局约定 |
 | glTF 解析 | [cgltf](https://github.com/jkuhlmann/cgltf) | 小型解析器候选；引擎仍负责资产转换、图片读取与解码 |
@@ -282,7 +288,7 @@ Slang 对 SPIR-V 提供 Ray Query 能力，但项目锁定的编译器、目标 
 | Shader | Slang | 用户已确定；版本、安装与编译产物布局在早期验证 |
 | 图片解码与测试 | 待实现该功能时选择 | 必须补齐纹理解码；测试框架保持简单，不提前扩大依赖 |
 
-以上工具库组合属于建议，尚未安装或锁定版本。cgltf 不默认把外部图片解码为像素，需要额外的文件处理和图片解码步骤。[cgltf 使用说明](https://github.com/jkuhlmann/cgltf)
+当前已采用 CMake 与固定提交的 GLFW 3.4，单个依赖通过 FetchContent 管理。其余工具库组合仍属于建议，具体版本和包管理方式按后续实际需求确定。cgltf 不默认把外部图片解码为像素，需要额外的文件处理和图片解码步骤。[cgltf 使用说明](https://github.com/jkuhlmann/cgltf)
 
 建议源码逐步落在 `src/Core`、`src/Platform`、`src/ECS`、`src/Scene`、`src/Assets`、`src/Shader`、`src/RHI/Vulkan`、`src/RenderScene`、`src/RenderGraph`、`src/Passes`、`apps/Sandbox`，Shader 放在 `shaders`，测试放在 `tests`。尚无实现时不创建空目录或空模块。
 
