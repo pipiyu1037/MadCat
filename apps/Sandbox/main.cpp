@@ -1,8 +1,11 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
+#include "RHI/Vulkan/VulkanInstance.h"
+
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 
 int main()
 {
@@ -24,12 +27,26 @@ int main()
         return EXIT_FAILURE;
     }
 
-    while (!glfwWindowShouldClose(window))
+    int exitCode = EXIT_FAILURE;
+    try
     {
-        glfwWaitEvents();
+        madcat::rhi::VulkanInstance vulkan;
+        if (vulkan.initialize())
+        {
+            while (!glfwWindowShouldClose(window))
+            {
+                glfwWaitEvents();
+            }
+            exitCode = EXIT_SUCCESS;
+        }
+        // The Vulkan owner is destroyed before GLFW unloads the Vulkan loader.
+    }
+    catch (const std::exception& error)
+    {
+        std::fprintf(stderr, "MadCat initialization failed: %s\n", error.what());
     }
 
     glfwDestroyWindow(window);
     glfwTerminate();
-    return EXIT_SUCCESS;
+    return exitCode;
 }

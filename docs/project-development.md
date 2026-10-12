@@ -2,15 +2,25 @@
 
 MadCat 是一个使用自研 ECS 和 Vulkan 的渲染引擎。前期服务渲染算法研究和图形效果实验，长期考虑游戏与仿真用途。开发者应能加载模型、用 C++ 编写渲染 Pass、连接多个 Pass，并在运行时调整参数、查看中间结果。
 
-本文为开发范围、架构建议、半年计划和验收方法，供项目开发者及协作编码助手使用。文档更新日期为 2026 年 10 月 10 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
+本文为开发范围、架构建议、半年计划和验收方法，供项目开发者及协作编码助手使用。文档更新日期为 2026 年 10 月 13 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
 
 ## 当前实现进度
 
-已完成第一个代码增量：CMake 构建入口和最小 GLFW 窗口程序。程序创建 1280 × 720 的 MadCat 窗口，使用 `GLFW_NO_API`，等待窗口事件，并在关闭后释放窗口与 GLFW。初始化和窗口创建失败时输出诊断并返回失败状态。
+已完成 CMake 构建入口、最小 GLFW 窗口，以及 Vulkan Instance 与诊断回调增量。程序创建 1280 × 720 的 MadCat 窗口，使用 `GLFW_NO_API`，查询实例级 API 版本、所需扩展和 Debug 验证层，创建 Vulkan Instance 后等待窗口事件。关闭后依次释放诊断回调、Instance、窗口与 GLFW；初始化失败输出具体诊断并返回非零状态。
 
-GLFW 3.4 由 CMake FetchContent 获取，固定到提交 `7b6aead9fb88b3623e3b3725ebb42670cbe4c579`。构建目标要求 C++23。使用本机 CMake 3.31.6-msvc6 与 MSVC 19.44.35228 完成 Debug 构建，运行检查确认窗口标题为 MadCat，发送关闭事件后进程返回 0，未输出 GLFW 错误。
+GLFW 3.4 由 CMake FetchContent 获取，固定到提交 `7b6aead9fb88b3623e3b3725ebb42670cbe4c579`。构建目标要求 C++23。当前采用 Vulkan 1.3 实例级基线，CMake 查找 SDK 的头文件与开发库，通过 `Vulkan::Headers` 提供头文件，Vulkan 函数由 GLFW 动态获取。Debug 必须能找到 `VK_LAYER_KHRONOS_validation` 和 `VK_EXT_debug_utils`，Release 不主动启用验证层。
 
-构建和运行命令见 [README](../README.md)。此增量尚未加入渲染、Vulkan、ECS 或窗口抽象类；完整半年验收仍按后续计划推进。
+2026 年 10 月 13 日使用 CMake 4.4.4、MSVC 19.44.35228、Vulkan SDK 1.4.363.0 完成 Debug 和 Release 构建，未出现编译警告。运行时查询得到实例级 API 1.4.363。本机 SDK 工具枚举到 NVIDIA GeForce RTX 5060 Ti（驱动 617.42）和 AMD Radeon(TM) Graphics（驱动 24.10.24）；MadCat 尚未枚举或选择物理设备。
+
+| 本次验证 | 实际结果 |
+|---|---|
+| Debug／Release 窗口运行 | 窗口标题为 MadCat，发送关闭事件后返回 0；Instance 正常销毁，Debug 没有验证 warning／error 或 GLFW 错误 |
+| 缺少 Debug 验证层 | 通过空的 `VK_LAYER_PATH` 隔离验证层，程序报告缺少 `VK_LAYER_KHRONOS_validation` 并返回 1 |
+| 无效驱动搜索路径 | 指定不存在的 `VK_DRIVER_FILES`，程序报告缺少窗口 Surface 扩展并返回 1 |
+| 回调消息探针 | 通过 `vkSubmitDebugUtilsMessageEXT` 提交可控 warning 消息，确认回调输出消息标识和正文 |
+| 初始化失败与异常清理探针 | 注入诊断回调创建失败、所需函数缺失和初始化后的异常，已创建的 Instance 均正常释放；模拟 Vulkan 1.2 时在创建前拒绝 |
+
+探针、窗口检查脚本和日志放在本地 `build/verification`，属于不纳入版本控制的验证产物。失败探针只替换测试中的函数查询结果，没有修改系统驱动或验证层安装。构建和运行命令见 [README](../README.md)。此增量尚未创建 Surface、Device、Swapchain 或提交 GPU 工作，也未加入 ECS；同步与渲染场景尚未验证，完整半年验收仍按后续计划推进。
 
 ## 项目目标和开发约束
 
@@ -124,7 +134,7 @@ ECS 保存场景事实，例如局部 Transform、模型资源标识和灯光参
 
 RHI 的目的，是让 Pass 作者通过资源、管线、绑定和命令接口表达算法，并把 Vulkan 对象创建与生命周期集中管理。**当前只有 Vulkan 后端，不建立为多 API 服务的后端工厂、能力交集或虚函数层级。** 抽象是否需要存在，以它能否减少 Pass 的重复工作为依据。
 
-以 Vulkan 1.3 作为初始 API 基线，使用 Dynamic Rendering 和 Synchronization2。两者已进入 Vulkan 1.3 核心，但启动时仍需查询并启用所需 feature，不能仅凭显卡型号假定可用。[Vulkan 核心版本说明](https://docs.vulkan.org/spec/latest/appendices/versions.html)
+当前 Instance 初始化已采用 Vulkan 1.3 API 基线。后续建议使用 Dynamic Rendering 和 Synchronization2。两者已进入 Vulkan 1.3 核心，但创建 Device 前仍需查询设备版本并查询、启用所需 feature，不能仅凭实例版本或显卡型号假定可用。[Vulkan 核心版本说明](https://docs.vulkan.org/spec/latest/appendices/versions.html)
 
 按实际 Pass 需求逐步提供：
 
@@ -280,7 +290,8 @@ Slang 对 SPIR-V 提供 Ray Query 能力，但项目锁定的编译器、目标 
 | 构建 | CMake 已使用；[Presets](https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html) 后续按需加入 | 当前使用 Visual Studio 2022 x64 生成器，命令见 README |
 | Windows C++ 工具链 | 支持项目实际使用的 C++23 特性的 MSVC 工具链 | 建议先采用 Windows 常用工具链；不假定所有 C++23 库能力都已具备 |
 | 依赖管理 | [vcpkg Manifest 模式](https://learn.microsoft.com/en-us/vcpkg/concepts/manifest-mode) | 建议锁定依赖基线；Slang SDK 的分发方式可独立安排 |
-| 窗口和输入 | GLFW 3.4 已使用；[Vulkan 支持](https://www.glfw.org/docs/latest/vulkan_guide.html) 后续接入 | 当前实现窗口创建、事件等待和关闭；Surface 与其他输入能力后续增加 |
+| 窗口和输入 | GLFW 3.4 已使用；[Vulkan 支持](https://www.glfw.org/docs/3.4/vulkan_guide.html) 已用于 Instance 初始化 | 当前实现窗口创建、事件等待、关闭和 Vulkan 函数获取；Surface 与其他输入能力后续增加 |
+| Vulkan 开发环境 | [LunarG Vulkan SDK](https://vulkan.lunarg.com/) 已使用 | 当前要求头文件至少 1.3；本机验证 SDK 1.4.363.0，运行时版本和验证层另行查询 |
 | 调试界面 | [Dear ImGui](https://github.com/ocornut/imgui) | 提供参数面板及官方 Vulkan 适配，当前不建设完整编辑器 |
 | 数学 | [GLM](https://github.com/g-truc/glm) | 向量、矩阵与四元数；统一并验证坐标、深度和布局约定 |
 | glTF 解析 | [cgltf](https://github.com/jkuhlmann/cgltf) | 小型解析器候选；引擎仍负责资产转换、图片读取与解码 |
@@ -288,7 +299,7 @@ Slang 对 SPIR-V 提供 Ray Query 能力，但项目锁定的编译器、目标 
 | Shader | Slang | 用户已确定；版本、安装与编译产物布局在早期验证 |
 | 图片解码与测试 | 待实现该功能时选择 | 必须补齐纹理解码；测试框架保持简单，不提前扩大依赖 |
 
-当前已采用 CMake 与固定提交的 GLFW 3.4，单个依赖通过 FetchContent 管理。其余工具库组合仍属于建议，具体版本和包管理方式按后续实际需求确定。cgltf 不默认把外部图片解码为像素，需要额外的文件处理和图片解码步骤。[cgltf 使用说明](https://github.com/jkuhlmann/cgltf)
+当前已采用 CMake、固定提交的 GLFW 3.4 和本机 Vulkan SDK。GLFW 通过 FetchContent 管理，Vulkan 开发环境通过 `find_package(Vulkan 1.3 REQUIRED)` 查找。其余工具库组合仍属于建议，具体版本和包管理方式按后续实际需求确定。cgltf 不默认把外部图片解码为像素，需要额外的文件处理和图片解码步骤。[cgltf 使用说明](https://github.com/jkuhlmann/cgltf)
 
 建议源码逐步落在 `src/Core`、`src/Platform`、`src/ECS`、`src/Scene`、`src/Assets`、`src/Shader`、`src/RHI/Vulkan`、`src/RenderScene`、`src/RenderGraph`、`src/Passes`、`apps/Sandbox`，Shader 放在 `shaders`，测试放在 `tests`。尚无实现时不创建空目录或空模块。
 
@@ -341,7 +352,7 @@ Shader 编译与资源状态模型先做最小验证，再逐步完善；不等�
 13. 添加层级和世界 Transform 更新，再单独覆盖重新挂接与删除行为。
 14. 按几何、索引、法线、UV、贴图分别增加模型导入能力。
 
-本次文档改动的动机，是将已完成的需求访谈固化为开发基线，明确半年范围和小步交付方式，减少后续实现中的目标漂移。下一次代码迭代建议从第一个构建增量开始。
+当前已完成构建、窗口及 Vulkan Instance 与诊断回调。下一次代码迭代建议枚举物理设备、队列族和主线／光追相关 feature，输出能力清单；Surface、Device、Swapchain 和清屏提交继续分别验证。
 
 ## 验证策略与风险
 
