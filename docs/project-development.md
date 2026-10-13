@@ -6,13 +6,13 @@ MadCat 是一个使用自研 ECS 和 Vulkan 的渲染引擎。前期服务渲染
 
 ## 当前实现进度
 
-已完成 CMake 构建入口、最小 GLFW 窗口，以及 Vulkan Instance 与诊断回调增量。程序创建 1280 × 720 的 MadCat 窗口，使用 `GLFW_NO_API`，查询实例级 API 版本、所需扩展和 Debug 验证层，创建 Vulkan Instance 后等待窗口事件。关闭后依次释放诊断回调、Instance、窗口与 GLFW；初始化失败输出具体诊断并返回非零状态。
+已完成 CMake 构建入口、最小 GLFW 窗口、Vulkan Instance 与诊断回调，以及物理设备能力报告增量。程序创建 1280 × 720 的 MadCat 窗口，使用 `GLFW_NO_API`，查询实例级 API 版本、所需扩展和 Debug 验证层，创建 Vulkan Instance 后枚举设备并输出能力报告，再等待窗口事件。关闭后依次释放诊断回调、Instance、窗口与 GLFW；初始化或设备查询失败输出具体诊断并返回非零状态。
 
 GLFW 3.4 由 CMake FetchContent 获取，固定到提交 `7b6aead9fb88b3623e3b3725ebb42670cbe4c579`。构建目标要求 C++23。当前采用 Vulkan 1.3 实例级基线，CMake 查找 SDK 的头文件与开发库，通过 `Vulkan::Headers` 提供头文件，Vulkan 函数由 GLFW 动态获取。Debug 必须能找到 `VK_LAYER_KHRONOS_validation` 和 `VK_EXT_debug_utils`，Release 不主动启用验证层。
 
-2026 年 10 月 13 日使用 CMake 4.4.4、MSVC 19.44.35228、Vulkan SDK 1.4.363.0 完成 Debug 和 Release 构建，未出现编译警告。运行时查询得到实例级 API 1.4.363。本机 SDK 工具枚举到 NVIDIA GeForce RTX 5060 Ti（驱动 617.42）和 AMD Radeon(TM) Graphics（驱动 24.10.24）；MadCat 尚未枚举或选择物理设备。
+2026 年 10 月 13 日使用 CMake 4.4.4、MSVC 19.44.35228、Vulkan SDK 1.4.363.0 完成 Debug 和 Release 构建，未出现编译警告。运行时查询得到实例级 API 1.4.363。MadCat 已枚举本机物理设备，分别查询名称、类型、设备级 API、原始驱动版本和可用的驱动属性、队列族及主线／光追相关扩展。
 
-| 本次验证 | 实际结果 |
+| Instance 增量已有验证 | 实际结果 |
 |---|---|
 | Debug／Release 窗口运行 | 窗口标题为 MadCat，发送关闭事件后返回 0；Instance 正常销毁，Debug 没有验证 warning／error 或 GLFW 错误 |
 | 缺少 Debug 验证层 | 通过空的 `VK_LAYER_PATH` 隔离验证层，程序报告缺少 `VK_LAYER_KHRONOS_validation` 并返回 1 |
@@ -20,7 +20,23 @@ GLFW 3.4 由 CMake FetchContent 获取，固定到提交 `7b6aead9fb88b3623e3b37
 | 回调消息探针 | 通过 `vkSubmitDebugUtilsMessageEXT` 提交可控 warning 消息，确认回调输出消息标识和正文 |
 | 初始化失败与异常清理探针 | 注入诊断回调创建失败、所需函数缺失和初始化后的异常，已创建的 Instance 均正常释放；模拟 Vulkan 1.2 时在创建前拒绝 |
 
-探针、窗口检查脚本和日志放在本地 `build/verification`，属于不纳入版本控制的验证产物。失败探针只替换测试中的函数查询结果，没有修改系统驱动或验证层安装。构建和运行命令见 [README](../README.md)。此增量尚未创建 Surface、Device、Swapchain 或提交 GPU 工作，也未加入 ECS；同步与渲染场景尚未验证，完整半年验收仍按后续计划推进。
+本次设备报告分别查询 `dynamicRendering`、`synchronization2`、`bufferDeviceAddress`、`accelerationStructure` 和 `rayQuery`，依据设备核心版本或扩展组织 feature 查询，并输出加速结构限制。扩展列表与 feature 支持分开显示；缺少可选能力时继续报告设备，空设备列表、函数缺失和枚举失败返回非零状态。
+
+| 本次设备查询结果 | 设备级 API／驱动 | 队列族数量 | 上述五项 feature | 计算 Ray Query 前置条件 |
+|---|---|---|---|---|
+| NVIDIA GeForce RTX 5060 Ti，独立 GPU | 1.4.351／617.42 | 6 | 全部支持 | 查询可用 |
+| AMD Radeon(TM) Graphics，集成 GPU | 1.3.280／24.10.24 | 5 | 全部支持 | 查询可用 |
+
+RTX 5060 Ti 的加速结构几何／实例／primitive 上限分别为 16777215／16777215／536870911，scratch 对齐为 128 字节；AMD 集显对应为 16777216／16777216／536870912，scratch 对齐为 256 字节。这些是驱动报告的限制，不是实际场景容量或性能测量。
+
+计算 Ray Query 前置检查包括 Compute 队列、三个光追相关 feature、`VK_KHR_acceleration_structure`、`VK_KHR_ray_query`、`VK_KHR_deferred_host_operations`，以及按设备核心版本计算的其他扩展依赖。报告只表明查询条件成立，不启用 feature，也不代表 Shader 编译或 GPU 求交已经验证。[加速结构扩展依赖](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_acceleration_structure.html)、[Ray Query 扩展依赖](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_ray_query.html)
+
+| 本次设备报告验证 | 实际结果 |
+|---|---|
+| Debug／Release 构建与窗口运行 | 均构建成功且无编译警告，完整报告两张设备后发送关闭事件，返回 0；Instance 正常销毁，Debug 没有验证 warning／error 或 GLFW 错误 |
+| 15 个本地查询探针 | 未初始化、空设备、函数缺失、设备／扩展枚举失败、`VK_INCOMPLETE` 重试、核心提升与扩展提供、feature 为假、光追扩展／地址 feature／依赖／Compute 队列缺失、旧设备与混合设备均符合预期 |
+
+探针、窗口检查脚本和日志放在本地 `build/verification`，属于不纳入版本控制的验证产物。失败探针只替换测试中的函数查询结果，没有修改系统驱动或验证层安装。构建和运行命令见 [README](../README.md)。当前尚未选择设备、创建 Surface、Device、Swapchain 或提交 GPU 工作，也未加入 ECS；呈现支持、GPU 同步、Shader 兼容性与求交场景尚未验证，完整半年验收仍按后续计划推进。
 
 ## 项目目标和开发约束
 
@@ -352,7 +368,7 @@ Shader 编译与资源状态模型先做最小验证，再逐步完善；不等�
 13. 添加层级和世界 Transform 更新，再单独覆盖重新挂接与删除行为。
 14. 按几何、索引、法线、UV、贴图分别增加模型导入能力。
 
-当前已完成构建、窗口及 Vulkan Instance 与诊断回调。下一次代码迭代建议枚举物理设备、队列族和主线／光追相关 feature，输出能力清单；Surface、Device、Swapchain 和清屏提交继续分别验证。
+当前已完成构建、窗口、Vulkan Instance 与诊断回调，以及物理设备、队列族和主线／光追能力报告。下一次代码迭代建议创建窗口 Surface，查询实际 Surface 的队列呈现支持、格式、present mode 和能力限制；再依据结果分别实现设备选择、Device／队列、Swapchain 和清屏提交。
 
 ## 验证策略与风险
 

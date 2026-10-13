@@ -19,6 +19,9 @@ public:
     // Call once. Any resources created before a failure remain owned here.
     [[nodiscard]] bool initialize();
 
+    // Query support only; no device is selected and no features are enabled.
+    [[nodiscard]] bool reportPhysicalDevices() const;
+
 private:
     VkInstance instance_ = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debugMessenger_ = VK_NULL_HANDLE;

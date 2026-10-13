@@ -1,6 +1,6 @@
 # MadCat
 
-使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前实现了 GLFW 窗口、Vulkan Instance 初始化和 Debug 验证层诊断。
+使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前实现了 GLFW 窗口、Vulkan Instance 初始化、Debug 验证层诊断和物理设备能力报告。
 
 ## 构建与运行
 
@@ -18,7 +18,7 @@ cmake --build build --config Debug
 
 首次配置通过 CMake FetchContent 获取固定提交的 GLFW 3.4，需要访问 GitHub；依赖源码和构建产物位于 `build` 下。
 
-程序创建一个 1280 × 720、标题为 MadCat 的可调整大小窗口，查询实例级 API 版本和所需扩展，创建 Vulkan Instance。Debug 构建启用验证层，输出 warning／error 诊断及消息标识；Release 构建关闭应用主动启用的验证层。点击关闭按钮后先销毁诊断回调和 Instance，再释放窗口与 GLFW。初始化失败时返回非零状态。
+程序创建一个 1280 × 720、标题为 MadCat 的可调整大小窗口，查询实例级 API 版本和所需扩展，创建 Vulkan Instance，并输出全部物理设备的能力报告。Debug 构建启用验证层，输出 warning／error 诊断及消息标识；Release 构建关闭应用主动启用的验证层。点击关闭按钮后先销毁诊断回调和 Instance，再释放窗口与 GLFW。初始化或设备查询失败时返回非零状态。
 
 正常 Debug 启动日志包含以下内容，关闭窗口后输出 `Vulkan: Instance destroyed.`：
 
@@ -26,11 +26,18 @@ cmake --build build --config Debug
 Vulkan: instance-level API support <运行时版本>; requesting 1.3.0.
 Vulkan: Instance created.
 Vulkan: validation enabled (VK_LAYER_KHRONOS_validation); diagnostic callback ready.
+Vulkan: found <数量> physical device(s).
+<每张设备的属性、队列族、扩展、feature 和加速结构限制>
+Vulkan: physical device capability report complete; no device selected or features enabled.
 ```
 
 窗口使用 `GLFW_NO_API`，目前使用 `glfwWaitEvents()` 等待事件。Vulkan 函数通过 GLFW 动态获取，CMake 使用 `Vulkan::Headers` 提供头文件。[GLFW Vulkan 指南](https://www.glfw.org/docs/3.4/vulkan_guide.html)、[CMake FindVulkan](https://cmake.org/cmake/help/latest/module/FindVulkan.html)
 
-当前尚未枚举或选择物理设备，未创建 Surface、Device 或 Swapchain，也没有提交 GPU 工作或绘制内容。实例级 API 版本不能替代后续设备 feature 查询。
+能力报告包含设备名称、类型、设备级 API 与驱动信息，队列族的 Graphics／Compute／Transfer 能力，以及基础渲染和光追相关扩展。通过 `vkGetPhysicalDeviceFeatures2` 分别查询 `dynamicRendering`、`synchronization2`、`bufferDeviceAddress`、`accelerationStructure` 和 `rayQuery`；已提升为核心的功能会按设备 API 版本判断，不要求同名扩展仍被列出。[Vulkan feature 查询](https://docs.vulkan.org/refpages/latest/refpages/source/vkGetPhysicalDeviceFeatures2.html)
+
+报告还输出加速结构限制，并检查计算 Ray Query 所需的 feature、Compute 队列和扩展依赖；缺失时说明原因，仍继续报告其他设备。没有物理设备、查询函数缺失或枚举失败时，程序报告错误并退出。
+
+当前仅查询支持情况，尚未选择设备、启用 feature 或创建 Surface、Device、Swapchain，也没有提交 GPU 工作或绘制内容。队列呈现支持需在创建实际 Surface 后检查；Ray Query 前置条件可用仍需 Slang 编译与 GPU 求交探针验证。
 
 ## 常见初始化问题
 
@@ -41,5 +48,6 @@ Vulkan: validation enabled (VK_LAYER_KHRONOS_validation); diagnostic callback re
 | 实例级 API 低于 Vulkan 1.3 | 检查运行时 loader 和驱动；安装较新 SDK 不代表运行时已更新 |
 | Debug 缺少 `VK_LAYER_KHRONOS_validation` | 确认 SDK 验证层已安装，检查 `VK_LAYER_PATH` 是否覆盖了正常搜索路径 |
 | Vulkan API 调用失败 | 日志包含操作名称与数值 `VkResult`；同时检查此前的验证消息 |
+| 没有物理设备或设备查询失败 | 检查 Vulkan 驱动及搜索配置，并查看失败操作名称和设备标识 |
 
 完整需求和后续计划见 [项目开发文档](docs/project-development.md)，协作规则见 [AGENTS.md](AGENTS.md)。

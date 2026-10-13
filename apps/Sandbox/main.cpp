@@ -31,7 +31,7 @@ int main()
     try
     {
         madcat::rhi::VulkanInstance vulkan;
-        if (vulkan.initialize())
+        if (vulkan.initialize() && vulkan.reportPhysicalDevices())
         {
             while (!glfwWindowShouldClose(window))
             {
