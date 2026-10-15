@@ -19,6 +19,8 @@ FetchContent_MakeAvailable(glfw)
 add_executable(MadCat
     apps/Sandbox/main.cpp
     src/RHI/Vulkan/VulkanInstance.cpp
+    src/RHI/Vulkan/VulkanPhysicalDevice.cpp
+    src/RHI/Vulkan/VulkanSurface.cpp
 )
 target_compile_features(MadCat PRIVATE cxx_std_23)
 set_target_properties(MadCat PROPERTIES CXX_EXTENSIONS OFF)

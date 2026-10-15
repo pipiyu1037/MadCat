@@ -2,11 +2,11 @@
 
 MadCat 是一个使用自研 ECS 和 Vulkan 的渲染引擎。前期服务渲染算法研究和图形效果实验，长期考虑游戏与仿真用途。开发者应能加载模型、用 C++ 编写渲染 Pass、连接多个 Pass，并在运行时调整参数、查看中间结果。
 
-本文为开发范围、架构建议、半年计划和验收方法，供项目开发者及协作编码助手使用。文档更新日期为 2026 年 10 月 13 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
+本文为开发范围、架构建议、半年计划和验收方法，供项目开发者及协作编码助手使用。文档更新日期为 2026 年 10 月 16 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
 
 ## 当前实现进度
 
-已完成 CMake 构建入口、最小 GLFW 窗口、Vulkan Instance 与诊断回调，以及物理设备能力报告增量。程序创建 1280 × 720 的 MadCat 窗口，使用 `GLFW_NO_API`，查询实例级 API 版本、所需扩展和 Debug 验证层，创建 Vulkan Instance 后枚举设备并输出能力报告，再等待窗口事件。关闭后依次释放诊断回调、Instance、窗口与 GLFW；初始化或设备查询失败输出具体诊断并返回非零状态。
+已完成 CMake 构建入口、最小 GLFW 窗口、Vulkan Instance 与诊断回调、物理设备能力报告，以及窗口 Surface 与呈现能力查询。Instance 与 Surface 已拆成独立 RAII 所有者，物理设备查询返回可复用的数据。程序创建 1280 × 720 的 MadCat 窗口，使用 `GLFW_NO_API`，查询实例级 API 版本、所需扩展和 Debug 验证层，创建 Vulkan Instance 和窗口 Surface 后枚举设备并输出能力报告，再等待窗口事件。关闭后依次释放 Surface、诊断回调、Instance、窗口与 GLFW；初始化、Surface 创建或设备查询失败输出具体诊断并返回非零状态，已创建资源仍由各自所有者清理。
 
 GLFW 3.4 由 CMake FetchContent 获取，固定到提交 `7b6aead9fb88b3623e3b3725ebb42670cbe4c579`。构建目标要求 C++23。当前采用 Vulkan 1.3 实例级基线，CMake 查找 SDK 的头文件与开发库，通过 `Vulkan::Headers` 提供头文件，Vulkan 函数由 GLFW 动态获取。Debug 必须能找到 `VK_LAYER_KHRONOS_validation` 和 `VK_EXT_debug_utils`，Release 不主动启用验证层。
 
@@ -20,9 +20,9 @@ GLFW 3.4 由 CMake FetchContent 获取，固定到提交 `7b6aead9fb88b3623e3b37
 | 回调消息探针 | 通过 `vkSubmitDebugUtilsMessageEXT` 提交可控 warning 消息，确认回调输出消息标识和正文 |
 | 初始化失败与异常清理探针 | 注入诊断回调创建失败、所需函数缺失和初始化后的异常，已创建的 Instance 均正常释放；模拟 Vulkan 1.2 时在创建前拒绝 |
 
-本次设备报告分别查询 `dynamicRendering`、`synchronization2`、`bufferDeviceAddress`、`accelerationStructure` 和 `rayQuery`，依据设备核心版本或扩展组织 feature 查询，并输出加速结构限制。扩展列表与 feature 支持分开显示；缺少可选能力时继续报告设备，空设备列表、函数缺失和枚举失败返回非零状态。
+设备报告分别查询 `dynamicRendering`、`synchronization2`、`bufferDeviceAddress`、`accelerationStructure` 和 `rayQuery`，依据设备核心版本或扩展组织 feature 查询，并输出加速结构限制。扩展列表与 feature 支持分开显示；缺少可选能力时继续报告设备，空设备列表、函数缺失和枚举失败返回非零状态。
 
-| 本次设备查询结果 | 设备级 API／驱动 | 队列族数量 | 上述五项 feature | 计算 Ray Query 前置条件 |
+| 2026-10-13 设备查询结果 | 设备级 API／驱动 | 队列族数量 | 上述五项 feature | 计算 Ray Query 前置条件 |
 |---|---|---|---|---|
 | NVIDIA GeForce RTX 5060 Ti，独立 GPU | 1.4.351／617.42 | 6 | 全部支持 | 查询可用 |
 | AMD Radeon(TM) Graphics，集成 GPU | 1.3.280／24.10.24 | 5 | 全部支持 | 查询可用 |
@@ -31,12 +31,35 @@ RTX 5060 Ti 的加速结构几何／实例／primitive 上限分别为 16777215�
 
 计算 Ray Query 前置检查包括 Compute 队列、三个光追相关 feature、`VK_KHR_acceleration_structure`、`VK_KHR_ray_query`、`VK_KHR_deferred_host_operations`，以及按设备核心版本计算的其他扩展依赖。报告只表明查询条件成立，不启用 feature，也不代表 Shader 编译或 GPU 求交已经验证。[加速结构扩展依赖](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_acceleration_structure.html)、[Ray Query 扩展依赖](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_ray_query.html)
 
-| 本次设备报告验证 | 实际结果 |
+| 2026-10-13 设备报告验证 | 实际结果 |
 |---|---|
 | Debug／Release 构建与窗口运行 | 均构建成功且无编译警告，完整报告两张设备后发送关闭事件，返回 0；Instance 正常销毁，Debug 没有验证 warning／error 或 GLFW 错误 |
 | 15 个本地查询探针 | 未初始化、空设备、函数缺失、设备／扩展枚举失败、`VK_INCOMPLETE` 重试、核心提升与扩展提供、feature 为假、光追扩展／地址 feature／依赖／Compute 队列缺失、旧设备与混合设备均符合预期 |
 
-探针、窗口检查脚本和日志放在本地 `build/verification`，属于不纳入版本控制的验证产物。失败探针只替换测试中的函数查询结果，没有修改系统驱动或验证层安装。构建和运行命令见 [README](../README.md)。当前尚未选择设备、创建 Surface、Device、Swapchain 或提交 GPU 工作，也未加入 ECS；呈现支持、GPU 同步、Shader 兼容性与求交场景尚未验证，完整半年验收仍按后续计划推进。
+2026 年 10 月 15 日新增窗口 Surface，当时由 `VulkanInstance` 所有者持有，在诊断回调、Instance 和窗口之前销毁。报告使用实际 Surface 查询每个队列族的呈现支持；有呈现队列时才查询格式／颜色空间、present mode、图像数量、尺寸、数组层数及 usage／transform／composite alpha 标志。无呈现支持的设备保留其他能力报告，并说明跳过原因；查询 API 失败则报告操作、`VkResult` 和设备／队列上下文。[Surface 查询的有效使用要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkGetPhysicalDeviceSurfaceCapabilitiesKHR.html)
+
+| 2026-10-15 实际 Surface 查询，1280 × 720 窗口 | 支持 Present 的队列族索引 | 兼具 Graphics／Compute／Present 的队列族 | 格式／模式数量 | 图像数量范围 |
+|---|---|---|---|---|
+| NVIDIA GeForce RTX 5060 Ti | 0、2 | 0 | 7／5 | 2～8 |
+| AMD Radeon(TM) Graphics | 0、1、2、3、4 | 0 | 5／3 | 2～16 |
+
+两张设备均报告当前尺寸 1280 × 720、最大数组层数 1、usage `0x9f`、支持及当前 transform `0x1`；composite alpha 分别为 `0x3` 和 `0x1`。两张设备均提供 `B8G8R8A8_SRGB`／`SRGB_NONLINEAR` 和 FIFO；这是本次窗口及驱动的查询结果，不能当作以后窗口尺寸或其他设备的固定配置。
+
+| 2026-10-15 Surface 增量验证 | 实际结果 |
+|---|---|
+| Debug／Release 构建与实际窗口运行 | 均通过，无编译警告；两张设备报告完成后发送关闭事件，返回 0；Surface 在 Instance 前释放，Debug 无验证 warning／error 或 GLFW 错误 |
+| 22 个 Surface 探针 | 未初始化、缺少 Surface、空窗口、重复创建、异常退出、创建失败、缺失销毁／查询函数、呈现／能力／列表查询失败、无呈现支持、`VK_INCOMPLETE` 重试、空列表和可变尺寸／无数量上限均符合预期；销毁顺序及次数检查通过 |
+| 原有 15 个设备能力探针回归 | 全部通过；探针适配了 Surface 前置条件，并继续使用模拟物理设备查询 |
+
+2026 年 10 月 16 日完成封装重构：`VulkanInstance` 只拥有 Instance 与诊断回调；`VulkanSurface` 独立拥有 Surface；`PhysicalDeviceInfo` 保存可复制的查询数据与借用句柄；`SurfaceSupport` 保存某次设备／Surface 组合查询的快照。设备查询不再要求 Surface，呈现查询检查 Instance 一致性；两种查询均成功后整体替换输出，失败时保留原结果。打印函数只读取数据。所有权、接口和组装入口见 [README](../README.md#vulkan-后端封装)。
+
+| 本次封装重构验证 | 实际结果 |
+|---|---|
+| Debug／Release 构建与实际窗口运行 | 均通过，无编译警告；正常退出返回 0，Debug 无验证 warning／error 或 GLFW 错误；完整日志与封装前逐字一致 |
+| 22 个 Surface 与 15 个设备能力探针回归 | 全部通过；探针已适配独立 Surface 与数据查询接口 |
+| 新增 18 项封装检查 | Surface 创建前查询设备、数据复制与空 `pNext`、打印不查询 Vulkan、空 Surface／无效设备／跨 Instance 提前拒绝、查询失败保留旧结果及失败后恢复均通过 |
+
+本次使用 Windows 11、CMake 4.4.4、MSVC 19.44.35228、Vulkan SDK 1.4.363.0；设备级 API 与驱动和上表一致，无 Shader 或资产输入。探针、窗口检查脚本和日志放在本地 `build/verification`，属于不纳入版本控制的验证产物。失败探针只替换测试进程中的查询／创建结果，没有修改系统驱动或验证层安装。构建和运行命令见 [README](../README.md)。当前尚未选择设备、创建 Device、Swapchain 或提交 GPU 工作，也未加入 ECS；GPU 同步、Shader 兼容性与求交场景尚未验证，完整半年验收仍按后续计划推进。
 
 ## 项目目标和开发约束
 
@@ -306,7 +329,7 @@ Slang 对 SPIR-V 提供 Ray Query 能力，但项目锁定的编译器、目标 
 | 构建 | CMake 已使用；[Presets](https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html) 后续按需加入 | 当前使用 Visual Studio 2022 x64 生成器，命令见 README |
 | Windows C++ 工具链 | 支持项目实际使用的 C++23 特性的 MSVC 工具链 | 建议先采用 Windows 常用工具链；不假定所有 C++23 库能力都已具备 |
 | 依赖管理 | [vcpkg Manifest 模式](https://learn.microsoft.com/en-us/vcpkg/concepts/manifest-mode) | 建议锁定依赖基线；Slang SDK 的分发方式可独立安排 |
-| 窗口和输入 | GLFW 3.4 已使用；[Vulkan 支持](https://www.glfw.org/docs/3.4/vulkan_guide.html) 已用于 Instance 初始化 | 当前实现窗口创建、事件等待、关闭和 Vulkan 函数获取；Surface 与其他输入能力后续增加 |
+| 窗口和输入 | GLFW 3.4 已使用；[Vulkan 支持](https://www.glfw.org/docs/3.4/vulkan_guide.html) 已用于 Instance 与 Surface 初始化 | 当前实现窗口创建、事件等待、关闭、Vulkan 函数获取和窗口 Surface；其他输入能力后续增加 |
 | Vulkan 开发环境 | [LunarG Vulkan SDK](https://vulkan.lunarg.com/) 已使用 | 当前要求头文件至少 1.3；本机验证 SDK 1.4.363.0，运行时版本和验证层另行查询 |
 | 调试界面 | [Dear ImGui](https://github.com/ocornut/imgui) | 提供参数面板及官方 Vulkan 适配，当前不建设完整编辑器 |
 | 数学 | [GLM](https://github.com/g-truc/glm) | 向量、矩阵与四元数；统一并验证坐标、深度和布局约定 |
@@ -368,7 +391,7 @@ Shader 编译与资源状态模型先做最小验证，再逐步完善；不等�
 13. 添加层级和世界 Transform 更新，再单独覆盖重新挂接与删除行为。
 14. 按几何、索引、法线、UV、贴图分别增加模型导入能力。
 
-当前已完成构建、窗口、Vulkan Instance 与诊断回调，以及物理设备、队列族和主线／光追能力报告。下一次代码迭代建议创建窗口 Surface，查询实际 Surface 的队列呈现支持、格式、present mode 和能力限制；再依据结果分别实现设备选择、Device／队列、Swapchain 和清屏提交。
+当前已完成构建、窗口、Vulkan Instance 与诊断回调，以及物理设备、窗口 Surface、队列呈现支持和交换链能力报告。下一次代码迭代建议基于查询结果实现物理设备选择、Device 与队列创建；本机两张设备都具备同一队列族承载 Graphics／Compute／Present 的条件，可优先评估单队列起步。具体必需 feature 与选择规则在该增量明确；Swapchain、清屏提交和 resize／最小化仍分别推进。
 
 ## 验证策略与风险
 

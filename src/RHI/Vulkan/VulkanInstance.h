@@ -4,7 +4,7 @@
 
 namespace madcat::rhi
 {
-// GLFW must remain initialized until this owner has been destroyed.
+// GLFW must outlive this owner. Destroy dependent Surfaces before the Instance.
 class VulkanInstance
 {
 public:
@@ -19,8 +19,7 @@ public:
     // Call once. Any resources created before a failure remain owned here.
     [[nodiscard]] bool initialize();
 
-    // Query support only; no device is selected and no features are enabled.
-    [[nodiscard]] bool reportPhysicalDevices() const;
+    [[nodiscard]] VkInstance handle() const { return instance_; }
 
 private:
     VkInstance instance_ = VK_NULL_HANDLE;
