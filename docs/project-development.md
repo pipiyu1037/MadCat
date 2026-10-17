@@ -2,11 +2,11 @@
 
 MadCat 是一个使用自研 ECS 和 Vulkan 的渲染引擎。前期服务渲染算法研究和图形效果实验，长期考虑游戏与仿真用途。开发者应能加载模型、用 C++ 编写渲染 Pass、连接多个 Pass，并在运行时调整参数、查看中间结果。
 
-本文为开发范围、架构建议、半年计划和验收方法，供项目开发者及协作编码助手使用。文档更新日期为 2026 年 10 月 16 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
+本文为开发范围、架构建议、半年计划和验收方法，供项目开发者及协作编码助手使用。文档更新日期为 2026 年 10 月 17 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
 
 ## 当前实现进度
 
-已完成 CMake 构建入口、最小 GLFW 窗口、Vulkan Instance 与诊断回调、物理设备能力报告，以及窗口 Surface 与呈现能力查询。Instance 与 Surface 已拆成独立 RAII 所有者，物理设备查询返回可复用的数据。程序创建 1280 × 720 的 MadCat 窗口，使用 `GLFW_NO_API`，查询实例级 API 版本、所需扩展和 Debug 验证层，创建 Vulkan Instance 和窗口 Surface 后枚举设备并输出能力报告，再等待窗口事件。关闭后依次释放 Surface、诊断回调、Instance、窗口与 GLFW；初始化、Surface 创建或设备查询失败输出具体诊断并返回非零状态，已创建资源仍由各自所有者清理。
+已完成 CMake 构建入口、最小 GLFW 窗口、Vulkan Instance 与诊断回调、物理设备能力报告、窗口 Surface 与呈现能力查询，以及物理设备选择、逻辑设备和单队列创建。Instance、Surface 与 Device 均为独立 RAII 所有者，物理设备查询返回可复用的数据。程序创建 1280 × 720 的 MadCat 窗口，使用 `GLFW_NO_API`，查询实例级 API 版本、所需扩展和 Debug 验证层，创建 Vulkan Instance 和窗口 Surface 后枚举设备并输出能力报告，再选择设备、创建 Device 与队列，最后等待窗口事件。关闭后依次释放 Device、Surface、诊断回调、Instance、窗口与 GLFW；查询、选择或创建失败输出具体诊断并返回非零状态，已创建资源仍由各自所有者清理。
 
 GLFW 3.4 由 CMake FetchContent 获取，固定到提交 `7b6aead9fb88b3623e3b3725ebb42670cbe4c579`。构建目标要求 C++23。当前采用 Vulkan 1.3 实例级基线，CMake 查找 SDK 的头文件与开发库，通过 `Vulkan::Headers` 提供头文件，Vulkan 函数由 GLFW 动态获取。Debug 必须能找到 `VK_LAYER_KHRONOS_validation` 和 `VK_EXT_debug_utils`，Release 不主动启用验证层。
 
@@ -59,7 +59,17 @@ RTX 5060 Ti 的加速结构几何／实例／primitive 上限分别为 16777215�
 | 22 个 Surface 与 15 个设备能力探针回归 | 全部通过；探针已适配独立 Surface 与数据查询接口 |
 | 新增 18 项封装检查 | Surface 创建前查询设备、数据复制与空 `pNext`、打印不查询 Vulkan、空 Surface／无效设备／跨 Instance 提前拒绝、查询失败保留旧结果及失败后恢复均通过 |
 
-本次使用 Windows 11、CMake 4.4.4、MSVC 19.44.35228、Vulkan SDK 1.4.363.0；设备级 API 与驱动和上表一致，无 Shader 或资产输入。探针、窗口检查脚本和日志放在本地 `build/verification`，属于不纳入版本控制的验证产物。失败探针只替换测试进程中的查询／创建结果，没有修改系统驱动或验证层安装。构建和运行命令见 [README](../README.md)。当前尚未选择设备、创建 Device、Swapchain 或提交 GPU 工作，也未加入 ECS；GPU 同步、Shader 兼容性与求交场景尚未验证，完整半年验收仍按后续计划推进。
+该次封装验证使用 Windows 11、CMake 4.4.4、MSVC 19.44.35228、Vulkan SDK 1.4.363.0；设备级 API 与驱动和上表一致，无 Shader 或资产输入。探针、窗口检查脚本和日志放在本地 `build/verification`，属于不纳入版本控制的验证产物。失败探针只替换测试进程中的查询／创建结果，没有修改系统驱动或验证层安装。构建和运行命令见 [README](../README.md)。
+
+2026 年 10 月 17 日新增 `VulkanDevice`：从配对的 `PhysicalDeviceCandidate` 快照选择设备，仅启用 `VK_KHR_swapchain`、`dynamicRendering` 和 `synchronization2`，获取一个队列族中的队列 0。筛选要求设备级 Vulkan 1.3、上述扩展与 feature、可用的 Surface 格式和呈现模式、颜色附件 usage，以及同一队列族的 Graphics／Compute／Present 支持。合格设备按独显、集显、其他类型排序，同级按枚举顺序，队列族取第一个兼容项。本机已具备统一队列条件，当前采用单队列方案以简化后续同步；暂不支持分离队列，也不将光追能力作为本轮必需条件。具体接口、失败行为和生命周期见 [README](../README.md#vulkan-后端封装)。
+
+| 2026-10-17 Device 增量验证 | 实际结果 |
+|---|---|
+| Debug／Release 构建与实际窗口运行 | 均通过，无编译警告；选中 RTX 5060 Ti，队列族 0／队列 0；关闭返回 0，Device 先于 Surface 和 Instance 释放，Debug 无验证 warning／error |
+| 两张实际设备分别创建 Device | RTX 5060 Ti 与 AMD 集显均成功启用本轮能力并获取队列，Debug 验证无 warning／error；API 和驱动与上表一致 |
+| 39 个模拟场景 | 覆盖 API／扩展／feature／Surface／单队列筛选、快照身份、设备优先级和同级顺序、失败清理、重复初始化、失败恢复、异常退出及设备等待失败，均通过 |
+
+该次使用相同 Windows、CMake、MSVC 和 Vulkan SDK 环境，无 Shader 或资产输入。窗口请求 1280 × 720，本次运行 Surface 实际报告 1028 × 720；后续交换链尺寸仍须以运行时查询为准。当前尚未创建 Swapchain、提交 GPU 工作或加入 ECS；GPU 提交同步、Shader 兼容性与求交场景尚未验证，完整半年验收仍按后续计划推进。
 
 ## 项目目标和开发约束
 
@@ -173,7 +183,7 @@ ECS 保存场景事实，例如局部 Transform、模型资源标识和灯光参
 
 RHI 的目的，是让 Pass 作者通过资源、管线、绑定和命令接口表达算法，并把 Vulkan 对象创建与生命周期集中管理。**当前只有 Vulkan 后端，不建立为多 API 服务的后端工厂、能力交集或虚函数层级。** 抽象是否需要存在，以它能否减少 Pass 的重复工作为依据。
 
-当前 Instance 初始化已采用 Vulkan 1.3 API 基线。后续建议使用 Dynamic Rendering 和 Synchronization2。两者已进入 Vulkan 1.3 核心，但创建 Device 前仍需查询设备版本并查询、启用所需 feature，不能仅凭实例版本或显卡型号假定可用。[Vulkan 核心版本说明](https://docs.vulkan.org/spec/latest/appendices/versions.html)
+当前 Instance 与所选设备均采用 Vulkan 1.3 API 基线，Device 创建已显式启用 Dynamic Rendering 和 Synchronization2，后续绘制与同步将使用这两项能力。两者已进入 Vulkan 1.3 核心，创建 Device 前仍查询设备版本并查询、启用所需 feature，不凭实例版本或显卡型号假定可用。[Vulkan 核心版本说明](https://docs.vulkan.org/spec/latest/appendices/versions.html)
 
 按实际 Pass 需求逐步提供：
 
@@ -391,7 +401,7 @@ Shader 编译与资源状态模型先做最小验证，再逐步完善；不等�
 13. 添加层级和世界 Transform 更新，再单独覆盖重新挂接与删除行为。
 14. 按几何、索引、法线、UV、贴图分别增加模型导入能力。
 
-当前已完成构建、窗口、Vulkan Instance 与诊断回调，以及物理设备、窗口 Surface、队列呈现支持和交换链能力报告。下一次代码迭代建议基于查询结果实现物理设备选择、Device 与队列创建；本机两张设备都具备同一队列族承载 Graphics／Compute／Present 的条件，可优先评估单队列起步。具体必需 feature 与选择规则在该增量明确；Swapchain、清屏提交和 resize／最小化仍分别推进。
+当前已完成构建、窗口、Vulkan Instance 与诊断回调、设备与 Surface 能力报告，以及设备选择、Device 和单队列创建。下一次最小增量建议实现 Swapchain 的配置、创建与销毁，创建前刷新所选设备的 Surface 支持快照；清屏提交与帧同步、resize／最小化及交换链重建随后分别推进。
 
 ## 验证策略与风险
 

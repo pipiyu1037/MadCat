@@ -18,6 +18,7 @@ FetchContent_MakeAvailable(glfw)
 
 add_executable(MadCat
     apps/Sandbox/main.cpp
+    src/RHI/Vulkan/VulkanDevice.cpp
     src/RHI/Vulkan/VulkanInstance.cpp
     src/RHI/Vulkan/VulkanPhysicalDevice.cpp
     src/RHI/Vulkan/VulkanSurface.cpp

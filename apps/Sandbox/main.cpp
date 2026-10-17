@@ -1,6 +1,7 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
+#include "RHI/Vulkan/VulkanDevice.h"
 #include "RHI/Vulkan/VulkanInstance.h"
 #include "RHI/Vulkan/VulkanPhysicalDevice.h"
 #include "RHI/Vulkan/VulkanSurface.h"
@@ -8,11 +9,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <utility>
 #include <vector>
 
 namespace
 {
-bool reportPhysicalDevices(const madcat::rhi::VulkanInstance& instance, const madcat::rhi::VulkanSurface& surface)
+bool initializeDevice(const madcat::rhi::VulkanInstance& instance, const madcat::rhi::VulkanSurface& surface, madcat::rhi::VulkanDevice& device)
 {
     std::vector<madcat::rhi::PhysicalDeviceInfo> devices;
     if (!madcat::rhi::queryPhysicalDevices(instance, devices))
@@ -20,6 +22,8 @@ bool reportPhysicalDevices(const madcat::rhi::VulkanInstance& instance, const ma
         return false;
     }
     std::fprintf(stderr, "Vulkan: found %zu physical device(s).\n", devices.size());
+    std::vector<madcat::rhi::PhysicalDeviceCandidate> candidates;
+    candidates.reserve(devices.size());
     for (size_t deviceIndex = 0; deviceIndex < devices.size(); ++deviceIndex)
     {
         madcat::rhi::SurfaceSupport support;
@@ -28,9 +32,10 @@ bool reportPhysicalDevices(const madcat::rhi::VulkanInstance& instance, const ma
             return false;
         }
         madcat::rhi::printPhysicalDeviceReport(devices[deviceIndex], support, deviceIndex);
+        candidates.push_back({std::move(devices[deviceIndex]), std::move(support)});
     }
-    std::fprintf(stderr, "Vulkan: physical device capability report complete; no device selected or features enabled.\n");
-    return true;
+    std::fprintf(stderr, "Vulkan: physical device capability report complete.\n");
+    return device.initialize(candidates);
 }
 }
 
@@ -59,7 +64,8 @@ int main()
     {
         madcat::rhi::VulkanInstance vulkan;
         madcat::rhi::VulkanSurface surface;
-        if (vulkan.initialize() && surface.initialize(vulkan, window) && reportPhysicalDevices(vulkan, surface))
+        madcat::rhi::VulkanDevice device;
+        if (vulkan.initialize() && surface.initialize(vulkan, window) && initializeDevice(vulkan, surface, device))
         {
             while (!glfwWindowShouldClose(window))
             {
@@ -67,7 +73,7 @@ int main()
             }
             exitCode = EXIT_SUCCESS;
         }
-        // Surface and Instance are destroyed before the window and GLFW loader.
+        // Device, Surface and Instance are destroyed before the window and GLFW loader.
     }
     catch (const std::exception& error)
     {

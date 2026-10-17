@@ -1,10 +1,10 @@
 # MadCat
 
-使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前实现了 GLFW 窗口、Vulkan Instance 与 Surface、Debug 验证层诊断，以及设备和窗口呈现能力报告。
+使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前实现了 GLFW 窗口、Vulkan Instance 与 Surface、Debug 验证层诊断、设备和窗口呈现能力报告，以及物理设备选择、逻辑设备与单队列创建。
 
 ## 构建与运行
 
-需要 Windows 11、Visual Studio 2022 的 C++ 桌面开发工具、CMake 3.25 或更新版本、Git，以及 [Vulkan SDK](https://vulkan.lunarg.com/)（头文件版本至少 1.3，本机验证版本为 1.4.363.0）。运行时需要 Vulkan loader 和显卡驱动，实例级 API 必须支持 Vulkan 1.3 或更新版本。
+需要 Windows 11、Visual Studio 2022 的 C++ 桌面开发工具、CMake 3.25 或更新版本、Git，以及 [Vulkan SDK](https://vulkan.lunarg.com/)（头文件版本至少 1.3，本机验证版本为 1.4.363.0）。运行时需要 Vulkan loader 和显卡驱动，实例及所选物理设备的 API 必须支持 Vulkan 1.3 或更新版本；设备还需满足下文的基础渲染条件。
 
 安装 SDK 后重新打开 PowerShell，确认 `$env:VULKAN_SDK` 指向 SDK 安装目录。Debug 构建要求 `VK_LAYER_KHRONOS_validation` 可用；缺少验证层时会输出诊断并退出。
 
@@ -18,9 +18,9 @@ cmake --build build --config Debug
 
 首次配置通过 CMake FetchContent 获取固定提交的 GLFW 3.4，需要访问 GitHub；依赖源码和构建产物位于 `build` 下。
 
-程序创建一个 1280 × 720、标题为 MadCat 的可调整大小窗口，查询实例级 API 版本和所需扩展，创建 Vulkan Instance 与该窗口的 Surface，并输出全部物理设备的能力报告。Debug 构建启用验证层，输出 warning／error 诊断及消息标识；Release 构建关闭应用主动启用的验证层。点击关闭按钮后依次销毁 Surface、诊断回调、Instance、窗口与 GLFW。初始化、Surface 创建或设备查询失败时返回非零状态，已创建资源仍按此顺序释放。
+程序创建一个 1280 × 720、标题为 MadCat 的可调整大小窗口，查询实例级 API 版本和所需扩展，创建 Vulkan Instance 与该窗口的 Surface，并输出全部物理设备的能力报告。随后选择物理设备、创建逻辑设备并获取一个 Graphics／Compute／Present 队列。Debug 构建启用验证层，输出 warning／error 诊断及消息标识；Release 构建关闭应用主动启用的验证层。点击关闭按钮后依次销毁 Device、Surface、诊断回调、Instance、窗口与 GLFW。查询、选择或创建失败时返回非零状态，已创建资源仍由各自所有者释放。
 
-正常 Debug 启动日志包含以下内容，关闭窗口后依次输出 `Vulkan: Surface destroyed.` 和 `Vulkan: Instance destroyed.`：
+正常 Debug 启动日志包含以下内容，关闭窗口后依次输出 `Device destroyed.`、`Surface destroyed.` 和 `Instance destroyed.`，各行均以 `Vulkan:` 开头：
 
 ```text
 Vulkan: instance-level API support <运行时版本>; requesting 1.3.0.
@@ -29,7 +29,10 @@ Vulkan: validation enabled (VK_LAYER_KHRONOS_validation); diagnostic callback re
 Vulkan: window Surface created.
 Vulkan: found <数量> physical device(s).
 <每张设备的属性、队列族、Surface 能力、扩展、feature 和加速结构限制>
-Vulkan: physical device capability report complete; no device selected or features enabled.
+Vulkan: physical device capability report complete.
+<各设备的筛选结果，以及选中设备与队列族>
+Vulkan: Device created; queue family <索引>, queue 0 (Graphics/Compute/Present).
+Vulkan: enabled VK_KHR_swapchain, dynamicRendering and synchronization2; ray tracing features remain disabled.
 ```
 
 窗口使用 `GLFW_NO_API`，目前使用 `glfwWaitEvents()` 等待事件。Vulkan 函数通过 GLFW 动态获取，CMake 使用 `Vulkan::Headers` 提供头文件。[GLFW Vulkan 指南](https://www.glfw.org/docs/3.4/vulkan_guide.html)、[CMake FindVulkan](https://cmake.org/cmake/help/latest/module/FindVulkan.html)
@@ -40,7 +43,9 @@ Vulkan: physical device capability report complete; no device selected or featur
 
 报告还输出加速结构限制，并检查计算 Ray Query 所需的 feature、Compute 队列和扩展依赖；缺失时说明原因，仍继续报告其他设备。没有物理设备、查询函数缺失或枚举失败时，程序报告错误并退出。
 
-当前已创建 Surface 并查询呈现支持，尚未选择设备、启用 feature 或创建 Device、Swapchain，也没有提交 GPU 工作或绘制内容。Surface 报告是启动时的查询结果，窗口尺寸变化后需重新查询才能用于交换链配置；Ray Query 前置条件可用仍需 Slang 编译与 GPU 求交探针验证。
+设备筛选要求设备级 Vulkan 1.3、`VK_KHR_swapchain`、可查询且支持的 `dynamicRendering`／`synchronization2`，以及非空的 Surface 格式和呈现模式、颜色附件 usage 和同一队列族的 Graphics／Compute／Present 支持。合格设备中按独显、集显、其他类型排序，同级保留枚举顺序，选择第一个兼容队列族。日志说明拒绝原因和最终选择；创建失败会报告操作、`VkResult` 与设备信息。当前仅启用上述扩展和两项 feature，光追能力不作为本轮硬性条件，也不启用光追 feature。Vulkan 1.3 的两项核心 feature 仍需显式启用，不要求同名 KHR 扩展列出。[Device 创建](https://docs.vulkan.org/refpages/latest/refpages/source/vkCreateDevice.html)、[Vulkan 1.3 feature 启用](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceVulkan13Features.html)
+
+当前尚未创建 Swapchain、提交 GPU 工作或绘制内容。Surface 报告是启动时的查询结果，创建或重建交换链前需重新查询；Ray Query 前置条件可用仍需 Slang 编译与 GPU 求交探针验证。当前仅支持一个队列族同时承担渲染、计算和呈现，不支持分离队列配置。
 
 ## Vulkan 后端封装
 
@@ -50,10 +55,14 @@ Vulkan: physical device capability report complete; no device selected or featur
 | [`VulkanSurface`](src/RHI/Vulkan/VulkanSurface.h) | 独立拥有 Surface，通过 RAII 清理；借用 Instance 和窗口，禁止复制与移动 |
 | [`PhysicalDeviceInfo`](src/RHI/Vulkan/VulkanPhysicalDevice.h) | 保存可复制的设备属性、队列族、扩展、feature 和加速结构限制；借用物理设备句柄，不销毁设备 |
 | `SurfaceSupport` | 保存一次设备／Surface 组合查询的呈现支持和能力快照 |
+| `PhysicalDeviceCandidate` | 配对保存设备信息与该设备的 Surface 支持快照，供设备筛选使用 |
+| [`VulkanDevice`](src/RHI/Vulkan/VulkanDevice.h) | 从候选快照中选择设备，拥有逻辑设备，提供借用的物理设备及单队列句柄、队列族索引 |
 
 `queryPhysicalDevices(instance, devices)` 不要求先创建 Surface。`querySurfaceSupport(device, surface, support)` 检查两者属于同一个 Instance，然后查询实际窗口支持；`printPhysicalDeviceReport` 仅打印数据，不再查询 Vulkan。两种查询都在成功时整体替换输出，失败时保留原结果；保存的数据不包含指向临时查询结构的 `pNext` 指针。
 
-组装顺序见 [`Sandbox`](apps/Sandbox/main.cpp)：Surface 所有者在 Instance 所有者之后声明，保证先销毁 Surface。窗口和 Instance 须活到 Surface 释放后；设备信息的复制不会延长 Instance 生命周期。未来的 Swapchain 必须在关联 Surface 之前销毁。上述类型和原始句柄仅用于 Vulkan 后端及程序组装。
+`VulkanDevice::initialize(candidates)` 只在调用期间读取候选数据，要求所有快照属于同一个 Instance 和 Surface。创建失败时保持空状态并释放部分创建的 Device；重复初始化被拒绝且保留现有 Device。队列不单独销毁，其句柄在 Device 释放时失效。Device 命令通过 `vkGetDeviceProcAddr` 获取；创建前已解析核心销毁函数，确保命令加载失败仍能清理。
+
+组装顺序见 [`Sandbox`](apps/Sandbox/main.cpp)：依次声明 Instance、Surface 和 Device，保证反向销毁；窗口和 Instance 须活到 Surface 释放后，Instance 也须活到 Device 释放后。Device 析构时等待设备空闲再销毁，等待失败仍报告诊断并销毁 Device。未来的 GPU 子资源必须在相关 GPU 工作完成后、Device 销毁前释放，不能依赖最后的析构等待保护更早发生的子资源销毁；Swapchain 也必须在关联 Surface 之前销毁。[Device 销毁要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroyDevice.html) 查询数据的复制不会延长 Instance 生命周期。上述类型和原始句柄仅用于 Vulkan 后端及程序组装。
 
 ## 常见初始化问题
 
@@ -66,5 +75,7 @@ Vulkan: physical device capability report complete; no device selected or featur
 | Vulkan API 调用失败 | 日志包含操作名称与数值 `VkResult`；同时检查此前的验证消息 |
 | 没有物理设备或设备查询失败 | 检查 Vulkan 驱动及搜索配置，并查看失败操作名称和设备标识 |
 | Surface 创建或能力查询失败 | 检查此前的 GLFW／Vulkan 诊断；日志保留失败操作、`VkResult` 以及查询涉及的设备／队列信息 |
+| 没有合适的物理设备 | 查看每张设备的拒绝原因；当前要求设备级 Vulkan 1.3、基础渲染 feature 和单个 Graphics／Compute／Present 队列族 |
+| Device 创建或队列获取失败 | 查看 `vkCreateDevice` 的 `VkResult`、选中设备及队列族，或缺失函数／空队列诊断；部分创建的 Device 会释放 |
 
 完整需求和后续计划见 [项目开发文档](docs/project-development.md)，协作规则见 [AGENTS.md](AGENTS.md)。
