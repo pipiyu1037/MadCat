@@ -29,18 +29,22 @@ public:
 
     // Select and create a Vulkan 1.3 Device with one Graphics/Compute/Present
     // queue. All candidates must belong to the same Instance and Surface.
-    // Snapshots are only read during this call. Initial creation failure leaves
-    // this owner empty; repeated initialization preserves the existing Device.
+    // Copies the selected physical device data; Surface support is not retained.
+    // Initial creation failure leaves this owner empty; repeated initialization
+    // preserves the existing Device.
     [[nodiscard]] bool initialize(std::span<const PhysicalDeviceCandidate> candidates);
 
     [[nodiscard]] VkDevice handle() const { return device_; }
-    [[nodiscard]] VkPhysicalDevice physicalDevice() const { return physicalDevice_; }
+    [[nodiscard]] VkPhysicalDevice physicalDevice() const { return physicalDeviceInfo_.handle; }
+    // Owned query data, with borrowed Instance/physical device handles. This
+    // reference remains valid until Device destruction; empty before initialize.
+    [[nodiscard]] const PhysicalDeviceInfo& physicalDeviceInfo() const { return physicalDeviceInfo_; }
     [[nodiscard]] VkQueue queue() const { return queue_; }
     [[nodiscard]] uint32_t queueFamilyIndex() const { return queueFamilyIndex_; }
 
 private:
     VkDevice device_ = VK_NULL_HANDLE;
-    VkPhysicalDevice physicalDevice_ = VK_NULL_HANDLE;
+    PhysicalDeviceInfo physicalDeviceInfo_;
     VkQueue queue_ = VK_NULL_HANDLE;
     uint32_t queueFamilyIndex_ = UINT32_MAX;
     PFN_vkDestroyDevice destroyDevice_ = nullptr;

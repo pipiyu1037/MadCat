@@ -5,6 +5,7 @@
 #include "RHI/Vulkan/VulkanInstance.h"
 #include "RHI/Vulkan/VulkanPhysicalDevice.h"
 #include "RHI/Vulkan/VulkanSurface.h"
+#include "RHI/Vulkan/VulkanSwapchain.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -37,6 +38,15 @@ bool initializeDevice(const madcat::rhi::VulkanInstance& instance, const madcat:
     std::fprintf(stderr, "Vulkan: physical device capability report complete.\n");
     return device.initialize(candidates);
 }
+
+bool initializeSwapchain(const madcat::rhi::VulkanDevice& device, const madcat::rhi::VulkanSurface& surface,
+    GLFWwindow* window, madcat::rhi::VulkanSwapchain& swapchain)
+{
+    int width = 0;
+    int height = 0;
+    glfwGetFramebufferSize(window, &width, &height);
+    return swapchain.initialize(device, surface, {static_cast<uint32_t>(width), static_cast<uint32_t>(height)});
+}
 }
 
 int main()
@@ -65,7 +75,9 @@ int main()
         madcat::rhi::VulkanInstance vulkan;
         madcat::rhi::VulkanSurface surface;
         madcat::rhi::VulkanDevice device;
-        if (vulkan.initialize() && surface.initialize(vulkan, window) && initializeDevice(vulkan, surface, device))
+        madcat::rhi::VulkanSwapchain swapchain;
+        if (vulkan.initialize() && surface.initialize(vulkan, window) && initializeDevice(vulkan, surface, device) &&
+            initializeSwapchain(device, surface, window, swapchain))
         {
             while (!glfwWindowShouldClose(window))
             {
@@ -73,7 +85,8 @@ int main()
             }
             exitCode = EXIT_SUCCESS;
         }
-        // Device, Surface and Instance are destroyed before the window and GLFW loader.
+        // No GPU work is submitted yet. Swapchain is released before Device and
+        // Surface; all Vulkan owners are destroyed before the window/GLFW loader.
     }
     catch (const std::exception& error)
     {

@@ -2,11 +2,11 @@
 
 MadCat 是一个使用自研 ECS 和 Vulkan 的渲染引擎。前期服务渲染算法研究和图形效果实验，长期考虑游戏与仿真用途。开发者应能加载模型、用 C++ 编写渲染 Pass、连接多个 Pass，并在运行时调整参数、查看中间结果。
 
-本文为开发范围、架构建议、半年计划和验收方法，供项目开发者及协作编码助手使用。文档更新日期为 2026 年 10 月 17 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
+本文为开发范围、架构建议、半年计划和验收方法，供项目开发者及协作编码助手使用。文档更新日期为 2026 年 10 月 22 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
 
 ## 当前实现进度
 
-已完成 CMake 构建入口、最小 GLFW 窗口、Vulkan Instance 与诊断回调、物理设备能力报告、窗口 Surface 与呈现能力查询，以及物理设备选择、逻辑设备和单队列创建。Instance、Surface 与 Device 均为独立 RAII 所有者，物理设备查询返回可复用的数据。程序创建 1280 × 720 的 MadCat 窗口，使用 `GLFW_NO_API`，查询实例级 API 版本、所需扩展和 Debug 验证层，创建 Vulkan Instance 和窗口 Surface 后枚举设备并输出能力报告，再选择设备、创建 Device 与队列，最后等待窗口事件。关闭后依次释放 Device、Surface、诊断回调、Instance、窗口与 GLFW；查询、选择或创建失败输出具体诊断并返回非零状态，已创建资源仍由各自所有者清理。
+已完成 CMake 构建入口、最小 GLFW 窗口、Vulkan Instance 与诊断回调、物理设备能力报告、窗口 Surface 与呈现能力查询，以及物理设备选择、逻辑设备、单队列和 Swapchain 创建。Instance、Surface、Device 与 Swapchain 均为独立 RAII 所有者，物理设备查询返回可复用的数据。程序创建 1280 × 720 的 MadCat 窗口，使用 `GLFW_NO_API`，查询实例级 API 版本、所需扩展和 Debug 验证层，创建 Vulkan Instance 和窗口 Surface 后枚举设备并输出能力报告，再选择设备、创建 Device 与队列，刷新所选设备的 Surface 支持后创建 Swapchain 并获取图像，最后等待窗口事件。关闭后依次释放 Swapchain、Device、Surface、诊断回调、Instance、窗口与 GLFW；查询、选择或创建失败输出具体诊断并返回非零状态，已创建资源仍由各自所有者清理。
 
 GLFW 3.4 由 CMake FetchContent 获取，固定到提交 `7b6aead9fb88b3623e3b3725ebb42670cbe4c579`。构建目标要求 C++23。当前采用 Vulkan 1.3 实例级基线，CMake 查找 SDK 的头文件与开发库，通过 `Vulkan::Headers` 提供头文件，Vulkan 函数由 GLFW 动态获取。Debug 必须能找到 `VK_LAYER_KHRONOS_validation` 和 `VK_EXT_debug_utils`，Release 不主动启用验证层。
 
@@ -69,7 +69,18 @@ RTX 5060 Ti 的加速结构几何／实例／primitive 上限分别为 16777215�
 | 两张实际设备分别创建 Device | RTX 5060 Ti 与 AMD 集显均成功启用本轮能力并获取队列，Debug 验证无 warning／error；API 和驱动与上表一致 |
 | 39 个模拟场景 | 覆盖 API／扩展／feature／Surface／单队列筛选、快照身份、设备优先级和同级顺序、失败清理、重复初始化、失败恢复、异常退出及设备等待失败，均通过 |
 
-该次使用相同 Windows、CMake、MSVC 和 Vulkan SDK 环境，无 Shader 或资产输入。窗口请求 1280 × 720，本次运行 Surface 实际报告 1028 × 720；后续交换链尺寸仍须以运行时查询为准。当前尚未创建 Swapchain、提交 GPU 工作或加入 ECS；GPU 提交同步、Shader 兼容性与求交场景尚未验证，完整半年验收仍按后续计划推进。
+该次使用相同 Windows、CMake、MSVC 和 Vulkan SDK 环境，无 Shader 或资产输入。窗口请求 1280 × 720，该次运行 Surface 实际报告 1028 × 720，说明交换链尺寸必须以运行时查询为准；当时尚未创建 Swapchain 或提交 GPU 工作。
+
+2026 年 10 月 22 日新增 `VulkanSwapchain`：Device 保留所选物理设备的数据副本，交换链初始化时使用该数据重新查询 Surface 支持，并确认所选队列仍可呈现。交换链优先使用 `B8G8R8A8_SRGB`／`SRGB_NONLINEAR`，否则保留第一个具体格式组合；采用 FIFO、单队列独占共享和颜色附件 usage。图像数量在 Surface 最小值上加一并受非零最大值限制；尺寸优先采用 Surface 固定值，否则将 framebuffer 像素尺寸约束到支持范围。使用当前 transform，composite alpha 按 Opaque、Pre-multiplied、Post-multiplied、Inherit 顺序选择受支持项。完整接口、错误行为和生命周期见 [README](../README.md#vulkan-后端封装)。[创建参数要求](https://docs.vulkan.org/refpages/latest/refpages/source/VkSwapchainCreateInfoKHR.html)
+
+| 2026-10-22 Swapchain 增量验证 | 实际结果 |
+|---|---|
+| Debug／Release 构建与实际窗口运行 | 均通过，无编译警告；1280 × 720、sRGB 格式、FIFO、3 张图像；关闭返回 0，Swapchain 先于 Device、Surface 和 Instance 释放，Debug 无验证 warning／error |
+| 两张实际 GPU 分别创建 Swapchain | RTX 5060 Ti 与 AMD 集显均成功创建 320 × 240、sRGB／FIFO／3 张图像的交换链并正常释放，Debug 无验证 warning／error |
+| 27 个配置与 15 个模拟生命周期场景 | 覆盖格式回退、FIFO、固定／可变像素尺寸、图像数量限制和溢出、transform／alpha、无效配置、创建前刷新、函数缺失、创建／枚举失败、空／不足／无效图像、枚举异常清理、重复初始化、失败恢复及 `VK_INCOMPLETE` 重试，均通过 |
+| 原有 39 个 Device 模拟场景回归 | 全部通过；保留物理设备数据副本未改变筛选和失败清理行为 |
+
+该次环境为 Windows 11、CMake 4.4.4、MSVC 19.44.35228、Vulkan SDK 1.4.363.0；GPU API／驱动与上表一致，无 Shader 或资产输入。验证脚本、探针与日志保存在本地 `build/verification`，不纳入 Git。Swapchain 图像由交换链管理，调用方只借用句柄；销毁前仍须完成所有图像使用并释放依赖对象，交换链析构不自动等待 GPU。[销毁要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroySwapchainKHR.html) 当前尚未 acquire、提交、呈现或创建图像视图；零像素尺寸会报告失败，resize／最小化恢复和重建仍待实现。GPU 提交同步、Shader 兼容性与求交场景尚未验证，完整半年验收仍按后续计划推进。
 
 ## 项目目标和开发约束
 
@@ -401,7 +412,7 @@ Shader 编译与资源状态模型先做最小验证，再逐步完善；不等�
 13. 添加层级和世界 Transform 更新，再单独覆盖重新挂接与删除行为。
 14. 按几何、索引、法线、UV、贴图分别增加模型导入能力。
 
-当前已完成构建、窗口、Vulkan Instance 与诊断回调、设备与 Surface 能力报告，以及设备选择、Device 和单队列创建。下一次最小增量建议实现 Swapchain 的配置、创建与销毁，创建前刷新所选设备的 Surface 支持快照；清屏提交与帧同步、resize／最小化及交换链重建随后分别推进。
+当前已完成构建、窗口、Vulkan Instance 与诊断回调、设备与 Surface 能力报告、设备选择、Device 和单队列，以及 Swapchain 的配置、创建与销毁。下一次最小增量建议实现一个在途帧的清屏提交与 acquire／present 同步，建立命令记录、图像状态转换和完成条件；resize／最小化及交换链重建随后单独推进。
 
 ## 验证策略与风险
 

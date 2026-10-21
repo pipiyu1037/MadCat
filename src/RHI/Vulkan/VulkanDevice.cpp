@@ -3,6 +3,7 @@
 #include "VulkanFunctions.h"
 
 #include <optional>
+#include <utility>
 
 namespace
 {
@@ -132,6 +133,8 @@ bool VulkanDevice::initialize(std::span<const PhysicalDeviceCandidate> candidate
     {
         return false;
     }
+    // Copy before acquiring a Device so allocation failure cannot leak it.
+    auto selectedInfo = *selected;
     const float priority = 1.0f;
     VkDeviceQueueCreateInfo queueInfo{};
     queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -175,7 +178,7 @@ bool VulkanDevice::initialize(std::span<const PhysicalDeviceCandidate> candidate
         return false;
     }
     device_ = createdDevice;
-    physicalDevice_ = selected->handle;
+    physicalDeviceInfo_ = std::move(selectedInfo);
     queue_ = queue;
     queueFamilyIndex_ = queueFamilyIndex;
     destroyDevice_ = destroyDevice;
