@@ -6,9 +6,9 @@ MadCat 是一个使用自研 ECS 和 Vulkan 的渲染引擎。前期服务渲染
 
 ## 当前实现进度
 
-已完成 CMake 构建入口、最小 GLFW 窗口、Vulkan Instance 与诊断回调、物理设备能力报告、窗口 Surface 与呈现能力查询，以及物理设备选择、逻辑设备、单队列和 Swapchain 创建。Instance、Surface、Device 与 Swapchain 均为独立 RAII 所有者，物理设备查询返回可复用的数据。程序创建 1280 × 720 的 MadCat 窗口，使用 `GLFW_NO_API`，查询实例级 API 版本、所需扩展和 Debug 验证层，创建 Vulkan Instance 和窗口 Surface 后枚举设备并输出能力报告，再选择设备、创建 Device 与队列，刷新所选设备的 Surface 支持后创建 Swapchain 并获取图像，最后等待窗口事件。关闭后依次释放 Swapchain、Device、Surface、诊断回调、Instance、窗口与 GLFW；查询、选择或创建失败输出具体诊断并返回非零状态，已创建资源仍由各自所有者清理。
+已完成 CMake 构建入口、GLFW 窗口、Vulkan Instance 与诊断回调、设备及 Surface 能力报告、设备选择、Device／单队列、Swapchain，以及一个在途帧的持续清屏、同步和窗口 resize／最小化恢复时的交换链重建。程序创建 1280 × 720 的 MadCat 窗口，后端记录动态渲染清屏、状态转换和 acquire／submit／present；重建与关闭前均等待 GPU 提交及呈现资源退役。零像素尺寸或最小化时等待事件，窗口恢复后重建并继续渲染，也可在最小化时关闭；不可恢复错误返回非零状态。
 
-GLFW 3.4 由 CMake FetchContent 获取，固定到提交 `7b6aead9fb88b3623e3b3725ebb42670cbe4c579`。构建目标要求 C++23。当前采用 Vulkan 1.3 实例级基线，CMake 查找 SDK 的头文件与开发库，通过 `Vulkan::Headers` 提供头文件，Vulkan 函数由 GLFW 动态获取。Debug 必须能找到 `VK_LAYER_KHRONOS_validation` 和 `VK_EXT_debug_utils`，Release 不主动启用验证层。
+GLFW 3.4 由 CMake FetchContent 获取，固定到提交 `7b6aead9fb88b3623e3b3725ebb42670cbe4c579`。构建目标要求 C++23。运行时采用 Vulkan 1.3 实例级基线；CMake 查找 Vulkan 1.3.239 或更新头文件，以提供 EXT maintenance1 类型，通过 `Vulkan::Headers` 提供头文件，Vulkan 函数由 GLFW 动态获取。Debug 必须能找到 `VK_LAYER_KHRONOS_validation` 和 `VK_EXT_debug_utils`，Release 不主动启用验证层。清屏路径额外要求 EXT `swapchainMaintenance1` 和对应实例依赖；基础设备初始化仍保留原支持范围。
 
 2026 年 10 月 13 日使用 CMake 4.4.4、MSVC 19.44.35228、Vulkan SDK 1.4.363.0 完成 Debug 和 Release 构建，未出现编译警告。运行时查询得到实例级 API 1.4.363。MadCat 已枚举本机物理设备，分别查询名称、类型、设备级 API、原始驱动版本和可用的驱动属性、队列族及主线／光追相关扩展。
 
@@ -80,7 +80,34 @@ RTX 5060 Ti 的加速结构几何／实例／primitive 上限分别为 16777215�
 | 27 个配置与 15 个模拟生命周期场景 | 覆盖格式回退、FIFO、固定／可变像素尺寸、图像数量限制和溢出、transform／alpha、无效配置、创建前刷新、函数缺失、创建／枚举失败、空／不足／无效图像、枚举异常清理、重复初始化、失败恢复及 `VK_INCOMPLETE` 重试，均通过 |
 | 原有 39 个 Device 模拟场景回归 | 全部通过；保留物理设备数据副本未改变筛选和失败清理行为 |
 
-该次环境为 Windows 11、CMake 4.4.4、MSVC 19.44.35228、Vulkan SDK 1.4.363.0；GPU API／驱动与上表一致，无 Shader 或资产输入。验证脚本、探针与日志保存在本地 `build/verification`，不纳入 Git。Swapchain 图像由交换链管理，调用方只借用句柄；销毁前仍须完成所有图像使用并释放依赖对象，交换链析构不自动等待 GPU。[销毁要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroySwapchainKHR.html) 当前尚未 acquire、提交、呈现或创建图像视图；零像素尺寸会报告失败，resize／最小化恢复和重建仍待实现。GPU 提交同步、Shader 兼容性与求交场景尚未验证，完整半年验收仍按后续计划推进。
+该次环境为 Windows 11、CMake 4.4.4、MSVC 19.44.35228、Vulkan SDK 1.4.363.0；GPU API／驱动与上表一致，无 Shader 或资产输入。验证脚本、探针与日志保存在本地 `build/verification`，不纳入 Git。Swapchain 图像由交换链管理，调用方只借用句柄；销毁前仍须完成所有图像使用并释放依赖对象，交换链析构不自动等待 GPU。[销毁要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroySwapchainKHR.html) 该交换链增量当时尚未 acquire、提交或呈现；后续清屏增量的证据见下文。
+
+同日的下一增量新增 `VulkanClearRenderer`，在后端创建图像视图、一个命令池／命令缓冲、两个二进制信号量及 acquire／submit／present Fence，通过动态渲染的颜色附件 CLEAR／STORE 清屏，usage 仍为颜色附件，无 Shader 或管线。首次使用图像从 `UNDEFINED` 转换，后续从 `PRESENT_SRC_KHR` 转换到颜色附件，完成后转换回呈现状态；帧资源复用和退出均等待各项实际完成条件。
+
+为严格确认呈现资源可释放，本轮启用可用的 `VK_EXT_surface_maintenance1` 及其 `VK_KHR_get_surface_capabilities2` 实例依赖，查询并按支持启用设备 EXT `swapchainMaintenance1`，通过呈现 Fence 退役资源。提交 Fence／单独的 Device idle 不能替代此条件。该选择服务当前正确性目标；基础设备排序未变，清屏器在缺少能力时明确拒绝初始化，暂不接入 KHR 别名或自动改选设备。[官方呈现同步说明](https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html)
+
+| 2026-10-22 清屏增量验证 | 实际结果 |
+|---|---|
+| Debug／Release 构建与持续清屏 | 均通过，无编译警告；RTX 5060 Ti、1280 × 720、sRGB／FIFO／3 张图像，均持续呈现超过 120 帧后正常关闭 |
+| 图像内容 | 截图中心 RGB `(56, 80, 111)`，符合线性清屏色 `(0.04, 0.08, 0.16)` 的 sRGB 编码 |
+| Debug 验证层与同步验证 | 使用 `VK_LAYER_VALIDATE_SYNC=1`，正常运行、resize 停绘、最小化停绘与退出均无 warning／error；按清屏器 → Swapchain → Device → Surface → Instance 释放 |
+| 56 个模拟场景 | 覆盖帧复用、图像状态、函数缺失、部分创建失败与恢复、获取超时、suboptimal／out-of-date、录制／提交／呈现失败及 Fence 等待失败后清理；全部通过 |
+| 两张实际 GPU | RTX 5060 Ti 单独运行 30 帧并安全退役；AMD 集显仍可创建 Device／Swapchain，缺少 EXT maintenance1 时按预期拒绝清屏 |
+| 原有探针回归 | Swapchain 的 42 个配置／生命周期场景、Device 的 39 个场景及设备能力模拟探针通过 |
+
+该清屏增量当时仅在 resize／最小化／WSI 状态变化后停绘；后续重建增量见下文。acquire 使用 50 ms 有限超时；suboptimal acquisition 先完成提交与呈现再处理重建。不可恢复帧错误停止后续提交；退出时完成等待若再次失败则终止进程，避免释放无法确认完成的资源，设备丢失恢复未实现。当前证据不代表三角形、Shader、Render Graph 或完整第一阶段已完成。探针、脚本、截图和日志仍是 `build/verification` 中不纳入 Git 的本机产物。
+
+同日的重建增量由 Sandbox 的 `SandboxApplication` 管理窗口事件和可替换的 `Presentation`（先声明 Swapchain，再声明清屏器）。尺寸变化或 out-of-date／suboptimal 请求重建时，先等待全部相关完成条件，再依次释放清屏器、交换链，重新查询 Surface 支持并创建新资源。采用同步等待、先销毁后创建以保持当前机制简单，不使用 `oldSwapchain` 复用；重建失败清理部分资源并安全退出。最小化／零尺寸时暂停获取图像和创建，使用事件等待恢复；Windows 刷新回调调用受重入保护、异常不跨 C 边界的同一渲染入口，支持原生拖动缩放期间更新。[GLFW 刷新回调](https://www.glfw.org/docs/3.4/window_guide.html#window_refresh)
+
+| 2026-10-22 重建增量验证 | 实际结果 |
+|---|---|
+| Debug／Release 构建与窗口恢复 | 均通过；多次缩小／放大及两次最小化恢复后，Swapchain 尺寸与实际 framebuffer 一致，每次九点像素均为预期清屏色 |
+| Windows 原生缩放模态循环 | 在系统模态循环未退出时已通过刷新回调完成新尺寸呈现，九点像素检查通过 |
+| 连续变化与退出 | Debug 连续 24 次尺寸变化、4 次快速最小化恢复后最终画面正确；最小化期间关闭返回 0，各场景资源创建／销毁数量一致 |
+| 验证层与同步验证 | RTX 5060 Ti；上述 Debug 场景开启 `VK_LAYER_VALIDATE_SYNC=1`，无 warning／error |
+| 模拟与实际设备探针 | 原有 56 项清屏场景及新增 12 项应用重建／暂停／恢复／失败／重入／回调生命周期检查均通过；RTX 单独清屏和 AMD 缺少能力的拒绝路径通过 |
+
+本次沿用上述 Windows、工具链、SDK 与 GPU 驱动，无 Shader／资产输入，无性能测量。重建会等待 GPU，未实现异步退役、创建失败后的运行期重试、设备丢失恢复或新增 feature 路径。验证产物在本地 `build/verification/resize-*` 和清屏探针日志中；历史清屏脚本的停绘预期以对应增量为准。
 
 ## 项目目标和开发约束
 
@@ -359,7 +386,7 @@ Slang 对 SPIR-V 提供 Ray Query 能力，但项目锁定的编译器、目标 
 | Shader | Slang | 用户已确定；版本、安装与编译产物布局在早期验证 |
 | 图片解码与测试 | 待实现该功能时选择 | 必须补齐纹理解码；测试框架保持简单，不提前扩大依赖 |
 
-当前已采用 CMake、固定提交的 GLFW 3.4 和本机 Vulkan SDK。GLFW 通过 FetchContent 管理，Vulkan 开发环境通过 `find_package(Vulkan 1.3 REQUIRED)` 查找。其余工具库组合仍属于建议，具体版本和包管理方式按后续实际需求确定。cgltf 不默认把外部图片解码为像素，需要额外的文件处理和图片解码步骤。[cgltf 使用说明](https://github.com/jkuhlmann/cgltf)
+当前已采用 CMake、固定提交的 GLFW 3.4 和本机 Vulkan SDK。GLFW 通过 FetchContent 管理，Vulkan 开发环境通过 `find_package(Vulkan 1.3.239 REQUIRED)` 查找。其余工具库组合仍属于建议，具体版本和包管理方式按后续实际需求确定。cgltf 不默认把外部图片解码为像素，需要额外的文件处理和图片解码步骤。[cgltf 使用说明](https://github.com/jkuhlmann/cgltf)
 
 建议源码逐步落在 `src/Core`、`src/Platform`、`src/ECS`、`src/Scene`、`src/Assets`、`src/Shader`、`src/RHI/Vulkan`、`src/RenderScene`、`src/RenderGraph`、`src/Passes`、`apps/Sandbox`，Shader 放在 `shaders`，测试放在 `tests`。尚无实现时不创建空目录或空模块。
 
@@ -412,7 +439,7 @@ Shader 编译与资源状态模型先做最小验证，再逐步完善；不等�
 13. 添加层级和世界 Transform 更新，再单独覆盖重新挂接与删除行为。
 14. 按几何、索引、法线、UV、贴图分别增加模型导入能力。
 
-当前已完成构建、窗口、Vulkan Instance 与诊断回调、设备与 Surface 能力报告、设备选择、Device 和单队列，以及 Swapchain 的配置、创建与销毁。下一次最小增量建议实现一个在途帧的清屏提交与 acquire／present 同步，建立命令记录、图像状态转换和完成条件；resize／最小化及交换链重建随后单独推进。
+当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、一个在途帧的清屏同步与呈现，以及 resize／最小化恢复时的交换链与依赖资源重建。下一次最小增量建议接入 Slang，锁定本机编译器版本并建立最小 Shader 到 SPIR-V 的可重复构建，再实现管线和三角形。
 
 ## 验证策略与风险
 

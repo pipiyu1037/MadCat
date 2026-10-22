@@ -220,6 +220,8 @@ bool queryPhysicalDevices(const VulkanInstance& instance, std::vector<PhysicalDe
         const bool canQueryAddress = core12 || device.hasExtension(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
         const bool canQueryAcceleration = device.hasExtension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
         const bool canQueryRay = device.hasExtension(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+        const bool canQueryMaintenance = instance.surfaceMaintenanceEnabled() &&
+            device.hasExtension(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
         VkPhysicalDeviceFeatures2 features{};
         features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
         VkPhysicalDeviceDynamicRenderingFeatures dynamicRendering{};
@@ -232,6 +234,8 @@ bool queryPhysicalDevices(const VulkanInstance& instance, std::vector<PhysicalDe
         acceleration.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
         VkPhysicalDeviceRayQueryFeaturesKHR ray{};
         ray.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+        VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT maintenance{};
+        maintenance.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT;
         void** nextFeature = &features.pNext;
         const auto appendFeature = [&](auto& feature) {
             *nextFeature = &feature;
@@ -242,13 +246,15 @@ bool queryPhysicalDevices(const VulkanInstance& instance, std::vector<PhysicalDe
         if (canQueryAddress) { appendFeature(address); }
         if (canQueryAcceleration) { appendFeature(acceleration); }
         if (canQueryRay) { appendFeature(ray); }
+        if (canQueryMaintenance) { appendFeature(maintenance); }
         getFeatures(device.handle, &features);
         device.features = {
             {canQueryDynamicRendering, dynamicRendering.dynamicRendering == VK_TRUE},
             {canQuerySynchronization2, synchronization2.synchronization2 == VK_TRUE},
             {canQueryAddress, address.bufferDeviceAddress == VK_TRUE},
             {canQueryAcceleration, acceleration.accelerationStructure == VK_TRUE},
-            {canQueryRay, ray.rayQuery == VK_TRUE}
+            {canQueryRay, ray.rayQuery == VK_TRUE},
+            {canQueryMaintenance, maintenance.swapchainMaintenance1 == VK_TRUE}
         };
         if (canQueryAcceleration)
         {
@@ -349,6 +355,7 @@ void printPhysicalDeviceReport(const PhysicalDeviceInfo& device, const SurfaceSu
             supportName(support.presentQueues[queueIndex] == VK_TRUE));
     }
     const char* relevantExtensions[] = {
+        VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
         VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
         VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
         VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, VK_KHR_RAY_QUERY_EXTENSION_NAME, VK_KHR_SPIRV_1_4_EXTENSION_NAME,
@@ -369,6 +376,7 @@ void printPhysicalDeviceReport(const PhysicalDeviceInfo& device, const SurfaceSu
     reportFeature("bufferDeviceAddress", device.features.bufferDeviceAddress);
     reportFeature("accelerationStructure", device.features.accelerationStructure);
     reportFeature("rayQuery", device.features.rayQuery);
+    reportFeature("swapchainMaintenance1 (with instance dependencies)", device.features.swapchainMaintenance1);
     if (device.accelerationStructureLimits)
     {
         const auto& limits = *device.accelerationStructureLimits;

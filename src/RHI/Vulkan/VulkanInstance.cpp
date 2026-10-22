@@ -134,6 +134,20 @@ bool VulkanInstance::initialize()
         return false;
     }
     std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+    const auto hasExtension = [&](const char* name) {
+        return std::ranges::any_of(availableExtensions, [name](const auto& extension) {
+            return std::strcmp(extension.extensionName, name) == 0;
+        });
+    };
+    // Optional instance dependencies for present fences. Basic initialization
+    // remains usable without them; the clear renderer requires this capability.
+    const bool surfaceMaintenance = hasExtension(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME) &&
+        hasExtension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
+    if (surfaceMaintenance)
+    {
+        extensions.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
+        extensions.push_back(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
+    }
     if constexpr (enableValidation)
     {
         if (!std::ranges::any_of(extensions, [](const char* name) {
@@ -187,6 +201,7 @@ bool VulkanInstance::initialize()
         return false;
     }
     instance_ = createdInstance;
+    surfaceMaintenanceEnabled_ = surfaceMaintenance;
     std::fprintf(stderr, "Vulkan: Instance created.\n");
 
     if constexpr (enableValidation)

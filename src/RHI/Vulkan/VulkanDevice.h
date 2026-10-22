@@ -41,12 +41,14 @@ public:
     [[nodiscard]] const PhysicalDeviceInfo& physicalDeviceInfo() const { return physicalDeviceInfo_; }
     [[nodiscard]] VkQueue queue() const { return queue_; }
     [[nodiscard]] uint32_t queueFamilyIndex() const { return queueFamilyIndex_; }
+    [[nodiscard]] bool presentFencesEnabled() const { return presentFencesEnabled_; }
 
 private:
     VkDevice device_ = VK_NULL_HANDLE;
     PhysicalDeviceInfo physicalDeviceInfo_;
     VkQueue queue_ = VK_NULL_HANDLE;
     uint32_t queueFamilyIndex_ = UINT32_MAX;
+    bool presentFencesEnabled_ = false;
     PFN_vkDestroyDevice destroyDevice_ = nullptr;
     PFN_vkDeviceWaitIdle waitIdle_ = nullptr;
 };

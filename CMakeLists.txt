@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 project(MadCat LANGUAGES C CXX)
 
-find_package(Vulkan 1.3 REQUIRED)
+find_package(Vulkan 1.3.239 REQUIRED)
 
 include(FetchContent)
 
@@ -18,6 +18,7 @@ FetchContent_MakeAvailable(glfw)
 
 add_executable(MadCat
     apps/Sandbox/main.cpp
+    src/RHI/Vulkan/VulkanClearRenderer.cpp
     src/RHI/Vulkan/VulkanDevice.cpp
     src/RHI/Vulkan/VulkanInstance.cpp
     src/RHI/Vulkan/VulkanPhysicalDevice.cpp

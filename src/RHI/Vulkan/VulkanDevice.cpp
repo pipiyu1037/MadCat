@@ -146,13 +146,19 @@ bool VulkanDevice::initialize(std::span<const PhysicalDeviceCandidate> candidate
     features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     features.dynamicRendering = VK_TRUE;
     features.synchronization2 = VK_TRUE;
-    const char* extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    const bool enablePresentFences = selected->hasExtension(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME) &&
+        selected->features.swapchainMaintenance1.queryable && selected->features.swapchainMaintenance1.supported;
+    VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT maintenance{};
+    maintenance.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT;
+    maintenance.swapchainMaintenance1 = VK_TRUE;
+    if (enablePresentFences) { features.pNext = &maintenance; }
+    const char* extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME};
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     createInfo.pNext = &features;
     createInfo.queueCreateInfoCount = 1;
     createInfo.pQueueCreateInfos = &queueInfo;
-    createInfo.enabledExtensionCount = 1;
+    createInfo.enabledExtensionCount = enablePresentFences ? 2 : 1;
     createInfo.ppEnabledExtensionNames = extensions;
 
     VkDevice createdDevice = VK_NULL_HANDLE;
@@ -181,10 +187,12 @@ bool VulkanDevice::initialize(std::span<const PhysicalDeviceCandidate> candidate
     physicalDeviceInfo_ = std::move(selectedInfo);
     queue_ = queue;
     queueFamilyIndex_ = queueFamilyIndex;
+    presentFencesEnabled_ = enablePresentFences;
     destroyDevice_ = destroyDevice;
     waitIdle_ = waitIdle;
     std::fprintf(stderr, "Vulkan: Device created; queue family %u, queue 0 (Graphics/Compute/Present).\n", queueFamilyIndex_);
     std::fprintf(stderr, "Vulkan: enabled VK_KHR_swapchain, dynamicRendering and synchronization2; ray tracing features remain disabled.\n");
+    std::fprintf(stderr, "Vulkan: present fences %s (VK_EXT_swapchain_maintenance1).\n", enablePresentFences ? "enabled" : "unavailable");
     return true;
 }
 }

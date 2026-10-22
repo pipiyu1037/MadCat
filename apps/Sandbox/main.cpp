@@ -2,6 +2,7 @@
 #include <GLFW/glfw3.h>
 
 #include "RHI/Vulkan/VulkanDevice.h"
+#include "RHI/Vulkan/VulkanClearRenderer.h"
 #include "RHI/Vulkan/VulkanInstance.h"
 #include "RHI/Vulkan/VulkanPhysicalDevice.h"
 #include "RHI/Vulkan/VulkanSurface.h"
@@ -10,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -39,14 +41,130 @@ bool initializeDevice(const madcat::rhi::VulkanInstance& instance, const madcat:
     return device.initialize(candidates);
 }
 
-bool initializeSwapchain(const madcat::rhi::VulkanDevice& device, const madcat::rhi::VulkanSurface& surface,
-    GLFWwindow* window, madcat::rhi::VulkanSwapchain& swapchain)
+// Keep the dependency order in one owner: renderer releases its views and
+// synchronization before the borrowed Swapchain is destroyed.
+struct Presentation
 {
-    int width = 0;
-    int height = 0;
-    glfwGetFramebufferSize(window, &width, &height);
-    return swapchain.initialize(device, surface, {static_cast<uint32_t>(width), static_cast<uint32_t>(height)});
-}
+    madcat::rhi::VulkanSwapchain swapchain;
+    madcat::rhi::VulkanClearRenderer renderer;
+};
+
+class SandboxApplication
+{
+public:
+    SandboxApplication(GLFWwindow* window, const madcat::rhi::VulkanDevice& device, const madcat::rhi::VulkanSurface& surface)
+        : window_(window), device_(device), surface_(surface)
+    {
+        iconified_ = glfwGetWindowAttrib(window_, GLFW_ICONIFIED) == GLFW_TRUE;
+        glfwSetWindowUserPointer(window_, this);
+        glfwSetFramebufferSizeCallback(window_, [](GLFWwindow* target, int, int) {
+            static_cast<SandboxApplication*>(glfwGetWindowUserPointer(target))->rebuildPending_ = true;
+        });
+        glfwSetWindowIconifyCallback(window_, [](GLFWwindow* target, int iconified) {
+            auto& app = *static_cast<SandboxApplication*>(glfwGetWindowUserPointer(target));
+            app.iconified_ = iconified == GLFW_TRUE;
+            app.rebuildPending_ = true;
+        });
+        // Windows may run a native modal loop while dragging the window border.
+        // Refresh callbacks still arrive there, even before PollEvents returns.
+        glfwSetWindowRefreshCallback(window_, [](GLFWwindow* target) {
+            static_cast<SandboxApplication*>(glfwGetWindowUserPointer(target))->render();
+        });
+    }
+
+    ~SandboxApplication()
+    {
+        // No callback may retain this owner during destruction/window teardown.
+        glfwSetWindowRefreshCallback(window_, nullptr);
+        glfwSetFramebufferSizeCallback(window_, nullptr);
+        glfwSetWindowIconifyCallback(window_, nullptr);
+        glfwSetWindowUserPointer(window_, nullptr);
+    }
+
+    [[nodiscard]] bool failed() const { return failed_; }
+    [[nodiscard]] bool paused() const { return paused_; }
+    [[nodiscard]] bool waitIdle() { return !presentation_ || presentation_->renderer.waitIdle(); }
+
+    // This function is also a C callback boundary. Do not let allocation or
+    // other C++ exceptions escape through GLFW/Win32, or recursively render.
+    void render() noexcept
+    {
+        if (rendering_ || failed_ || glfwWindowShouldClose(window_)) { return; }
+        rendering_ = true;
+        try
+        {
+            if (!renderFrame()) { failed_ = true; }
+        }
+        catch (const std::exception& error)
+        {
+            std::fprintf(stderr, "MadCat rendering failed: %s\n", error.what());
+            failed_ = true;
+        }
+        catch (...)
+        {
+            std::fprintf(stderr, "MadCat rendering failed: unknown exception.\n");
+            failed_ = true;
+        }
+        rendering_ = false;
+    }
+
+private:
+    bool renderFrame()
+    {
+        int width = 0;
+        int height = 0;
+        glfwGetFramebufferSize(window_, &width, &height);
+        if (iconified_ || width <= 0 || height <= 0)
+        {
+            if (!paused_)
+            {
+                if (!waitIdle()) { return false; }
+                std::fprintf(stderr, "MadCat: rendering paused; minimized or zero framebuffer.\n");
+            }
+            paused_ = true;
+            rebuildPending_ = true;
+            return true;
+        }
+        paused_ = false;
+        if (rebuildPending_ || width != framebufferWidth_ || height != framebufferHeight_)
+        {
+            if (!waitIdle()) { return false; }
+            // Destroy the old native-window association before creating a new
+            // Swapchain. No oldSwapchain retirement/reuse optimization yet.
+            presentation_.reset();
+            auto candidate = std::make_unique<Presentation>();
+            if (!candidate->swapchain.initialize(device_, surface_, {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}) ||
+                !candidate->renderer.initialize(device_, candidate->swapchain))
+            {
+                std::fprintf(stderr, "MadCat error: presentation creation/rebuild failed; stopping rendering.\n");
+                return false;
+            }
+            presentation_ = std::move(candidate);
+            framebufferWidth_ = width;
+            framebufferHeight_ = height;
+            rebuildPending_ = false;
+            const auto extent = presentation_->swapchain.extent();
+            std::fprintf(stderr, "MadCat: presentation ready; framebuffer %d x %d, Swapchain %u x %u.\n",
+                width, height, extent.width, extent.height);
+        }
+        const auto result = presentation_->renderer.draw({0.04f, 0.08f, 0.16f, 1.0f});
+        if (result == madcat::rhi::ClearFrameResult::Failed) { return false; }
+        rebuildPending_ |= result == madcat::rhi::ClearFrameResult::SwapchainUnavailable;
+        return true;
+    }
+
+    GLFWwindow* window_;
+    const madcat::rhi::VulkanDevice& device_;
+    const madcat::rhi::VulkanSurface& surface_;
+    std::unique_ptr<Presentation> presentation_;
+    int framebufferWidth_ = 0;
+    int framebufferHeight_ = 0;
+    bool rebuildPending_ = true;
+    bool iconified_ = false;
+    bool paused_ = false;
+    bool rendering_ = false;
+    bool failed_ = false;
+};
 }
 
 int main()
@@ -60,7 +178,7 @@ int main()
         return EXIT_FAILURE;
     }
 
-    // Vulkan will provide rendering later; this window needs no OpenGL context.
+    // Vulkan provides rendering; this window needs no OpenGL context.
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     GLFWwindow* window = glfwCreateWindow(1280, 720, "MadCat", nullptr, nullptr);
     if (!window)
@@ -75,18 +193,21 @@ int main()
         madcat::rhi::VulkanInstance vulkan;
         madcat::rhi::VulkanSurface surface;
         madcat::rhi::VulkanDevice device;
-        madcat::rhi::VulkanSwapchain swapchain;
-        if (vulkan.initialize() && surface.initialize(vulkan, window) && initializeDevice(vulkan, surface, device) &&
-            initializeSwapchain(device, surface, window, swapchain))
+        if (vulkan.initialize() && surface.initialize(vulkan, window) && initializeDevice(vulkan, surface, device))
         {
-            while (!glfwWindowShouldClose(window))
-            {
-                glfwWaitEvents();
-            }
+            SandboxApplication app(window, device, surface);
             exitCode = EXIT_SUCCESS;
+            while (!glfwWindowShouldClose(window) && !app.failed())
+            {
+                glfwPollEvents();
+                if (glfwWindowShouldClose(window)) { break; }
+                app.render();
+                if (app.paused() && !app.failed()) { glfwWaitEvents(); }
+            }
+            if (app.failed() || !app.waitIdle()) { exitCode = EXIT_FAILURE; }
         }
-        // No GPU work is submitted yet. Swapchain is released before Device and
-        // Surface; all Vulkan owners are destroyed before the window/GLFW loader.
+        // Renderer waits for acquisition, submission and present-resource
+        // retirement before releasing views/semaphores, then Swapchain is freed.
     }
     catch (const std::exception& error)
     {

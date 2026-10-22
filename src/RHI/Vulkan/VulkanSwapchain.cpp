@@ -52,7 +52,7 @@ bool chooseSwapchainConfig(const madcat::rhi::SurfaceSupport& support, VkExtent2
         extent.width < capabilities.minImageExtent.width || extent.width > capabilities.maxImageExtent.width ||
         extent.height < capabilities.minImageExtent.height || extent.height > capabilities.maxImageExtent.height)
     {
-        std::fprintf(stderr, "Vulkan error: Swapchain requires a non-zero supported pixel extent; minimized-window recovery is not implemented.\n");
+        std::fprintf(stderr, "Vulkan error: Swapchain requires a non-zero supported pixel extent; defer creation while minimized.\n");
         return false;
     }
 

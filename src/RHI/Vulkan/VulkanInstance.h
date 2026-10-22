@@ -20,9 +20,11 @@ public:
     [[nodiscard]] bool initialize();
 
     [[nodiscard]] VkInstance handle() const { return instance_; }
+    [[nodiscard]] bool surfaceMaintenanceEnabled() const { return surfaceMaintenanceEnabled_; }
 
 private:
     VkInstance instance_ = VK_NULL_HANDLE;
+    bool surfaceMaintenanceEnabled_ = false;
     VkDebugUtilsMessengerEXT debugMessenger_ = VK_NULL_HANDLE;
     PFN_vkDestroyInstance destroyInstance_ = nullptr;
     PFN_vkDestroyDebugUtilsMessengerEXT destroyDebugMessenger_ = nullptr;

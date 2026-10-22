@@ -31,6 +31,7 @@ public:
     [[nodiscard]] bool initialize(const VulkanDevice& device, const VulkanSurface& surface, VkExtent2D framebufferExtent);
 
     [[nodiscard]] VkSwapchainKHR handle() const { return swapchain_; }
+    [[nodiscard]] VkDevice deviceHandle() const { return device_; }
     [[nodiscard]] VkSurfaceFormatKHR surfaceFormat() const { return surfaceFormat_; }
     [[nodiscard]] VkExtent2D extent() const { return extent_; }
     // Borrowed handles; the span and its elements become invalid at destruction.

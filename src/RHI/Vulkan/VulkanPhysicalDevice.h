@@ -24,6 +24,8 @@ struct PhysicalDeviceFeatures
     FeatureSupport bufferDeviceAddress;
     FeatureSupport accelerationStructure;
     FeatureSupport rayQuery;
+    // Queryable only when the EXT extension and its instance dependencies exist.
+    FeatureSupport swapchainMaintenance1;
 };
 
 // Owns query data, but borrows handles from the Instance. No device destruction.
