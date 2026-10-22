@@ -2,11 +2,11 @@
 
 MadCat 是一个使用自研 ECS 和 Vulkan 的渲染引擎。前期服务渲染算法研究和图形效果实验，长期考虑游戏与仿真用途。开发者应能加载模型、用 C++ 编写渲染 Pass、连接多个 Pass，并在运行时调整参数、查看中间结果。
 
-本文为开发范围、架构建议、半年计划和验收方法，供项目开发者及协作编码助手使用。文档更新日期为 2026 年 10 月 22 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
+本文为开发范围、架构建议、半年计划和验收方法，供项目开发者及协作编码助手使用。文档更新日期为 2026 年 10 月 23 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
 
 ## 当前实现进度
 
-已完成 CMake 构建入口、GLFW 窗口、Vulkan Instance 与诊断回调、设备及 Surface 能力报告、设备选择、Device／单队列、Swapchain，以及一个在途帧的持续清屏、同步和窗口 resize／最小化恢复时的交换链重建。程序创建 1280 × 720 的 MadCat 窗口，后端记录动态渲染清屏、状态转换和 acquire／submit／present；重建与关闭前均等待 GPU 提交及呈现资源退役。零像素尺寸或最小化时等待事件，窗口恢复后重建并继续渲染，也可在最小化时关闭；不可恢复错误返回非零状态。
+已完成 CMake 构建入口、GLFW 窗口、Vulkan Instance 与诊断回调、设备及 Surface 能力报告、设备选择、Device／单队列、Swapchain，以及一个在途帧的持续渲染、同步和窗口 resize／最小化恢复时的交换链重建。程序创建 1280 × 720 的 MadCat 窗口，通过动态渲染清除深蓝背景，再绑定最小图形管线并 Draw 彩色三角形；后端处理状态转换和 acquire／submit／present。重建与关闭前均等待 GPU 提交及呈现资源退役，先释放帧命令资源，再释放管线与交换链。零像素尺寸或最小化时等待事件，窗口恢复后重建并继续渲染，也可在最小化时关闭；不可恢复错误返回非零状态。Slang 手动编译、SPIR-V 验证、失败保留产物、启动时 Shader Module 加载和管线创建均已接通，运行期 Shader 更新尚未实现。
 
 GLFW 3.4 由 CMake FetchContent 获取，固定到提交 `7b6aead9fb88b3623e3b3725ebb42670cbe4c579`。构建目标要求 C++23。运行时采用 Vulkan 1.3 实例级基线；CMake 查找 Vulkan 1.3.239 或更新头文件，以提供 EXT maintenance1 类型，通过 `Vulkan::Headers` 提供头文件，Vulkan 函数由 GLFW 动态获取。Debug 必须能找到 `VK_LAYER_KHRONOS_validation` 和 `VK_EXT_debug_utils`，Release 不主动启用验证层。清屏路径额外要求 EXT `swapchainMaintenance1` 和对应实例依赖；基础设备初始化仍保留原支持范围。
 
@@ -304,6 +304,45 @@ graph.compile();
 
 建议初期使用固定版本的 `slangc` 生成 SPIR-V，由构建步骤或用户命令手动触发。界面中的“重新编译 Shader”操作在后续调用相同流程；不要求监视源文件或自动编译。Slang 官方说明展示了命令行生成 SPIR-V 的用法。[Slang 编译指南](https://docs.shader-slang.org/en/stable/external/slang/docs/user-guide/08-compiling.html)
 
+当前已实现第一段离线编译流程：`MadCatShaders` 为独立手动目标，不随普通 C++ 构建执行。Slang 固定版本为 `2026.17-25-gc7954ebd1`，程序路径由 CMake 查找或 `MADCAT_SLANGC` 指定，完整版本不符则拒绝编译。`shaders/triangle.slang` 包含 `vertexMain`、`fragmentMain`，直接生成 SPIR-V 1.6、保留入口名、使用 `-O0` 并将警告视为错误；`spirv-val --target-env vulkan1.3` 验证每个模块。顶点采用 `SV_VulkanVertexID`，实测只需 `Shader` capability，两个阶段的颜色接口均在 location 0。
+
+两个阶段读取同一份源文件快照，全部通过验证后才发布至 `build/shaders/triangle/`，包含两个 `.spv`、源码快照及记录工具／参数／SHA256 的 `manifest.txt`。编译或验证失败时上一组四个文件保持不变；进程锁串行化同目录发布，中断后可恢复备份。当前只是离线产物发布，不代表运行期管线更新或 Shader 热更新已实现；include／import 依赖记录和反射待后续增量。使用方式见 [README](../README.md#手动编译-shader)。
+
+| 2026-10-22 Slang 增量验证 | 实际结果 |
+|---|---|
+| Shader 编译与验证 | Debug／Release 均编译两个阶段并通过 Vulkan 1.3 验证，产物 SHA256 一致，入口与 capability 已通过反汇编核对 |
+| 12 项构建检查 | 初次／重复构建、片元入口缺失、语法错误、版本不符、编译器／验证器／源码缺失、验证器失败、失败恢复和发布中断恢复均通过；失败时上一组四个文件哈希不变 |
+| C++ 构建独立性 | 普通 Debug／Release 构建通过；另在显式指定缺失 Shader 工具的独立配置下，MadCat 的 Debug 目标仍构建通过 |
+
+环境为 Windows 11、CMake 4.4.4、MSVC 19.44.35228、Vulkan SDK 1.4.363.0；Slang 版本如上，验证器为 `SPIRV-Tools v2026.4 v2026.4.rc2-0-gef96ed76`。本轮没有创建 Vulkan Shader Module、管线或执行新 Shader；SPIR-V 验证通过不能替代后续 GPU 场景验证。检查代码在 `tests/ShaderBuildChecks.cmake`，构建日志在 `build/verification/shader-build`，不要求安装额外测试框架。
+
+后续 Shader Module 增量已接通启动加载：Sandbox 从 CMake 配置记录的 `<构建目录>/shaders/triangle/` 绝对路径读取两个模块，独立于工作目录及 Swapchain 重建。`src/Shader/Spirv` 在对齐的字数组中检查头部、版本 1.0～1.6、字节序和指令边界；这不是完整 SPIR-V 语义、入口／阶段、绑定布局或 Device capability 验证，仍要求输入来自离线验证流程。`VulkanShaderModule` 先解析销毁函数再创建模块，失败不接管输出，重复初始化保留旧模块，析构释放模块并要求 Device 存活。相关主机操作须完成；管线不要求模块随 GPU 工作保活。[创建参数](https://docs.vulkan.org/refpages/latest/refpages/source/VkShaderModuleCreateInfo.html)、[销毁规则](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroyShaderModule.html)
+
+| 2026-10-22 Shader Module 增量验证 | 实际结果 |
+|---|---|
+| Debug／Release 构建与 35 项检查 | 均通过，无编译警告；CPU 及模拟 Vulkan 检查覆盖损坏文件、两种字节序、Unicode／空格路径、函数缺失、创建失败与重试、重复初始化和部分清理 |
+| 实际窗口与生命周期 | 两种构建均从其他工作目录启动、创建两个模块；resize 与两次最小化恢复后模块数量不变，九点清屏颜色检查通过，正常关闭返回 0；另验证 Debug 最小化期间关闭 |
+| 六项真实启动失败 | 隔离目录中分别移除顶点／片元文件、置空片元文件、损坏魔数、改变大小为非 4 倍数、截断指令；均在 Vulkan 创建前拒绝对应文件、返回 1，已创建模块先于 Device 释放 |
+| Validation Layers 与同步验证 | RTX 5060 Ti、API 1.4.351、驱动 617.42；上述最终 Debug 场景启用同步验证，无 warning／error |
+
+该 Shader Module 增量沿用上述 Slang／SPIRV-Tools 版本和 `triangle.slang`，当时没有执行 Shader 或测量性能。测试源码为 `tests/ShaderModuleChecks.cpp`，通过 `MadCatShaderModuleChecks` 手动目标运行，结果在 `build/verification/shader-module/<配置>/`；该次窗口和故障脚本、日志在本机 `build/verification/`，不随 Git 分发。只在启动时加载，重新编译前先关闭程序，成功后重启；尚无并发发布／读取协议，不验证 manifest 哈希，也不支持安装包资源定位。后续图形管线与 Draw 的完成证据见下文。
+
+### 最小三角形管线与 Draw
+
+2026 年 10 月 22～23 日接入 `VulkanTrianglePipeline`：空 Pipeline Layout、固定 `vertexMain`／Vertex 与 `fragmentMain`／Fragment、无顶点缓冲的 Triangle List、一个颜色附件、单采样、无剔除／深度／混合。通过 `VkPipelineRenderingCreateInfo` 指定实际 Swapchain 格式，每帧绑定管线、设置当前像素尺寸的 viewport／scissor，再记录 `Draw(3, 1, 0, 0)`。Shader 的 location 0 颜色接口已通过实际管线与像素验证，但没有实现通用反射或接口兼容性检查。[动态渲染格式声明](https://docs.vulkan.org/refpages/latest/refpages/source/VkPipelineRenderingCreateInfo.html)
+
+本次采用每次交换链重建时重新创建管线，以简单、明确的方式处理格式变化；动态 viewport／scissor 使用新尺寸，不维护管线缓存或同格式复用优化。`Presentation` 按 Swapchain、管线、帧渲染器声明成员，反向释放时先等待 GPU／WSI 并释放命令，再释放管线和交换链。Shader Module 在应用外保留，用于后续重建。当前仍为后端验证路径，未扩展为通用 Pass、材质或 Render Graph 接口。[管线销毁前置条件](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroyPipeline.html)
+
+| 2026-10-22～23 三角形增量验证 | 实际结果 |
+|---|---|
+| Debug／Release 构建 | 均通过，无编译警告；每种配置的 25 项管线模拟检查及原有 35 项 Shader Module 检查通过 |
+| 实际三角形与尺寸恢复 | 两种配置均从其他工作目录启动，检查初始画面、三次 resize 和两次最小化恢复；每幅图采样六个背景点、四个按重心坐标计算的插值颜色点，sRGB RGB 容差为 3，全部通过 |
+| Debug 原生缩放循环 | 在系统原生缩放循环仍活动时将 framebuffer 更新到 934 × 611，三角形和背景像素通过；该检查使用窗口消息与程序化尺寸变化，未进行人工鼠标验收 |
+| Debug 连续变化与退出 | 24 次尺寸变化、四次快速最小化／恢复后画面正确；另验证最小化关闭。各场景正常返回 0，管线创建／销毁数量一致且先于 Swapchain 释放 |
+| Validation Layers 与同步验证 | 所有最终 Debug 场景启用 `VK_LAYER_VALIDATE_SYNC=1`，无 warning／error；实际设备 RTX 5060 Ti，API 1.4.351，驱动 617.42 |
+
+环境与 Shader 版本沿用上述记录，未修改 Shader，未测量性能。`MadCatTriangleChecks` 复用模拟 Vulkan 程序，覆盖函数缺失、Layout／Pipeline 创建失败与重试、重复初始化、格式、动态尺寸及 Draw 参数；真实驱动上的资源耗尽未注入。可分发的窗口检查在 `tests/TriangleWindowChecks.ps1`，运行说明见 [README](../README.md#三角形绘制与检查)，截图和日志位于 `<构建目录>/verification/triangle/`。当前只显示一个裁剪空间三角形，尚无通用资源绑定、场景、相机或 Render Graph；第一阶段所需的 Ray Query 编译与 GPU 求交探针仍未完成。
+
 最初可以采用明确的 binding 约定；随后用经过版本验证的反射元数据辅助建立绑定布局，并验证参数类型与布局。当前官方命令行参考列出了 `-reflection-json`，具体字段与能力以项目锁定版本的探针结果为准；需要更完整控制时再考虑编译与反射 API。[Slang 命令行参考](https://docs.shader-slang.org/en/stable/external/slang/docs/command-line-slangc-reference.html)
 
 建议更新流程为：
@@ -378,12 +417,12 @@ Slang 对 SPIR-V 提供 Ray Query 能力，但项目锁定的编译器、目标 
 | Windows C++ 工具链 | 支持项目实际使用的 C++23 特性的 MSVC 工具链 | 建议先采用 Windows 常用工具链；不假定所有 C++23 库能力都已具备 |
 | 依赖管理 | [vcpkg Manifest 模式](https://learn.microsoft.com/en-us/vcpkg/concepts/manifest-mode) | 建议锁定依赖基线；Slang SDK 的分发方式可独立安排 |
 | 窗口和输入 | GLFW 3.4 已使用；[Vulkan 支持](https://www.glfw.org/docs/3.4/vulkan_guide.html) 已用于 Instance 与 Surface 初始化 | 当前实现窗口创建、事件等待、关闭、Vulkan 函数获取和窗口 Surface；其他输入能力后续增加 |
-| Vulkan 开发环境 | [LunarG Vulkan SDK](https://vulkan.lunarg.com/) 已使用 | 当前要求头文件至少 1.3；本机验证 SDK 1.4.363.0，运行时版本和验证层另行查询 |
+| Vulkan 开发环境 | [LunarG Vulkan SDK](https://vulkan.lunarg.com/) 已使用 | 当前要求头文件至少 1.3.239；本机验证 SDK 1.4.363.0，运行时版本和验证层另行查询 |
 | 调试界面 | [Dear ImGui](https://github.com/ocornut/imgui) | 提供参数面板及官方 Vulkan 适配，当前不建设完整编辑器 |
 | 数学 | [GLM](https://github.com/g-truc/glm) | 向量、矩阵与四元数；统一并验证坐标、深度和布局约定 |
 | glTF 解析 | [cgltf](https://github.com/jkuhlmann/cgltf) | 小型解析器候选；引擎仍负责资产转换、图片读取与解码 |
 | GPU 内存分配 | [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) | 在 Vulkan 后端使用，资源所有权与 GPU 使用寿命仍由引擎管理 |
-| Shader | Slang | 用户已确定；版本、安装与编译产物布局在早期验证 |
+| Shader | Slang | 已接入手动编译；固定 `2026.17-25-gc7954ebd1`，产物在 `build/shaders/triangle/`，运行期更新待实现 |
 | 图片解码与测试 | 待实现该功能时选择 | 必须补齐纹理解码；测试框架保持简单，不提前扩大依赖 |
 
 当前已采用 CMake、固定提交的 GLFW 3.4 和本机 Vulkan SDK。GLFW 通过 FetchContent 管理，Vulkan 开发环境通过 `find_package(Vulkan 1.3.239 REQUIRED)` 查找。其余工具库组合仍属于建议，具体版本和包管理方式按后续实际需求确定。cgltf 不默认把外部图片解码为像素，需要额外的文件处理和图片解码步骤。[cgltf 使用说明](https://github.com/jkuhlmann/cgltf)
@@ -439,7 +478,7 @@ Shader 编译与资源状态模型先做最小验证，再逐步完善；不等�
 13. 添加层级和世界 Transform 更新，再单独覆盖重新挂接与删除行为。
 14. 按几何、索引、法线、UV、贴图分别增加模型导入能力。
 
-当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、一个在途帧的清屏同步与呈现，以及 resize／最小化恢复时的交换链与依赖资源重建。下一次最小增量建议接入 Slang，锁定本机编译器版本并建立最小 Shader 到 SPIR-V 的可重复构建，再实现管线和三角形。
+当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、单帧同步、交换链与管线重建、Slang 到 SPIR-V 的手动编译与验证、启动时的 Shader Module 加载，以及最小图形管线和三角形 Draw。下一次最小增量建议为固定 Slang／SPIR-V 目标下的 Ray Query 编译探针，核对所需 capability、扩展和设备启用前置条件；实际 GPU 求交仍需加速结构和绑定资源支持。运行期 Shader 更新仍需安全替换和失败恢复验证。
 
 ## 验证策略与风险
 

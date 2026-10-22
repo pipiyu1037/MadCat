@@ -3,6 +3,7 @@
 #include "VulkanDevice.h"
 #include "VulkanFunctions.h"
 #include "VulkanSwapchain.h"
+#include "VulkanTrianglePipeline.h"
 
 #include <algorithm>
 #include <exception>
@@ -24,6 +25,7 @@ struct VulkanClearRenderer::State
     VkQueue queue = VK_NULL_HANDLE;
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     VkExtent2D extent{};
+    const VulkanTrianglePipeline* triangle = nullptr;
     std::vector<Image> images;
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
@@ -172,6 +174,7 @@ struct VulkanClearRenderer::State
         rendering.colorAttachmentCount = 1;
         rendering.pColorAttachments = &attachment;
         cmdBeginRendering(commandBuffer, &rendering);
+        if (triangle && !triangle->recordDraw(commandBuffer, extent)) { return false; }
         cmdEndRendering(commandBuffer);
 
         barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
@@ -196,7 +199,7 @@ VulkanClearRenderer::~VulkanClearRenderer()
     }
 }
 
-bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwapchain& swapchain)
+bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwapchain& swapchain, const VulkanTrianglePipeline* triangle)
 {
     if (state_)
     {
@@ -213,11 +216,17 @@ bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwa
         std::fprintf(stderr, "Vulkan error: clear renderer requires VK_EXT_swapchain_maintenance1 present fences for safe resource retirement.\n");
         return false;
     }
+    if (triangle && (!triangle->handle() || triangle->deviceHandle() != device.handle() || triangle->colorFormat() != swapchain.surfaceFormat().format))
+    {
+        std::fprintf(stderr, "Vulkan error: triangle pipeline must match the renderer Device and Swapchain color format.\n");
+        return false;
+    }
     auto created = std::make_unique<State>();
     created->device = device.handle();
     created->queue = device.queue();
     created->swapchain = swapchain.handle();
     created->extent = swapchain.extent();
+    created->triangle = triangle;
     if (!created->loadFunctions(device.physicalDeviceInfo().instance)) { return false; }
     created->images.resize(swapchain.images().size());
     for (size_t index = 0; index < created->images.size(); ++index)
@@ -264,6 +273,7 @@ bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwa
     }
     state_ = std::move(created);
     std::fprintf(stderr, "Vulkan: Clear renderer ready; one frame in flight, dynamic rendering, acquire/submit/present fences.\n");
+    if (triangle) { std::fprintf(stderr, "Vulkan: triangle Draw enabled (3 vertices, 1 instance).\n"); }
     return true;
 }
 

@@ -5,12 +5,15 @@
 #include "RHI/Vulkan/VulkanClearRenderer.h"
 #include "RHI/Vulkan/VulkanInstance.h"
 #include "RHI/Vulkan/VulkanPhysicalDevice.h"
+#include "RHI/Vulkan/VulkanShaderModule.h"
 #include "RHI/Vulkan/VulkanSurface.h"
 #include "RHI/Vulkan/VulkanSwapchain.h"
+#include "RHI/Vulkan/VulkanTrianglePipeline.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -41,19 +44,21 @@ bool initializeDevice(const madcat::rhi::VulkanInstance& instance, const madcat:
     return device.initialize(candidates);
 }
 
-// Keep the dependency order in one owner: renderer releases its views and
-// synchronization before the borrowed Swapchain is destroyed.
+// Renderer waits for GPU/WSI work and releases commands before the pipeline
+// and Swapchain it borrows are destroyed (reverse member declaration order).
 struct Presentation
 {
     madcat::rhi::VulkanSwapchain swapchain;
+    madcat::rhi::VulkanTrianglePipeline triangle;
     madcat::rhi::VulkanClearRenderer renderer;
 };
 
 class SandboxApplication
 {
 public:
-    SandboxApplication(GLFWwindow* window, const madcat::rhi::VulkanDevice& device, const madcat::rhi::VulkanSurface& surface)
-        : window_(window), device_(device), surface_(surface)
+    SandboxApplication(GLFWwindow* window, const madcat::rhi::VulkanDevice& device, const madcat::rhi::VulkanSurface& surface,
+        const madcat::rhi::VulkanShaderModule& vertex, const madcat::rhi::VulkanShaderModule& fragment)
+        : window_(window), device_(device), surface_(surface), vertex_(vertex), fragment_(fragment)
     {
         iconified_ = glfwGetWindowAttrib(window_, GLFW_ICONIFIED) == GLFW_TRUE;
         glfwSetWindowUserPointer(window_, this);
@@ -134,7 +139,8 @@ private:
             presentation_.reset();
             auto candidate = std::make_unique<Presentation>();
             if (!candidate->swapchain.initialize(device_, surface_, {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}) ||
-                !candidate->renderer.initialize(device_, candidate->swapchain))
+                !candidate->triangle.initialize(device_, candidate->swapchain.surfaceFormat().format, vertex_, fragment_) ||
+                !candidate->renderer.initialize(device_, candidate->swapchain, &candidate->triangle))
             {
                 std::fprintf(stderr, "MadCat error: presentation creation/rebuild failed; stopping rendering.\n");
                 return false;
@@ -156,6 +162,8 @@ private:
     GLFWwindow* window_;
     const madcat::rhi::VulkanDevice& device_;
     const madcat::rhi::VulkanSurface& surface_;
+    const madcat::rhi::VulkanShaderModule& vertex_;
+    const madcat::rhi::VulkanShaderModule& fragment_;
     std::unique_ptr<Presentation> presentation_;
     int framebufferWidth_ = 0;
     int framebufferHeight_ = 0;
@@ -195,19 +203,33 @@ int main()
         madcat::rhi::VulkanDevice device;
         if (vulkan.initialize() && surface.initialize(vulkan, window) && initializeDevice(vulkan, surface, device))
         {
-            SandboxApplication app(window, device, surface);
-            exitCode = EXIT_SUCCESS;
-            while (!glfwWindowShouldClose(window) && !app.failed())
+            // Modules belong to the Device, independently of Swapchain rebuilds.
+            const std::filesystem::path shaderDirectory(u8"" MADCAT_SHADER_DIRECTORY);
+            madcat::rhi::VulkanShaderModule vertexShader;
+            madcat::rhi::VulkanShaderModule fragmentShader;
+            if (vertexShader.initialize(device, shaderDirectory / "vertex.spv") &&
+                fragmentShader.initialize(device, shaderDirectory / "fragment.spv"))
             {
-                glfwPollEvents();
-                if (glfwWindowShouldClose(window)) { break; }
-                app.render();
-                if (app.paused() && !app.failed()) { glfwWaitEvents(); }
+                std::fprintf(stderr, "MadCat: triangle Shader Modules ready (vertexMain / fragmentMain).\n");
+                SandboxApplication app(window, device, surface, vertexShader, fragmentShader);
+                exitCode = EXIT_SUCCESS;
+                while (!glfwWindowShouldClose(window) && !app.failed())
+                {
+                    glfwPollEvents();
+                    if (glfwWindowShouldClose(window)) { break; }
+                    app.render();
+                    if (app.paused() && !app.failed()) { glfwWaitEvents(); }
+                }
+                if (app.failed() || !app.waitIdle()) { exitCode = EXIT_FAILURE; }
             }
-            if (app.failed() || !app.waitIdle()) { exitCode = EXIT_FAILURE; }
+            else
+            {
+                std::fprintf(stderr, "MadCat error: Shader initialization failed. Run cmake --build <build-directory> --config Debug --target MadCatShaders, then restart.\n");
+            }
         }
         // Renderer waits for acquisition, submission and present-resource
-        // retirement before releasing views/semaphores, then Swapchain is freed.
+        // retirement before releasing commands/views/semaphores, then the
+        // triangle pipeline and Swapchain are freed, followed by Shader Modules.
     }
     catch (const std::exception& error)
     {

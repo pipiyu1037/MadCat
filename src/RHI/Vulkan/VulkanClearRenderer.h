@@ -7,6 +7,7 @@ namespace madcat::rhi
 {
 class VulkanDevice;
 class VulkanSwapchain;
+class VulkanTrianglePipeline;
 
 enum class ClearFrameResult
 {
@@ -17,7 +18,9 @@ enum class ClearFrameResult
 };
 
 // Minimal Vulkan backend exercise, to be replaced by Pass/Render Graph execution
-// as those mechanisms arrive. Borrows Device and Swapchain, which must outlive it.
+// as those mechanisms arrive. Borrows Device, Swapchain and optional triangle
+// pipeline, which must outlive it. It waits for GPU completion before releasing
+// recorded commands, allowing the caller to destroy the pipeline afterwards.
 // Single-threaded use; owns one frame of command and synchronization resources.
 class VulkanClearRenderer
 {
@@ -32,8 +35,10 @@ public:
 
     // Requires enabled EXT present fences. Failure releases partial resources
     // and permits retry; repeated successful initialization is rejected.
-    [[nodiscard]] bool initialize(const VulkanDevice& device, const VulkanSwapchain& swapchain);
-    // Linear RGBA. Retry means no image acquired (finite acquire timeout).
+    [[nodiscard]] bool initialize(const VulkanDevice& device, const VulkanSwapchain& swapchain,
+        const VulkanTrianglePipeline* triangle = nullptr);
+    // Linear RGBA background, with the optional triangle drawn over it.
+    // Retry means no image acquired (finite acquire timeout).
     // Unavailable/Failed are terminal: no further acquire or submit until rebuilt.
     [[nodiscard]] ClearFrameResult draw(const std::array<float, 4>& color);
     // Waits for acquisition, command submission and present-resource retirement.

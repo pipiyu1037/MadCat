@@ -1,6 +1,6 @@
 # MadCat
 
-使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前实现了 GLFW 窗口、Vulkan 初始化与能力报告、一个在途帧的持续清屏与同步，以及窗口 resize／最小化恢复时的 Swapchain 重建。
+使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前可显示 Slang Shader 绘制的彩色三角形，支持单帧同步、resize／最小化恢复时的 Swapchain 与管线重建，以及 Shader 手动编译、SPIR-V 验证和 Vulkan 资源的 RAII 管理。
 
 ## 构建与运行
 
@@ -13,14 +13,15 @@
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Debug
+cmake --build build --config Debug --target MadCatShaders
 .\build\Debug\MadCat.exe
 ```
 
 首次配置通过 CMake FetchContent 获取固定提交的 GLFW 3.4，需要访问 GitHub；依赖源码和构建产物位于 `build` 下。
 
-程序创建一个 1280 × 720、标题为 MadCat 的可调整大小窗口，输出设备和 Surface 能力报告，选择设备、创建一个 Graphics／Compute／Present 队列及 Swapchain，然后持续呈现深蓝色清屏画面。线性 RGBA 为 `(0.04, 0.08, 0.16, 1.0)`，使用实际交换链格式；本机 sRGB 格式下屏幕像素约为 RGB `(56, 80, 111)`。Debug 启用验证层，Release 不主动启用验证层。关闭前先等待 acquisition、GPU 提交和呈现资源退役，再释放清屏器、Swapchain、Device、Surface、Instance 和窗口；初始化或帧执行失败返回非零状态。
+程序创建一个 1280 × 720、标题为 MadCat 的可调整大小窗口，输出设备和 Surface 能力报告，选择设备、创建一个 Graphics／Compute／Present 队列，加载两个 Shader Module，再创建 Swapchain 和三角形管线。画面为深蓝背景上的插值彩色三角形：上方红色、左下蓝色、右下绿色。背景线性 RGBA 为 `(0.04, 0.08, 0.16, 1.0)`，本机 sRGB 格式下背景像素约为 RGB `(56, 80, 111)`。Debug 启用验证层，Release 不主动启用验证层。关闭前先等待 acquisition、GPU 提交和呈现资源退役，再释放帧渲染器、管线、Swapchain、两个 Shader Module、Device、Surface、Instance 和窗口；初始化或帧执行失败返回非零状态。
 
-正常 Debug 启动日志包含以下内容，关闭时先输出清屏器释放及累计帧数，再依次输出 `Swapchain destroyed.`、`Device destroyed.`、`Surface destroyed.` 和 `Instance destroyed.`：
+正常 Debug 启动日志包含以下内容，关闭时先输出帧渲染器释放及累计帧数，再依次输出 `Triangle pipeline destroyed.`、`Swapchain destroyed.`、两次 `Shader Module destroyed.`、`Device destroyed.`、`Surface destroyed.` 和 `Instance destroyed.`：
 
 ```text
 Vulkan: instance-level API support <运行时版本>; requesting 1.3.0.
@@ -34,9 +35,16 @@ Vulkan: physical device capability report complete.
 Vulkan: Device created; queue family <索引>, queue 0 (Graphics/Compute/Present).
 Vulkan: enabled VK_KHR_swapchain, dynamicRendering and synchronization2; ray tracing features remain disabled.
 Vulkan: present fences enabled (VK_EXT_swapchain_maintenance1).
+Vulkan: loading Shader Module from <构建目录>/shaders/triangle/vertex.spv.
+Vulkan: Shader Module created; <路径>, <大小> bytes.
+Vulkan: loading Shader Module from <构建目录>/shaders/triangle/fragment.spv.
+Vulkan: Shader Module created; <路径>, <大小> bytes.
+MadCat: triangle Shader Modules ready (vertexMain / fragmentMain).
 Vulkan: Swapchain created; <宽> x <高>, format <格式>, color space <颜色空间>, FIFO, <实际数量> images (requested <请求数量>).
 Vulkan: Swapchain usage <标志>, transform <标志>, composite alpha <标志>; exclusive sharing.
+Vulkan: Triangle pipeline created; vertexMain / fragmentMain, color format <格式>, dynamic viewport/scissor.
 Vulkan: Clear renderer ready; one frame in flight, dynamic rendering, acquire/submit/present fences.
+Vulkan: triangle Draw enabled (3 vertices, 1 instance).
 MadCat: presentation ready; framebuffer <宽> x <高>, Swapchain <宽> x <高>.
 Vulkan: Clear frame presented (1); linear RGBA 0.040 0.080 0.160 1.000.
 ```
@@ -63,9 +71,67 @@ Swapchain 优先选择 `B8G8R8A8_SRGB`／`SRGB_NONLINEAR`，否则选第一个�
 
 上述基础设备筛选和排序不变；实例依赖存在且设备支持时，额外查询并启用 EXT `swapchainMaintenance1`，日志说明呈现 Fence 是否可用。缺少此能力仍可查询并创建 Device／Swapchain，但清屏器拒绝初始化；当前不会为清屏能力另行选择设备，也未接入 KHR maintenance1 别名。本机 RTX 5060 Ti 支持，AMD 集显的当前驱动不支持该清屏路径。
 
-清屏通过动态渲染的颜色附件 `loadOp=CLEAR`／`storeOp=STORE` 完成，无需 Shader 或管线，usage 仍仅为颜色附件。framebuffer 尺寸变化、从最小化恢复、acquire 返回 out-of-date 或 acquire／present 返回 suboptimal 时，应用先等待旧清屏器的 acquire／submit／present 完成，再依次销毁清屏器和 Swapchain，重新查询 Surface 支持并按新尺寸创建一组资源，随后恢复清屏。suboptimal acquire 已获得的图像先完成提交与呈现，再请求重建。
+背景清屏通过动态渲染颜色附件的 `loadOp=CLEAR`／`storeOp=STORE` 完成，随后在同一次渲染中绑定三角形管线、设置 viewport／scissor 并 Draw。图像 usage 仍仅为颜色附件。framebuffer 尺寸变化、从最小化恢复、acquire 返回 out-of-date 或 acquire／present 返回 suboptimal 时，应用先等待旧帧的 acquire／submit／present 完成，再依次销毁帧渲染器、管线和 Swapchain，重新查询 Surface 支持并按新尺寸、格式创建一组资源。suboptimal acquire 已获得的图像先完成提交与呈现，再请求重建。日志中的 `Clear frame presented` 保留原有名称，表示这一帧已经呈现，画面包含三角形。
 
-最小化或零像素尺寸时不创建交换链、不获取图像；窗口恢复后自动继续，也可在最小化期间关闭。重建采用同步等待和先销毁后创建，暂不通过 `oldSwapchain` 复用资源；重建失败会清理部分资源、诊断并返回非零状态，不保留旧画面继续运行。Slang、三角形和 Ray Query GPU 求交尚未实现，当前只支持单个 Graphics／Compute／Present 队列族。
+最小化或零像素尺寸时不创建交换链、不获取图像；窗口恢复后自动继续，也可在最小化期间关闭。重建采用同步等待和先销毁后创建，暂不通过 `oldSwapchain` 复用资源；重建失败会清理部分资源、诊断并返回非零状态，不保留旧画面继续运行。Shader Module 独立于交换链重建；当前每次重建均重新创建管线，不做同格式复用或管线缓存。当前只支持单个 Graphics／Compute／Present 队列族，Ray Query GPU 求交尚未实现。
+
+## 手动编译 Shader
+
+当前固定 `slangc -version` 为 `2026.17-25-gc7954ebd1`（本机 Vulkan SDK 1.4.363.0 所带版本），构建时检查完整版本字符串。验证工具为 `spirv-val`，本机版本为 `SPIRV-Tools v2026.4 v2026.4.rc2-0-gef96ed76`。两个程序优先从 `$env:VULKAN_SDK/Bin` 查找，其次使用系统搜索路径；可在 CMake 配置时通过 `-DMADCAT_SLANGC=完整路径`、`-DMADCAT_SPIRV_VAL=完整路径` 指定。普通 `MadCat` 构建不依赖这些程序；缺少工具或编译器版本不符时，显式 Shader 构建失败并给出诊断。
+
+从根目录执行：
+
+```powershell
+cmake --build build --config Debug --target MadCatShaders
+cmake --build build --config Debug --target MadCatShaderChecks
+```
+
+`MadCatShaders` 每次手动调用都会编译两个阶段，Debug／Release 使用同一套参数和产物目录。源码为 [triangle.slang](shaders/triangle.slang)，顶点入口为 `vertexMain`，片元入口为 `fragmentMain`；保留入口名称，直接生成 SPIR-V 1.6，使用 `-O0`，将警告视为错误，再执行 `spirv-val --target-env vulkan1.3`。顶点使用 `SV_VulkanVertexID`，没有顶点缓冲或 Descriptor；实测两个模块只声明 `Shader` capability，颜色接口位于 location 0。[Slang 命令行参考](https://docs.shader-slang.org/en/stable/external/slang/docs/command-line-slangc-reference.html)、[SPIR-V 系统语义](https://docs.shader-slang.org/en/stable/external/slang/docs/user-guide/a2-01-spirv-target-specific.html)
+
+成功产物位于 `build/shaders/triangle/`：
+
+| 文件 | 内容 |
+|---|---|
+| `vertex.spv`、`fragment.spv` | 通过验证的两个阶段 |
+| `triangle.slang` | 本次编译的源文件快照，两个阶段使用同一份内容 |
+| `manifest.txt` | 工具版本与路径、入口、编译／验证参数、源码和二进制 SHA256 |
+
+[编译脚本](cmake/CompileShaders.cmake) 先在候选目录编译并验证，两个阶段全部成功后才替换整组产物；编译／验证失败时保留上一组，清理候选文件并返回非零状态。目录发布中断时，下一次构建会先恢复已备份的上一组；同一输出目录使用进程锁避免并发发布。该流程属于离线构建，不是运行期热更新协议。
+
+[检查目标](tests/ShaderBuildChecks.cmake) 包含 12 个真实编译与故障场景，使用独立的 `build/verification/shader-build/`，核对失败前后的四个文件哈希。当前仅处理一个自包含 `.slang` 文件，尚未建立 include／import 依赖记录或反射。
+
+## 加载 Shader Module
+
+启动时从 CMake 配置所记录的绝对路径 `<构建目录>/shaders/triangle/` 读取 `vertex.spv` 和 `fragment.spv`，不依赖当前工作目录。首次运行前须显式执行 `MadCatShaders`；缺少或无法读取产物时，日志包含文件路径和原因，程序清理已创建对象并返回非零状态。普通 C++ 构建仍不调用 Shader 编译器，不自动生成或复制 Shader。当前使用构建目录中的开发产物，移动构建目录后须重新配置并构建程序，尚无可分发安装包的资源定位方案。
+
+[`loadSpirv`](src/Shader/Spirv.h) 将文件读入对齐的 `uint32_t` 数组，检查非空、字节数为 4 的倍数、完整头部、魔数、版本 1.0～1.6、bound／schema 和指令长度，按魔数识别并转换字节序。它只检查基本结构，不检查完整语义、入口、资源布局、Device capability 或 manifest 哈希，不能替代离线 `spirv-val`。管线固定使用顶点入口 `vertexMain` 和片元入口 `fragmentMain`，已通过当前 Shader 的管线创建、Validation Layers 和像素检查；加载器不自行解析入口或反射。[SPIR-V 二进制格式](https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html#_physical_layout_of_a_spir_v_module_and_instruction)
+
+[`VulkanShaderModule`](src/RHI/Vulkan/VulkanShaderModule.h) 拥有模块并借用 Device，禁止复制／移动，先解析销毁函数再创建模块。创建失败不接管失败输出；重复初始化拒绝替换已有模块。Sandbox 的两个模块在 Device 之前释放，第二个加载失败时第一个也会释放。模块销毁要求相关主机操作结束；管线创建完成后，模块可先于使用该管线的 GPU 工作释放，不为模块单独增加 GPU 等待。[Vulkan Shader Module 销毁规则](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroyShaderModule.html)
+
+当前仅在启动时读取一次；重新编译前先关闭程序，编译成功后重新启动。离线目录发布不保证两个独立文件在并发读取时来自同一版本；运行期安全更新和失败保留旧管线尚未实现。
+
+不需要 GPU 或 Shader 编译工具的文件／生命周期检查：
+
+```powershell
+cmake --build build --config Debug --target MadCatShaderModuleChecks
+```
+
+该目标包含 35 项 CPU 与模拟 Vulkan 场景，覆盖路径、字节序、损坏文件、缺失函数、创建失败、重试、重复初始化和部分创建清理；预期失败诊断保存在 `build/verification/shader-module/Debug/`。它不替代真实驱动上的 Validation Layers 和渲染场景验证。
+
+## 三角形绘制与检查
+
+[`VulkanTrianglePipeline`](src/RHI/Vulkan/VulkanTrianglePipeline.h) 是当前后端验证场景的专用封装：空 Pipeline Layout、Triangle List、一个与 Swapchain 格式匹配的颜色附件、单采样、填充且不剔除、不启用深度或混合。它通过 `VkPipelineRenderingCreateInfo` 接入动态渲染；顶点位置和颜色来自 Shader，不使用顶点缓冲、索引、Descriptor 或 Push Constant。`recordDraw` 绑定管线，设置覆盖当前像素尺寸的正高度 viewport 与 scissor，再记录 `vkCmdDraw(3, 1, 0, 0)`。三角形采用固定裁剪空间坐标，随窗口比例伸缩；尚无相机或场景坐标系统。[动态渲染格式](https://docs.vulkan.org/refpages/latest/refpages/source/VkPipelineRenderingCreateInfo.html)
+
+管线必须活到引用它的 GPU 提交完成；`Presentation` 按 Swapchain、管线、帧渲染器的顺序声明成员，保证反向释放时先等待 GPU／WSI 并释放命令，再释放管线与交换链。管线创建失败会清理已创建的 Layout；该类型不自行等待整个 Device，也不提供通用材质／Pass 接口。[Pipeline 销毁要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroyPipeline.html)
+
+```powershell
+cmake --build build --config Debug --target MadCatTriangleChecks
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug
+```
+
+`MadCatTriangleChecks` 复用模拟 Vulkan 测试程序，包含 25 项管线创建、失败清理、格式、动态尺寸和 Draw 检查，不依赖 GPU 或 Shader 工具。窗口脚本会启动程序、改变窗口状态、采集截图并正常关闭，要求桌面可见且无其他窗口遮挡；当前参考颜色适用于 SDR 的 R8／B8 sRGB 交换链和仓库原始 `triangle.slang`。它采样六个背景点和四个三角形内部点，按重心坐标与 sRGB 转换检查插值颜色。
+
+脚本支持 `-Configuration Release`、`-BuildDirectory <构建目录>`，以及 `-Scenario modal`（原生缩放循环）、`stress`（连续尺寸变化与快速恢复）、`close-minimized`（最小化关闭）。实际鼠标拖动的人工验收仍需单独进行。日志、模拟检查结果和截图均位于 `<构建目录>/verification/triangle/`。
 
 ## Vulkan 后端封装
 
@@ -78,7 +144,9 @@ Swapchain 优先选择 `B8G8R8A8_SRGB`／`SRGB_NONLINEAR`，否则选第一个�
 | `PhysicalDeviceCandidate` | 配对保存设备信息与该设备的 Surface 支持快照，供设备筛选使用 |
 | [`VulkanDevice`](src/RHI/Vulkan/VulkanDevice.h) | 从候选快照中选择设备，拥有逻辑设备及所选物理设备的数据副本，提供借用的句柄、队列族索引和只读查询数据 |
 | [`VulkanSwapchain`](src/RHI/Vulkan/VulkanSwapchain.h) | 拥有交换链，创建前刷新 Surface 支持，提供实际格式／颜色空间、尺寸和借用的图像句柄 |
-| [`VulkanClearRenderer`](src/RHI/Vulkan/VulkanClearRenderer.h) | 借用同一 Device 的 Swapchain，拥有图像视图、一个命令池／命令缓冲、两个二进制信号量及 acquire／submit／present Fence，记录并提交清屏 |
+| [`VulkanShaderModule`](src/RHI/Vulkan/VulkanShaderModule.h) | 加载离线验证的 SPIR-V，拥有 Shader Module，借用 Device；不负责管线创建和 Shader 执行 |
+| [`VulkanTrianglePipeline`](src/RHI/Vulkan/VulkanTrianglePipeline.h) | 拥有最小三角形管线与空 Layout，借用 Device，封装绑定、viewport／scissor 与 Draw |
+| [`VulkanClearRenderer`](src/RHI/Vulkan/VulkanClearRenderer.h) | 借用同一 Device 的 Swapchain 和可选三角形管线，拥有图像视图、一个命令池／命令缓冲、两个二进制信号量及 acquire／submit／present Fence，记录清屏和可选 Draw 并提交 |
 
 `queryPhysicalDevices(instance, devices)` 不要求先创建 Surface。`querySurfaceSupport(device, surface, support)` 检查两者属于同一个 Instance，然后查询实际窗口支持；`printPhysicalDeviceReport` 仅打印数据，不再查询 Vulkan。两种查询都在成功时整体替换输出，失败时保留原结果；保存的数据不包含指向临时查询结构的 `pNext` 指针。
 
@@ -86,7 +154,7 @@ Swapchain 优先选择 `B8G8R8A8_SRGB`／`SRGB_NONLINEAR`，否则选第一个�
 
 `VulkanSwapchain::initialize(device, surface, framebufferExtent)` 要求 Device 和 Surface 已初始化且属于同一个 Instance，尺寸以像素为单位。刷新 Surface 支持后再次确认所用队列能够呈现，并创建交换链、枚举图像；`VK_INCOMPLETE` 会重试枚举。失败及图像枚举期间的异常会清理部分创建的交换链，所有者保持空状态，支持重试；重复初始化被拒绝且保留原交换链。`images()` 返回的 span 和其中的图像句柄在交换链销毁后失效；图像由交换链管理，不单独销毁。[图像枚举](https://docs.vulkan.org/refpages/latest/refpages/source/vkGetSwapchainImagesKHR.html)
 
-组装顺序见 [`Sandbox`](apps/Sandbox/main.cpp)：Instance、Surface、Device 先创建，`SandboxApplication` 随后拥有可替换的 `Presentation`，后者按 Swapchain、清屏器的顺序声明成员，保证先释放清屏资源。重建策略与窗口回调在应用层，Vulkan 资源和实际等待仍由后端执行。清屏器的 `waitIdle()` 和析构在释放自身资源前等待 acquisition、提交和呈现资源退役；Swapchain 析构不自动等待 GPU。应用销毁前注销回调并清除窗口用户指针。窗口须活到 Surface 释放后，Instance 须活到 Device／Surface 释放后；Device 最后的析构等待不能保护此前已释放的子资源。[Device 销毁要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroyDevice.html)、[Swapchain 销毁要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroySwapchainKHR.html)
+组装顺序见 [`Sandbox`](apps/Sandbox/main.cpp)：Instance、Surface、Device、Shader Module 先创建，`SandboxApplication` 随后拥有可替换的 `Presentation`，后者按 Swapchain、管线、帧渲染器的顺序声明成员，保证先完成等待并释放命令资源。重建策略与窗口回调在应用层，Vulkan 资源和实际等待仍由后端执行。帧渲染器的 `waitIdle()` 和析构在释放自身资源前等待 acquisition、提交和呈现资源退役；管线与 Swapchain 析构不自动等待 GPU。应用销毁前注销回调并清除窗口用户指针。窗口须活到 Surface 释放后，Instance 须活到 Device／Surface 释放后；Device 最后的析构等待不能保护此前已释放的子资源。[Device 销毁要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroyDevice.html)、[Swapchain 销毁要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroySwapchainKHR.html)
 
 每帧等待上一帧三个完成条件后复用资源；acquire 使用 50 ms 超时，无可用图像时返回 `Retry`，不重置提交 Fence。成功后记录 `UNDEFINED`／`PRESENT_SRC_KHR` → `COLOR_ATTACHMENT_OPTIMAL` → `PRESENT_SRC_KHR` 转换；提交等待阶段为颜色附件输出，完成信号覆盖全部命令。只等待确实已发起的工作；录制／提交失败仍等待已发起的 acquisition，present 的 out-of-date／surface-lost 与内存不足排队语义分开处理。[acquire 要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkAcquireNextImageKHR.html)、[present 错误语义](https://docs.vulkan.org/refpages/latest/refpages/source/vkQueuePresentKHR.html)
 
@@ -109,5 +177,7 @@ Swapchain 优先选择 `B8G8R8A8_SRGB`／`SRGB_NONLINEAR`，否则选第一个�
 | 清屏器要求 maintenance1 | 检查 EXT 扩展、feature 及实例依赖；基础初始化可用不代表清屏可用 |
 | 最小化时停止更新 | 当前预期行为；等待窗口恢复后重建，也可直接关闭 |
 | 重建失败退出 | 查看 `presentation creation/rebuild failed` 及此前的 Vulkan 诊断；当前不实现失败后的重试或设备丢失恢复 |
+| Shader 初始化失败 | 查看具体文件路径和诊断；在对应构建目录执行 `MadCatShaders`，确认成功后重启程序，不直接修改 `.spv` 文件 |
+| 三角形管线创建失败 | 查看 `vkCreatePipelineLayout`／`vkCreateGraphicsPipelines`、入口名、颜色格式及此前的验证层诊断；当前只接受仓库三角形 Shader 的固定接口 |
 
 完整需求和后续计划见 [项目开发文档](docs/project-development.md)，协作规则见 [AGENTS.md](AGENTS.md)。
