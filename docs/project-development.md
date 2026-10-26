@@ -2,9 +2,11 @@
 
 MadCat 是一个使用自研 ECS 和 Vulkan 的渲染引擎。前期服务渲染算法研究和图形效果实验，长期考虑游戏与仿真用途。开发者应能加载模型、用 C++ 编写渲染 Pass、连接多个 Pass，并在运行时调整参数、查看中间结果。
 
-本文为开发范围、架构建议、半年计划和验收方法，供项目开发者及协作编码助手使用。文档更新日期为 2026 年 10 月 23 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
+本文维护开发范围、实现进度、半年计划和验收方法；架构方案独立维护于[架构设计文档](architecture-design.md)。两份文档供项目开发者及协作编码助手使用。文档更新日期为 2026 年 10 月 26 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
 
 ## 当前实现进度
+
+2026 年 10 月 26 日完成独立的 Ray Query 离线编译探针：锁定 Slang／SPIR-V 目标下的计算 Shader 通过验证，入口、capability、扩展和固定资源绑定已核对，运行时前置条件已记录。GPU 求交、加速结构构建及光追 feature 启用仍待实现；详细证据见下文路径追踪章节。
 
 已完成 CMake 构建入口、GLFW 窗口、Vulkan Instance 与诊断回调、设备及 Surface 能力报告、设备选择、Device／单队列、Swapchain，以及一个在途帧的持续渲染、同步和窗口 resize／最小化恢复时的交换链重建。程序创建 1280 × 720 的 MadCat 窗口，通过动态渲染清除深蓝背景，再绑定最小图形管线并 Draw 彩色三角形；后端处理状态转换和 acquire／submit／present。重建与关闭前均等待 GPU 提交及呈现资源退役，先释放帧命令资源，再释放管线与交换链。零像素尺寸或最小化时等待事件，窗口恢复后重建并继续渲染，也可在最小化时关闭；不可恢复错误返回非零状态。Slang 手动编译、SPIR-V 验证、失败保留产物、启动时 Shader Module 加载和管线创建均已接通，运行期 Shader 更新尚未实现。
 
@@ -154,155 +156,17 @@ Falcor 的模块化 Render Graph 和研究工作流是体验参考。MadCat 采�
 | F09 | 可运行的路径追踪 Pass | 完成多次散射和逐帧累积；相机或场景改变后正确重置累积 |
 | F10 | 物理和动画接入接口 | 存在可复用的场景系统接入点，并明确执行阶段、Transform 写入权和场景到 GPU 的同步方式 |
 
-F09 的具体算法和实现路径属于下文的建议基线，验收范围至少包括多次散射、材质参与、累积和变化后的重置。只演示光追阴影、反射或一次求交，不能替代路径追踪目标。
+F09 的具体算法与实现路径仍需按架构文档中的建议验证，验收范围至少包括多次散射、材质参与、累积和变化后的重置。只演示光追阴影、反射或一次求交，不能替代路径追踪目标。
 
 半年内不要求实现完整场景编辑器、节点编辑器、配置文件建图、脚本系统、C++ 动态插件、Shader 文件监视、多图形 API、完整物理或动画、多队列调度、复杂 ECS 并行执行、实时降噪、ReSTIR 或 DLSS。这些功能可以在核心工作流稳定后另行安排。
 
-## 模块边界和数据流
+## 架构设计入口
 
-建议采用单进程、按职责拆分的 C++ 模块。目录和接口按当前实际需求逐步建立，不一次性生成全部框架。
+模块职责、Pass 编写方式、资源与历史所有权、显式绑定和参数链路统一维护于[架构设计文档](architecture-design.md)。该文档区分已确认方向、接口草案及待确认建议；当前多数目标接口尚未实现。本文继续维护功能范围、进度、计划和验收证据。
 
-| 模块 | 职责和数据所有权 | 主要依赖 |
-|---|---|---|
-| Core | 日志、错误、基础标识和通用工具 | 标准库 |
-| Platform | 窗口、输入和平台事件 | Core、窗口库 |
-| ECS | Entity、组件存储、查询和结构性修改 | Core |
-| Scene | 场景组件、层级、Transform 更新和场景版本 | ECS、数学库 |
-| Assets | CPU 模型、材质、图片及资源标识 | Core、模型与图片库 |
-| Shader | Slang 编译产物、编译诊断和绑定布局元数据 | Core、Slang 工具或 API |
-| RHI | GPU 资源、管线、绑定、命令和 GPU 生命周期 | Core、Shader 产物；内部依赖 Vulkan |
-| RenderScene | 从 Scene 与 Assets 提取渲染数据、管理对应 GPU 数据 | Scene、Assets、RHI |
-| RenderGraph | Pass 声明、依赖分析、图资源和同步计划 | Core、RHI |
-| Passes | 阴影、基础光照、PBR、后处理、路径追踪等算法 | RenderGraph、RenderScene、RHI |
-| Tools | 调参、Pass 开关、资源查看和编译操作 | 相应模块的公开接口 |
-| Sandbox | 组装程序、示例场景和默认渲染图 | 上述模块 |
+## Shader 工具链实现与验证
 
-ECS 保存场景事实，例如局部 Transform、模型资源标识和灯光参数。世界矩阵由 Scene 计算，GPU 缓冲、材质表和光追实例表由 RenderScene 派生。ECS 不保存 `VkBuffer`、`VkImage`、Descriptor Set 或 Command Buffer。
-
-**ECS System 与 Render Pass 是两种职责。** System 查询并更新场景状态；Pass 消费提取后的渲染数据并记录 GPU 工作。一个实体不对应一个 Pass，Render Graph 也不负责调度物理或动画。
-
-建议每帧流程如下：
-
-1. 处理窗口事件和界面输入，收集场景与参数修改。
-2. 应用 ECS 结构性修改，执行场景系统，更新世界 Transform。
-3. 提取本帧 RenderScene，准备上传数据，并更新场景、相机、材质版本。
-4. 在图结构、输出尺寸或 Shader 接口变化时重新编译图；纯数值参数变化只更新参数数据。
-5. 执行上传、必要的加速结构构建、渲染 Pass、调试显示和界面绘制，提交 GPU 工作并呈现。
-6. 根据 GPU 完成信号回收可以释放或复用的资源。
-
-第一阶段建议 CPU 系统顺序执行，GPU 渲染工作使用一个同时支持所需 Graphics、Compute 和 Transfer 操作的队列。呈现支持需要单独查询；若呈现队列族不同，后端仍须正确处理相应同步与所有权。这里不承诺异步计算或多队列图调度。
-
-## 自研 ECS 和 Transform 设计
-
-### 存储与查询
-
-建议先实现 Sparse Set 组件存储，而不是一开始采用 Archetype。两者都可以自研；Sparse Set 便于逐步理解实体生命周期、组件添加删除和多组件查询，符合当前无性能指标、独立开发的条件。其代价是组件间数据局部性和复杂查询性能需要后续评估，不能宣称天然更快。
-
-最小机制包括：
-
-- Entity 使用索引与 generation，防止删除后复用索引使旧句柄指向新实体。
-- 组件存储管理实体到组件位置的映射以及连续数据；添加、删除、查询有明确失败行为。
-- 多组件查询可以先遍历候选集合并检查其他组件，不预先实现复杂查询缓存。
-- 明确组件引用和迭代器的失效条件；不得承诺存储扩容或删除时地址稳定。
-- 查询迭代期间不立即进行会使其失效的结构性修改；通过简单延迟命令在约定阶段统一应用。
-- 初期不引入复杂 Job System、锁自由结构或通用事件总线。
-
-第一版场景组件建议包含 LocalTransform、Hierarchy、WorldTransform、Camera、MeshInstance 和 Light。WorldTransform 是派生数据；材质与几何数据通过资源标识共享，而非复制到每个实体。
-
-### 父子关系和世界变换
-
-建议使用局部位置、四元数旋转和缩放表示 LocalTransform。采用列向量时，世界矩阵满足 `World(child) = World(parent) * Local(child)`；根实体的世界矩阵来自自身局部变换。具体数学约定在模型导入之前统一记录并验证。
-
-层级必须维护有效父节点、拒绝自引用和循环，并保证父节点先于子节点更新。初期可以每帧完整更新世界矩阵，之后再加入 dirty 标记。世界矩阵需要保留父子非均匀缩放组合的结果，不强制重新分解为 TRS。
-
-建议最小重新挂接操作保留局部变换，其世界位置可能随父节点变化；“保持世界位置”的重新挂接另行实现并处理矩阵分解限制。删除有子节点的实体时，普通删除操作先拒绝并提示，提供显式的子树删除操作；避免留下失效父句柄。上述行为属于建议接口契约。
-
-## Vulkan RHI 设计
-
-RHI 的目的，是让 Pass 作者通过资源、管线、绑定和命令接口表达算法，并把 Vulkan 对象创建与生命周期集中管理。**当前只有 Vulkan 后端，不建立为多 API 服务的后端工厂、能力交集或虚函数层级。** 抽象是否需要存在，以它能否减少 Pass 的重复工作为依据。
-
-当前 Instance 与所选设备均采用 Vulkan 1.3 API 基线，Device 创建已显式启用 Dynamic Rendering 和 Synchronization2，后续绘制与同步将使用这两项能力。两者已进入 Vulkan 1.3 核心，创建 Device 前仍查询设备版本并查询、启用所需 feature，不凭实例版本或显卡型号假定可用。[Vulkan 核心版本说明](https://docs.vulkan.org/spec/latest/appendices/versions.html)
-
-按实际 Pass 需求逐步提供：
-
-- Buffer、Texture、Sampler、Shader 和管线的创建与受控销毁。
-- 图形与计算管线描述、资源绑定布局、绑定集合和参数上传。
-- 渲染附件设置、管线与资源绑定、Draw、DrawIndexed、Dispatch 和资源复制。
-- 帧上下文、队列提交、呈现同步和完成信号。
-- Barrier 的底层实现，以及后期的加速结构创建、构建和绑定接口。
-
-普通 Pass 的公开接口尽量不出现 Vulkan 类型。窗口 Surface 和第三方 UI 的 Vulkan 适配可保留在专门的后端适配代码中。遇到 RHI 尚未覆盖的操作，先补足具体接口，避免任意 Vulkan 访问成为默认写法。
-
-Render Graph 决定受管资源的用途变化和同步计划；RHI 将计划转换为 Vulkan 命令并负责提交与生命周期。对图外上传等工作，必须明确导入状态或把工作接入图，避免两套状态跟踪各自猜测。
-
-CPU 对象释放不等于 GPU 已使用完毕。建议以帧完成信号控制延迟销毁、上传区复用和 Descriptor 复用。第一步可以仅使用一个在途帧；增加在途帧之前，需要明确所有可变缓冲、描述符和历史资源的复用条件。首次实现优先正确性，手动编译与窗口重建期间可以先等待 GPU 完成。
-
-## Render Graph 和 Pass 设计建议
-
-### Pass 的声明和执行
-
-建议将 Pass 分为资源声明、准备、执行和参数界面几个阶段，具体函数名在实现时决定。
-
-| 阶段 | Pass 作者负责 | 引擎负责 |
-|---|---|---|
-| 声明 | 输入输出、读取或写入、访问阶段、用途、尺寸和格式 | 检查声明、建立依赖、确定资源需求 |
-| 准备 | 选择 Shader、管线和算法专用数据 | 提供资源、绑定与生命周期支持 |
-| 执行 | 通过 RHI 绑定管线与资源，记录 Draw／Dispatch | 按计划插入同步并安排命令执行 |
-| 界面 | 暴露算法参数，说明哪些变化需要重建或重置历史 | 提供统一面板与变化处理入口 |
-
-Shader 反射帮助建立绑定布局，不能代替 Pass 对执行阶段、资源用途和读写关系的声明。RenderScene 提供的顶点、索引、材质、贴图及加速结构也必须纳入访问声明，不能成为图无法看见的隐藏访问。
-
-建议最初按整个 Buffer 或整个 Texture 跟踪状态，暂不支持独立 mip 或 layer 的细粒度使用。同步模型应能表达颜色附件、深度附件、采样读取、Storage 读写、传输、顶点与索引访问，以及后续的加速结构构建和读取。
-
-### 图编译和同步
-
-图编译建议按以下顺序实现：
-
-1. 校验连接、资源类型、格式、尺寸和必需输入。
-2. 建立资源生产者与消费者关系，使用版本或等价机制明确写入后的资源身份。
-3. 对显式依赖和资源依赖进行拓扑排序；有环时报告相关 Pass 和资源。
-4. 分配图拥有的资源，登记外部导入资源的初始状态和需要交还的状态。
-5. 根据访问阶段、读写、布局和历史状态生成同步计划。
-6. 在执行时应用计划，并向后续帧或外部使用者交还有效的最终状态。
-
-同一逻辑资源的多次写入必须有可判断的版本或顺序；图编译器应拒绝不明确的多写者关系。读后写和写后写也需要正确排序或同步，不能只处理写后读。Barrier 不仅是 Image Layout 转换，还涉及执行与内存依赖。[Vulkan 同步指南](https://docs.vulkan.org/guide/latest/synchronization.html)
-
-建议第一版不进行资源别名复用、异步计算或自动 Pass 裁剪。首先证明明确资源声明下的顺序和同步正确，再引入优化。
-
-### 外部资源和历史资源
-
-建议区分三类所有权：RenderScene 持有的长期 GPU 资源、图拥有的中间资源、路径追踪累积等跨帧历史资源。Assets 保持 CPU 资产所有权，RenderScene 管理对应 GPU 数据。导入图不改变外部资源的所有权。Swapchain 图像需要明确 acquire、最终呈现状态和相关提交同步。
-
-历史资源由持久资源管理逻辑持有，以本帧输入输出身份导入。跨帧反馈不作为当前帧 DAG 中的循环。一个累积纹理可以先在单队列中按顺序使用，但仍需处理前一帧写入到下一帧读写的依赖；增加在途帧时不能凭“帧号不同”跳过同步。
-
-中间纹理查看也是资源消费者，需要声明采样读取或执行必要的转换，保证查看器使用的纹理仍然存活。Depth、HDR 或整数数据建议通过专用查看 Pass 转换为可显示颜色。
-
-### Pass 开关与失败恢复
-
-关闭后处理 Pass 时，可以明确采用输入直通。关闭生产必需资源的 Pass 时，需要提供替代分支、默认值，或拒绝切换并给出原因。不能简单跳过执行后继续读取未初始化的输出。
-
-建议图连接变更先编译候选图，成功后在安全边界替换当前图；失败时保留上一份有效图。初次启动没有有效图时，显示诊断或基础清屏画面。图结构、尺寸、格式、Shader 绑定接口变化触发重新编译；普通参数变化不应强制重建整个图。
-
-### C++ 建图示例
-
-下面是目标使用体验的伪代码，**不是当前已实现或可编译的 API**：
-
-```cpp
-auto graph = RenderGraph{};
-graph.addPass("Shadow", ShadowPass{});
-graph.addPass("Lighting", BasicLightingPass{});
-graph.addPass("ToneMap", ToneMapPass{});
-graph.connect("Shadow.depth", "Lighting.shadowMap");
-graph.connect("Lighting.hdrColor", "ToneMap.input");
-graph.setOutput("ToneMap.color");
-graph.compile();
-```
-
-后续配置文件与节点编辑器应产生相同的 Pass 实例、参数和连接描述，并复用同一个图编译器。当前可以保留清晰的 Pass 名称和参数定义，但不提前实现完整序列化与编辑器框架。
-
-## Slang 编译和更新流程
-
-建议初期使用固定版本的 `slangc` 生成 SPIR-V，由构建步骤或用户命令手动触发。界面中的“重新编译 Shader”操作在后续调用相同流程；不要求监视源文件或自动编译。Slang 官方说明展示了命令行生成 SPIR-V 的用法。[Slang 编译指南](https://docs.shader-slang.org/en/stable/external/slang/docs/user-guide/08-compiling.html)
+当前使用固定版本的 `slangc`，通过独立手动目标生成 SPIR-V；具体版本、产物和已验证行为如下。运行期更新与后续界面触发流程独立维护于[架构设计文档](architecture-design.md#shader-布局与运行期更新设计)。
 
 当前已实现第一段离线编译流程：`MadCatShaders` 为独立手动目标，不随普通 C++ 构建执行。Slang 固定版本为 `2026.17-25-gc7954ebd1`，程序路径由 CMake 查找或 `MADCAT_SLANGC` 指定，完整版本不符则拒绝编译。`shaders/triangle.slang` 包含 `vertexMain`、`fragmentMain`，直接生成 SPIR-V 1.6、保留入口名、使用 `-O0` 并将警告视为错误；`spirv-val --target-env vulkan1.3` 验证每个模块。顶点采用 `SV_VulkanVertexID`，实测只需 `Shader` capability，两个阶段的颜色接口均在 location 0。
 
@@ -341,20 +205,9 @@ graph.compile();
 | Debug 连续变化与退出 | 24 次尺寸变化、四次快速最小化／恢复后画面正确；另验证最小化关闭。各场景正常返回 0，管线创建／销毁数量一致且先于 Swapchain 释放 |
 | Validation Layers 与同步验证 | 所有最终 Debug 场景启用 `VK_LAYER_VALIDATE_SYNC=1`，无 warning／error；实际设备 RTX 5060 Ti，API 1.4.351，驱动 617.42 |
 
-环境与 Shader 版本沿用上述记录，未修改 Shader，未测量性能。`MadCatTriangleChecks` 复用模拟 Vulkan 程序，覆盖函数缺失、Layout／Pipeline 创建失败与重试、重复初始化、格式、动态尺寸及 Draw 参数；真实驱动上的资源耗尽未注入。可分发的窗口检查在 `tests/TriangleWindowChecks.ps1`，运行说明见 [README](../README.md#三角形绘制与检查)，截图和日志位于 `<构建目录>/verification/triangle/`。当前只显示一个裁剪空间三角形，尚无通用资源绑定、场景、相机或 Render Graph；第一阶段所需的 Ray Query 编译与 GPU 求交探针仍未完成。
+环境与 Shader 版本沿用上述记录，未修改 Shader，未测量性能。`MadCatTriangleChecks` 复用模拟 Vulkan 程序，覆盖函数缺失、Layout／Pipeline 创建失败与重试、重复初始化、格式、动态尺寸及 Draw 参数；真实驱动上的资源耗尽未注入。可分发的窗口检查在 `tests/TriangleWindowChecks.ps1`，运行说明见 [README](../README.md#三角形绘制与检查)，截图和日志位于 `<构建目录>/verification/triangle/`。当前只显示一个裁剪空间三角形，尚无通用资源绑定、场景、相机或 Render Graph；该次尚未完成 Ray Query 编译与 GPU 求交探针，后续编译探针证据见路径追踪章节。
 
-最初可以采用明确的 binding 约定；随后用经过版本验证的反射元数据辅助建立绑定布局，并验证参数类型与布局。当前官方命令行参考列出了 `-reflection-json`，具体字段与能力以项目锁定版本的探针结果为准；需要更完整控制时再考虑编译与反射 API。[Slang 命令行参考](https://docs.shader-slang.org/en/stable/external/slang/docs/command-line-slangc-reference.html)
-
-建议更新流程为：
-
-1. 用户手动触发编译；编译到候选产物，记录源文件、入口、目标、参数和依赖。
-2. 检查编译诊断、SPIR-V 与绑定布局，创建候选管线。
-3. 若资源接口变化，重新准备对应绑定和图资源；不假定新旧接口兼容。
-4. 成功后等待安全的 GPU 使用边界，再替换旧管线和相关绑定。
-5. 编译或管线创建失败时保留上一版本，在界面或日志中显示文件、入口和错误。
-6. 若影响路径追踪结果，更新相关版本并重置累积。
-
-C++ 与 Shader 的参数结构须明确矩阵约定、字段偏移、对齐和数组步长。不要把任意 C++ struct 或含平台相关 `bool` 的结构直接视为 GPU 布局一致。反射、布局断言或小型数据读取场景应验证实际传输结果。
+Shader 布局和运行期更新的目标设计见[架构设计文档](architecture-design.md#shader-布局与运行期更新设计)；当前运行程序仍只在启动时加载 Shader，尚未验证通用反射或运行期替换。
 
 ## 模型和渲染功能基线
 
@@ -362,9 +215,7 @@ C++ 与 Shader 的参数结构须明确矩阵约定、字段偏移、对齐和�
 
 建议先支持 glTF 2.0 的静态三角网格、索引、位置、法线、UV、节点层级、基础材质、PNG／JPEG 贴图和采样器。`.gltf` 与 `.glb` 的具体覆盖范围随导入阶段逐项验证，并记录支持清单；法线缺失、稀疏 accessor、压缩和扩展不默认视为已支持。
 
-模型导入应分为 CPU 解析、数据校验、引擎资产转换和 GPU 上传。导入器产生资产与节点数据，Scene 再建立实体层级；同一 mesh 的多个实例共享资产。
-
-建议先统一右手系、Y 向上、列向量矩阵和内部世界单位约定。Vulkan 投影深度、视口 Y 方向、纹理 UV、矩阵上传及 glTF 的局部变换分别校验，避免重复翻转。遇到超出已支持范围的必需扩展，应报告模型与能力缺口，而非静默产生错误结果。
+资产转换和坐标约定的待确认建议见[架构设计文档](architecture-design.md#资产转换与数学约定)。
 
 ### 光栅渲染
 
@@ -380,11 +231,22 @@ PBR 的第一份验收场景应能比较不同粗糙度、金属度和基础色�
 
 ### 路径追踪
 
-建议第一版选择**计算 Pass 加硬件 Ray Query**实现路径追踪，复用 RHI 的 Dispatch，并按需求加入加速结构接口。Vulkan Ray Query 可用于计算 Shader；它与 Ray Tracing Pipeline 是不同执行方式，二者都依赖加速结构。因此路径追踪目标不必从专用光追管线和 Shader Binding Table 起步。[Vulkan 光追指南](https://docs.vulkan.org/guide/latest/extensions/ray_tracing.html)
-
-Slang 对 SPIR-V 提供 Ray Query 能力，但项目锁定的编译器、目标 profile 与设备组合必须用实际探针验证。[Slang 能力参考](https://shader-slang.org/slang/user-guide/a4-02-reference-capability-atoms.html)
+路径追踪执行路径的现有建议见[架构设计文档](architecture-design.md#路径追踪执行路径)；下文记录早期能力验证及功能验收范围。
 
 建议在首月查询并记录 `accelerationStructure`、`rayQuery`、`bufferDeviceAddress` 及其扩展依赖与限制，并编译一个最小求交 Shader。此时不构建完整路径追踪器。若 Ray Query 路径不可用，应先诊断环境，必要时比较专用光追管线方案，而不是拖到第五个月才验证基础能力。
+
+2026 年 10 月 26 日已完成上述编译探针。独立手动目标 `MadCatRayQueryProbe` 编译 `shaders/ray-query.slang`，使用现有锁定版本 `2026.17-25-gc7954ebd1`、SPIR-V 1.6 和显式 `-capability spvRayQueryKHR`；省略此 capability 会触发隐式 profile 升级诊断，并被 warnings-as-errors 拒绝。通过 `spirv-val --target-env vulkan1.3` 后，用 `spirv-dis` 检查计算入口、工作组、query 指令和固定资源绑定，成功后发布源码快照、二进制、反汇编和 manifest。复用原有候选／备份发布流程，不新增运行时依赖；三角形和探针产物分别保存。[命令、接口和设备启用清单](../README.md#ray-query-编译探针)
+
+| 2026-10-26 编译探针验证 | 实际结果 |
+|---|---|
+| Debug／Release 编译与验证 | 两种配置均通过，`compute.spv` SHA256 为 `e7587422be40149889df2986ed2221c23e7c86fef2d211a9d45a334e8114aad8` |
+| SPIR-V 检查 | `computeMain`／GLCompute、工作组 1 × 1 × 1、Logical／GLSL450；只需 `Shader`／`RayQueryKHR` capability，声明 `SPV_KHR_ray_query`／`SPV_KHR_storage_buffer_storage_class`；后者由核心基线覆盖 |
+| 资源接口 | set 0 binding 0 为 `scene` 加速结构，binding 1 为 `results` Storage Buffer；写入一个 32 位命中标记 |
+| 失败与恢复 | 每种配置各 18 项检查通过，包括版本／工具错误、编译／验证／反汇编失败、查询移除、binding／工作组变化、capability 省略和发布中断恢复；失败时上一组四个文件哈希不变 |
+| 三角形构建回归 | 原有 12 项 Shader 检查通过，重新编译后的两个三角形 SPIR-V 哈希与已有记录一致 |
+| 设备查询 | 本次 `vulkaninfo` 重新报告 RTX 5060 Ti（API 1.4.351、驱动 617.42）和 AMD 集显（API 1.3.280、驱动 24.10.24）均有 Compute 队列、三个所需扩展及三个所需 feature 支持；仅表示查询可用 |
+
+工具为 CMake 4.4.4、Vulkan SDK 1.4.363.0 和 SPIRV-Tools `v2026.4 v2026.4.rc2-0-gef96ed76`。在 Vulkan 1.3 基线下，未来 Device 仍须显式启用 `VK_KHR_acceleration_structure`、`VK_KHR_ray_query`、`VK_KHR_deferred_host_operations` 以及 `bufferDeviceAddress`、`accelerationStructure`、`rayQuery`；当前设备创建链未启用这些项目。固定 Descriptor 不要求额外启用 Descriptor 数组或 update-after-bind。尚未执行新 Shader、GPU 求交、同步验证或性能测量，不能视为完整第一阶段或路径追踪完成。失败检查日志在本地 `<构建目录>/verification/ray-query-build/`，本次设备查询报告在 `build/verification/ray-query-device-report.txt`。
 
 路径追踪按以下增量实现：
 
@@ -399,15 +261,9 @@ Slang 对 SPIR-V 提供 Ray Query 能力，但项目锁定的编译器、目标 
 
 相机、视口尺寸、几何、Transform、材质、光源、影响结果的 Shader 或采样参数变化时，必须正确判断是否重置历史。Tone Mapping 等纯显示参数可以不清空线性累积。对累积存储的读写和 BLAS／TLAS 构建到求交的依赖，须纳入图同步计划。
 
-## 物理和动画的后续接入
+## 物理和动画的后续接入范围
 
-建议保留一个可注册场景系统的接入接口，接入的更新函数能够获得 ECS／Scene、时间步长和约定的执行阶段。现有相机或 Transform 系统可以使用此接口，从而验证它实际可用。它可以先采用简单回调和顺序执行，不要求通用插件系统或复杂调度器。
-
-未来物理和动画模块通过该接入点读写组件。Transform 的写入权、变形数据到 RenderScene 的更新入口和版本通知机制需要明确；不要只创建空的 Physics 或 Animation 类就视为完成接口预留。
-
-建议将未来帧阶段划分为输入、动画评估、物理模拟、Transform 合成与层级更新、RenderScene 提取、渲染。物理可以独立使用固定步长；动画与物理如何共同影响同一实体，由后续明确的合成阶段决定，避免两个系统无序覆盖 Transform。
-
-骨骼蒙皮、变形几何上传和 BLAS 更新应在 RenderScene 提取之后形成明确 GPU 工作依赖。当前只记录此边界，不实现骨骼、碰撞或物理求解。具体物理与动画库、帧阶段细分和冲突合成策略保持待定。
+半年范围为可复用的场景系统接入点及明确的写入阶段，暂不实现求解、碰撞或骨骼动画。具体接入设计与待确认建议见[架构设计文档](architecture-design.md#物理和动画的后续接入)，实际能力仍待实现验证。
 
 ## 工具和第三方依赖建议
 
@@ -427,7 +283,7 @@ Slang 对 SPIR-V 提供 Ray Query 能力，但项目锁定的编译器、目标 
 
 当前已采用 CMake、固定提交的 GLFW 3.4 和本机 Vulkan SDK。GLFW 通过 FetchContent 管理，Vulkan 开发环境通过 `find_package(Vulkan 1.3.239 REQUIRED)` 查找。其余工具库组合仍属于建议，具体版本和包管理方式按后续实际需求确定。cgltf 不默认把外部图片解码为像素，需要额外的文件处理和图片解码步骤。[cgltf 使用说明](https://github.com/jkuhlmann/cgltf)
 
-建议源码逐步落在 `src/Core`、`src/Platform`、`src/ECS`、`src/Scene`、`src/Assets`、`src/Shader`、`src/RHI/Vulkan`、`src/RenderScene`、`src/RenderGraph`、`src/Passes`、`apps/Sandbox`，Shader 放在 `shaders`，测试放在 `tests`。尚无实现时不创建空目录或空模块。
+源码目录组织建议见[架构设计文档](architecture-design.md#源码组织)，实际目录与支持范围以当前源码为准。
 
 ## 半年阶段计划
 
@@ -478,7 +334,7 @@ Shader 编译与资源状态模型先做最小验证，再逐步完善；不等�
 13. 添加层级和世界 Transform 更新，再单独覆盖重新挂接与删除行为。
 14. 按几何、索引、法线、UV、贴图分别增加模型导入能力。
 
-当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、单帧同步、交换链与管线重建、Slang 到 SPIR-V 的手动编译与验证、启动时的 Shader Module 加载，以及最小图形管线和三角形 Draw。下一次最小增量建议为固定 Slang／SPIR-V 目标下的 Ray Query 编译探针，核对所需 capability、扩展和设备启用前置条件；实际 GPU 求交仍需加速结构和绑定资源支持。运行期 Shader 更新仍需安全替换和失败恢复验证。
+当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、单帧同步、交换链与管线重建、Slang 到 SPIR-V 的手动编译与验证、启动时的 Shader Module 加载、最小图形管线和三角形 Draw，以及 Ray Query 离线编译探针。当前先进行架构设计：已确认分阶段 Pass、C++ 输入输出及效果组合，参数修改链路已形成设计基线，后续讨论执行上下文、资源绑定和帧资源回收接口。进入实现阶段后，Entity 生命周期和失效句柄检查仍是 ECS／场景与模型主线的候选最小增量；Ray Query GPU 求交按缓冲、设备能力启用、绑定、加速结构和计算提交依赖另行拆分。运行期 Shader 更新仍需安全替换和失败恢复验证。
 
 ## 验证策略与风险
 

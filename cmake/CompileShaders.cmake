@@ -1,12 +1,26 @@
 cmake_minimum_required(VERSION 3.25)
 
+# Only these two self-contained exercises are supported; this is not a general
+# shader package format. Keep the existing triangle invocation compatible.
+if(NOT DEFINED SHADER_PACKAGE)
+    set(SHADER_PACKAGE triangle)
+endif()
+set(required_tools SLANGC SPIRV_VAL)
+if(SHADER_PACKAGE STREQUAL "triangle")
+    set(stages vertex fragment)
+elseif(SHADER_PACKAGE STREQUAL "ray-query")
+    set(stages compute)
+    list(APPEND required_tools SPIRV_DIS)
+else()
+    message(FATAL_ERROR "Unsupported shader package: ${SHADER_PACKAGE}")
+endif()
 foreach(required SLANGC SPIRV_VAL EXPECTED_SLANG_VERSION SOURCE_FILE OUTPUT_ROOT)
     if(NOT DEFINED ${required} OR "${${required}}" STREQUAL "")
         message(FATAL_ERROR "Missing shader build argument: ${required}")
     endif()
 endforeach()
-foreach(tool SLANGC SPIRV_VAL)
-    if(NOT EXISTS "${${tool}}" OR IS_DIRECTORY "${${tool}}")
+foreach(tool IN LISTS required_tools)
+    if(NOT DEFINED ${tool} OR NOT EXISTS "${${tool}}" OR IS_DIRECTORY "${${tool}}")
         message(FATAL_ERROR "${tool} is unavailable: ${${tool}}. Set MADCAT_${tool} to the executable path and configure again.")
     endif()
 endforeach()
@@ -33,9 +47,9 @@ endif()
 string(STRIP "${validator_output}${validator_error}" validator_version)
 
 cmake_path(ABSOLUTE_PATH OUTPUT_ROOT NORMALIZE OUTPUT_VARIABLE output_root)
-set(candidate "${output_root}/triangle.candidate")
-set(previous "${output_root}/triangle.previous")
-set(published "${output_root}/triangle")
+set(candidate "${output_root}/${SHADER_PACKAGE}.candidate")
+set(previous "${output_root}/${SHADER_PACKAGE}.previous")
+set(published "${output_root}/${SHADER_PACKAGE}")
 file(MAKE_DIRECTORY "${output_root}")
 file(LOCK "${output_root}/.compile.lock" GUARD PROCESS TIMEOUT 10 RESULT_VARIABLE lock_result)
 if(NOT lock_result STREQUAL "0")
@@ -67,19 +81,25 @@ endif()
 remove_work_directory("${candidate}")
 remove_work_directory("${previous}")
 file(MAKE_DIRECTORY "${candidate}")
-# Both stages consume the same source snapshot even if the editor saves the
+# All stages consume the same source snapshot even if the editor saves the
 # original file while this explicit compilation is running. No imports yet.
-file(COPY_FILE "${SOURCE_FILE}" "${candidate}/triangle.slang")
+set(snapshot "${SHADER_PACKAGE}.slang")
+file(COPY_FILE "${SOURCE_FILE}" "${candidate}/${snapshot}")
 
 set(common_flags -target spirv -profile spirv_1_6 -emit-spirv-directly
     -fvk-use-entrypoint-name -O0 -warnings-as-errors all)
+if(SHADER_PACKAGE STREQUAL "ray-query")
+    # The pinned compiler otherwise reports an implicit profile upgrade, which
+    # warnings-as-errors intentionally rejects.
+    list(APPEND common_flags -capability spvRayQueryKHR)
+endif()
 set(manifest "Slang: ${compiler_version}\nCompiler: ${SLANGC}\nValidator: ${SPIRV_VAL}\n${validator_version}\nSource: ${SOURCE_FILE}\n")
-file(SHA256 "${candidate}/triangle.slang" source_hash)
-string(APPEND manifest "Source snapshot: triangle.slang\nSource SHA256: ${source_hash}\nValidation: --target-env vulkan1.3\n")
-foreach(stage vertex fragment)
+file(SHA256 "${candidate}/${snapshot}" source_hash)
+string(APPEND manifest "Source snapshot: ${snapshot}\nSource SHA256: ${source_hash}\nValidation: --target-env vulkan1.3\n")
+foreach(stage IN LISTS stages)
     set(entry "${stage}Main")
     set(output "${candidate}/${stage}.spv")
-    execute_process(COMMAND "${SLANGC}" "${candidate}/triangle.slang" ${common_flags}
+    execute_process(COMMAND "${SLANGC}" "${candidate}/${snapshot}" ${common_flags}
         -entry "${entry}" -stage "${stage}" -o "${output}"
         RESULT_VARIABLE compile_result OUTPUT_VARIABLE compile_output ERROR_VARIABLE compile_error)
     if(NOT compile_result STREQUAL "0")
@@ -95,9 +115,12 @@ foreach(stage vertex fragment)
     string(APPEND manifest "${stage}: ${recorded_flags}\n${stage}.spv SHA256: ${output_hash}\n")
     message(STATUS "Validated ${stage} entry '${entry}' (SPIR-V 1.6, Vulkan 1.3)")
 endforeach()
+if(SHADER_PACKAGE STREQUAL "ray-query")
+    include("${CMAKE_CURRENT_LIST_DIR}/CheckRayQuery.cmake")
+endif()
 file(WRITE "${candidate}/manifest.txt" "${manifest}")
 
-# Publish the pair only after both stages validate. This is an offline build
+# Publish the package only after all checks pass. This is an offline build
 # transaction, not a runtime hot-reload or lock-free reader protocol.
 if(EXISTS "${published}")
     file(RENAME "${published}" "${previous}" RESULT backup_result)

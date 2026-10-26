@@ -45,10 +45,14 @@ endif()
 set(MADCAT_SLANG_VERSION "2026.17-25-gc7954ebd1")
 find_program(MADCAT_SLANGC NAMES slangc HINTS "$ENV{VULKAN_SDK}/Bin")
 find_program(MADCAT_SPIRV_VAL NAMES spirv-val HINTS "$ENV{VULKAN_SDK}/Bin")
-set(MADCAT_SHADER_ARGUMENTS
+find_program(MADCAT_SPIRV_DIS NAMES spirv-dis HINTS "$ENV{VULKAN_SDK}/Bin")
+set(MADCAT_SHADER_TOOLS
     "-DSLANGC=${MADCAT_SLANGC}"
     "-DSPIRV_VAL=${MADCAT_SPIRV_VAL}"
     "-DEXPECTED_SLANG_VERSION=${MADCAT_SLANG_VERSION}"
+)
+set(MADCAT_SHADER_ARGUMENTS
+    ${MADCAT_SHADER_TOOLS}
     "-DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle.slang"
     "-DOUTPUT_ROOT=${CMAKE_CURRENT_BINARY_DIR}/shaders"
 )
@@ -70,6 +74,34 @@ add_custom_target(MadCatShaderChecks
         "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/verification/shader-build"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ShaderBuildChecks.cmake"
     COMMENT "Checking shader compilation and failure recovery"
+    VERBATIM
+)
+
+set(MADCAT_RAY_QUERY_ARGUMENTS
+    ${MADCAT_SHADER_TOOLS}
+    "-DSPIRV_DIS=${MADCAT_SPIRV_DIS}"
+    -DSHADER_PACKAGE=ray-query
+    "-DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/ray-query.slang"
+    "-DOUTPUT_ROOT=${CMAKE_CURRENT_BINARY_DIR}/shaders"
+)
+add_custom_target(MadCatRayQueryProbe
+    COMMAND "${CMAKE_COMMAND}" ${MADCAT_RAY_QUERY_ARGUMENTS}
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CompileShaders.cmake"
+    BYPRODUCTS
+        "${CMAKE_CURRENT_BINARY_DIR}/shaders/ray-query/compute.spv"
+        "${CMAKE_CURRENT_BINARY_DIR}/shaders/ray-query/compute.spvasm"
+        "${CMAKE_CURRENT_BINARY_DIR}/shaders/ray-query/manifest.txt"
+        "${CMAKE_CURRENT_BINARY_DIR}/shaders/ray-query/ray-query.slang"
+    SOURCES shaders/ray-query.slang cmake/CompileShaders.cmake cmake/CheckRayQuery.cmake
+    COMMENT "Compiling and inspecting the Ray Query probe (offline, manual target)"
+    VERBATIM
+)
+add_custom_target(MadCatRayQueryChecks
+    COMMAND "${CMAKE_COMMAND}" ${MADCAT_RAY_QUERY_ARGUMENTS}
+        "-DCOMPILE_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/cmake/CompileShaders.cmake"
+        "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/verification/ray-query-build"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ShaderBuildChecks.cmake"
+    COMMENT "Checking Ray Query compilation, interface and failure recovery"
     VERBATIM
 )
 

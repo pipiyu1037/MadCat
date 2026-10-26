@@ -2,6 +2,8 @@
 
 使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前可显示 Slang Shader 绘制的彩色三角形，支持单帧同步、resize／最小化恢复时的 Swapchain 与管线重建，以及 Shader 手动编译、SPIR-V 验证和 Vulkan 资源的 RAII 管理。
 
+文档：[开发范围、进度与验收](docs/project-development.md) · [架构设计](docs/architecture-design.md)。
+
 ## 构建与运行
 
 需要 Windows 11、Visual Studio 2022 的 C++ 桌面开发工具、CMake 3.25 或更新版本、Git，以及 [Vulkan SDK](https://vulkan.lunarg.com/)（头文件版本至少 1.3.239，以提供 EXT maintenance1 类型；本机验证版本为 1.4.363.0）。运行时的实例及所选设备 API 仍要求 Vulkan 1.3。清屏还要求设备的 `VK_EXT_swapchain_maintenance1` 扩展和 `swapchainMaintenance1` feature，以及实例扩展 `VK_EXT_surface_maintenance1`、`VK_KHR_get_surface_capabilities2`。
@@ -99,6 +101,40 @@ cmake --build build --config Debug --target MadCatShaderChecks
 [编译脚本](cmake/CompileShaders.cmake) 先在候选目录编译并验证，两个阶段全部成功后才替换整组产物；编译／验证失败时保留上一组，清理候选文件并返回非零状态。目录发布中断时，下一次构建会先恢复已备份的上一组；同一输出目录使用进程锁避免并发发布。该流程属于离线构建，不是运行期热更新协议。
 
 [检查目标](tests/ShaderBuildChecks.cmake) 包含 12 个真实编译与故障场景，使用独立的 `build/verification/shader-build/`，核对失败前后的四个文件哈希。当前仅处理一个自包含 `.slang` 文件，尚未建立 include／import 依赖记录或反射。
+
+## Ray Query 编译探针
+
+从根目录执行下面的独立手动目标，无需 GPU：
+
+```powershell
+cmake --build build --config Debug --target MadCatRayQueryProbe
+cmake --build build --config Debug --target MadCatRayQueryChecks
+```
+
+[ray-query.slang](shaders/ray-query.slang) 使用固定射线遍历不透明三角形 TLAS，将命中／未命中写为一个 `uint`。当前只编译和检查产物，程序尚不加载或执行它。入口为 `computeMain`，工作组为 `1 × 1 × 1`；将来 GPU 探针须绑定已构建的 TLAS 和至少 4 字节的 Storage Buffer，并只 Dispatch `(1, 1, 1)`。
+
+该目标沿用上述编译／验证参数和锁定的 Slang 版本，额外指定 `-capability spvRayQueryKHR`。本机实测省略此参数时，Slang 诊断 profile 隐式升级，被 `-warnings-as-errors all` 拒绝。[Slang TraceRayInline 要求](https://docs.shader-slang.org/en/stable/external/core-module-reference/types/rayquery-03/tracerayinline-058.html)
+
+额外工具 `spirv-dis` 通过 SDK／系统路径查找，或在配置时指定 `-DMADCAT_SPIRV_DIS=完整路径`。普通 C++ 构建与三角形 Shader 目标不要求此工具。成功产物发布至 `<构建目录>/shaders/ray-query/`，包含 `compute.spv`、`compute.spvasm`、源码快照 `ray-query.slang` 与 `manifest.txt`；清单记录工具版本、参数、SHA256 和检查结果。共享离线发布流程保证编译、验证或接口检查失败时保留上一组产物。
+
+[固定探针检查](cmake/CheckRayQuery.cmake) 在 `spirv-val --target-env vulkan1.3` 成功后，检查反汇编的计算入口、工作组、query 指令、资源存储类别及 set／binding：
+
+| 资源 | set／binding | 后续 Vulkan 绑定类型 |
+|---|---|---|
+| `scene` | 0／0 | `VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR` |
+| `results` | 0／1 | `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER`，一个 32 位无符号整数 |
+
+锁定版本实测只生成 `Shader`、`RayQueryKHR` capability，`Logical GLSL450` 内存模型，以及 `SPV_KHR_ray_query`、`SPV_KHR_storage_buffer_storage_class` 扩展声明。后者已被当前 Vulkan 1.3 基线覆盖；前者对应设备 Ray Query 支持。检查会拒绝 capability／扩展集合变化，促使重新核对设备要求。这是固定 Shader 的检查，不是通用反射或运行时绑定校验。
+
+在项目的 Vulkan 1.3 基线下，后续 GPU 实现至少需要：
+
+- 查询并启用设备扩展 `VK_KHR_acceleration_structure`、`VK_KHR_ray_query`、`VK_KHR_deferred_host_operations`。其他核心版本依赖已由 Vulkan 1.3 覆盖。[加速结构扩展依赖](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_acceleration_structure.html)、[Ray Query 扩展依赖](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_ray_query.html)
+- 查询并在 Device 创建链中启用 `bufferDeviceAddress`、`accelerationStructure`、`rayQuery`。查询为 true 不等于已启用；当前 `VulkanDevice` 尚未启用这些 feature 或三个扩展。[Ray Query feature 启用](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceRayQueryFeaturesKHR.html)、[Vulkan 1.2 feature](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceVulkan12Features.html)
+- 使用 Compute 队列，补齐缓冲分配、地址、BLAS／TLAS 构建、Descriptor、计算管线、提交及回读，并同步构建写入 → 计算阶段加速结构读取、Shader 写入 → 主机读取，完成后才回收资源。
+
+本探针采用固定 Descriptor 和普通 Storage Buffer，不要求 Ray Tracing Pipeline、Shader Binding Table、Descriptor 数组或 update-after-bind。后续新增资源机制仍须按实际用途核对所需 feature。
+
+`MadCatRayQueryChecks` 使用 `<构建目录>/verification/ray-query-build/` 独立目录，包含 18 项真实工具及失败恢复检查，包括 capability 省略诊断、查询移除、绑定／工作组变化及缺少反汇编器。2026-10-26 Debug／Release 均通过；三角形原有 12 项构建检查通过。编译成功不表示 GPU 求交或路径追踪已经实现。
 
 ## 加载 Shader Module
 
