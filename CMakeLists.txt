@@ -16,6 +16,28 @@ FetchContent_Declare(glfw
 )
 FetchContent_MakeAvailable(glfw)
 
+# CPU-only ECS; no Vulkan, GLFW or Shader dependencies.
+add_library(MadCatECS STATIC src/ECS/Registry.cpp)
+target_compile_features(MadCatECS PUBLIC cxx_std_23)
+set_target_properties(MadCatECS PROPERTIES CXX_EXTENSIONS OFF)
+target_include_directories(MadCatECS PUBLIC src)
+if(MSVC)
+    target_compile_options(MadCatECS PRIVATE /W4 /permissive-)
+endif()
+
+add_executable(EntityChecks EXCLUDE_FROM_ALL tests/EntityChecks.cpp)
+target_link_libraries(EntityChecks PRIVATE MadCatECS)
+set_target_properties(EntityChecks PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+    target_compile_options(EntityChecks PRIVATE /W4 /permissive-)
+endif()
+add_custom_target(MadCatEntityChecks
+    COMMAND "$<TARGET_FILE:EntityChecks>"
+    DEPENDS EntityChecks
+    COMMENT "Checking CPU entity lifetimes and stale handles"
+    VERBATIM
+)
+
 add_executable(MadCat
     apps/Sandbox/main.cpp
     src/RHI/Vulkan/VulkanClearRenderer.cpp

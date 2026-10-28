@@ -77,6 +77,32 @@ Swapchain 优先选择 `B8G8R8A8_SRGB`／`SRGB_NONLINEAR`，否则选第一个�
 
 最小化或零像素尺寸时不创建交换链、不获取图像；窗口恢复后自动继续，也可在最小化期间关闭。重建采用同步等待和先销毁后创建，暂不通过 `oldSwapchain` 复用资源；重建失败会清理部分资源、诊断并返回非零状态，不保留旧画面继续运行。Shader Module 独立于交换链重建；当前每次重建均重新创建管线，不做同格式复用或管线缓存。当前只支持单个 Graphics／Compute／Present 队列族，Ray Query GPU 求交尚未实现。
 
+## Entity 生命周期检查
+
+自研 ECS 已有独立的纯 CPU 库 `MadCatECS`，提供 [Entity](src/ECS/Entity.h) 值句柄与 [Registry](src/ECS/Registry.h) 的创建、销毁和存活检查。当前没有组件、查询或场景层级，也尚未接入渲染窗口。
+
+```cpp
+#include "ECS/Registry.h"
+
+madcat::ecs::Registry registry;
+const auto first = registry.create();
+const bool removed = registry.destroy(first);       // true
+const auto second = registry.create();              // 复用索引，更换 generation
+const bool oldAlive = registry.isAlive(first);      // false
+const bool newAlive = registry.isAlive(second);     // true
+```
+
+句柄仅在创建它的 Registry 中有效；复制句柄不延长实体寿命，销毁实体会使全部旧副本失效。Registry 禁止复制／移动，当前单线程使用且不检测跨 Registry 误用。完整契约见[架构设计](docs/architecture-design.md#ecs-实体生命周期当前实现)。
+
+配置沿用上面的构建入口。以下目标只构建 CPU 库与检查程序，不启动窗口，也不运行 Shader 工具或 GPU；根项目的首次配置仍要求已列出的 SDK／GLFW 依赖。
+
+```powershell
+cmake --build build --config Debug --target MadCatEntityChecks
+cmake --build build --config Release --target MadCatEntityChecks
+```
+
+[检查程序](tests/EntityChecks.cpp) 的 8 个场景覆盖无效句柄、创建与复制、销毁、槽位复用、重复删除、扩容、混合增删和多代旧句柄拒绝；Debug／Release 使用同一组显式检查，不依赖 `assert`。
+
 ## 手动编译 Shader
 
 当前固定 `slangc -version` 为 `2026.17-25-gc7954ebd1`（本机 Vulkan SDK 1.4.363.0 所带版本），构建时检查完整版本字符串。验证工具为 `spirv-val`，本机版本为 `SPIRV-Tools v2026.4 v2026.4.rc2-0-gef96ed76`。两个程序优先从 `$env:VULKAN_SDK/Bin` 查找，其次使用系统搜索路径；可在 CMake 配置时通过 `-DMADCAT_SLANGC=完整路径`、`-DMADCAT_SPIRV_VAL=完整路径` 指定。普通 `MadCat` 构建不依赖这些程序；缺少工具或编译器版本不符时，显式 Shader 构建失败并给出诊断。
