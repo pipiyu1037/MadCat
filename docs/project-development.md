@@ -6,7 +6,9 @@ MadCat 是一个使用自研 ECS 和 Vulkan 的渲染引擎。前期服务渲染
 
 ## 当前实现进度
 
-2026 年 10 月 29 日完成 ECS 的首个纯 CPU 增量：[Entity](../src/ECS/Entity.h) 使用索引与 generation，[Registry](../src/ECS/Registry.h) 提供创建、销毁、存活检查和存活数量。槽位复用更换 generation，默认／越界／错误代际／已销毁句柄被拒绝；销毁不分配内存，代际达到上限后退役槽位以避免回绕。Debug／Release 构建与各 8 项 [Entity 检查](../tests/EntityChecks.cpp)通过，覆盖复制句柄失效、重复删除、4096 实体扩容、混合增删与同槽位 4096 次复用；主程序两种构建通过。句柄限所属 Registry 使用，跨 Registry 误用不检测；内存／索引耗尽和代际到顶分支未实测。本轮未运行 GPU 场景，组件、查询、层级、Transform 及 Sandbox 场景接入仍待实现，尚未完成 F02。命令见 [README](../README.md#entity-生命周期检查)，接口约定见[架构设计](architecture-design.md#ecs-实体生命周期当前实现)。
+2026 年 10 月 29 日继续完成 ECS 组件增量：[Registry](../src/ECS/Registry.h) 提供 `add<T>`、可变／const `tryGet<T>` 和 `remove<T>`，内部按类型使用 [Sparse Set 组件池](../src/ECS/ComponentStorage.h)。每实体每类型至多一份，重复／无效操作被拒绝；实体销毁自动清理全部组件，槽位复用不继承旧数据。组件移动和析构要求不抛异常，引用在同类型结构性修改后需重新获取。Debug／Release 各 13 项[组件检查](../tests/ComponentChecks.cpp)、原有各 8 项 Entity 检查及主程序构建通过，无编译警告；未运行渲染窗口或 GPU 场景。多组件查询、层级、Transform 及 Mesh／Material 场景渲染仍待实现，F02 尚未完成。用户同时确认所有场景 Object 统一由 Entity 管理，以 Transform、Mesh、Material 等组件组合驱动后续 RenderScene 提取与渲染；完整接口见[组件存储契约](architecture-design.md#ecs-组件存储当前实现)。
+
+2026 年 10 月 29 日完成 ECS 的首个纯 CPU 增量：[Entity](../src/ECS/Entity.h) 使用索引与 generation，[Registry](../src/ECS/Registry.h) 提供创建、销毁、存活检查和存活数量。槽位复用更换 generation，默认／越界／错误代际／已销毁句柄被拒绝；销毁不分配内存，代际达到上限后退役槽位以避免回绕。Debug／Release 构建与各 8 项 [Entity 检查](../tests/EntityChecks.cpp)通过，覆盖复制句柄失效、重复删除、4096 实体扩容、混合增删与同槽位 4096 次复用；主程序两种构建通过。句柄限所属 Registry 使用，跨 Registry 误用不检测；内存／索引耗尽和代际到顶分支未实测。该首个增量未运行 GPU 场景，也未包含组件、查询、层级、Transform 或 Sandbox 场景接入，未完成 F02；后续组件进度见上一段。命令见 [README](../README.md#entity-生命周期检查)，接口约定见[架构设计](architecture-design.md#ecs-实体生命周期当前实现)。
 
 2026 年 10 月 26 日完成独立的 Ray Query 离线编译探针：锁定 Slang／SPIR-V 目标下的计算 Shader 通过验证，入口、capability、扩展和固定资源绑定已核对，运行时前置条件已记录。GPU 求交、加速结构构建及光追 feature 启用仍待实现；详细证据见下文路径追踪章节。
 
@@ -126,6 +128,7 @@ RTX 5060 Ti 的加速结构几何／实例／primitive 上限分别为 16777215�
 | 主要测试设备 | NVIDIA GeForce RTX 5060 Ti；实际 Vulkan 能力以运行时查询为准 |
 | 开发经验 | 图形算法工程师，熟悉 OpenGL，对 Vulkan 一般熟悉 |
 | ECS | 自行实现，不采用现成开源 ECS；主要目的是理解机制和掌控架构 |
+| 场景 Object | 所有场景对象统一以 Entity 管理，以类似 Unity 的组件组合方式使用；为实体添加 Transform、Mesh、Material 等组件并引用有效资产后，由 RenderScene 提取并渲染 |
 | 场景能力 | 实体、Transform、相机、模型、灯光，支持父子层级和 Transform 继承 |
 | 图形接口 | 使用 Vulkan，通过自行实现的 RHI 封装 |
 | RHI 范围 | 只实现 Vulkan，当前不为其他图形 API 预留抽象 |
@@ -148,8 +151,8 @@ Falcor 的模块化 Render Graph 和研究工作流是体验参考。MadCat 采�
 | 编号 | 必需能力 | 建议验收方法 |
 |---|---|---|
 | F01 | 可运行的 Windows 11 C++23 程序 | 从干净构建启动渲染窗口，能够调整窗口尺寸并正常退出 |
-| F02 | 自研 ECS 和场景层级 | 创建、查询和删除实体及组件；父节点变化正确影响子节点；拒绝层级环 |
-| F03 | glTF 模型和贴图 | 导入约定测试模型，几何、贴图和节点变换显示正确 |
+| F02 | 自研 ECS 和场景层级 | 场景 Object 统一使用 Entity；创建、查询和删除实体及组件；父节点变化正确影响子节点；拒绝层级环 |
+| F03 | glTF 模型和贴图 | 通过 Entity 的 Mesh、Material 等组件引用资产并显示约定模型，几何、贴图和节点变换正确 |
 | F04 | 自定义 Pass 和 Render Graph | 新增一个 C++ Pass，声明资源并接入图；不修改图编译器或 Vulkan 后端即可执行 |
 | F05 | 自动顺序和同步 | 多个 Pass 连续读写资源时结果正确；图错误提供明确诊断；同步验证无未解决错误 |
 | F06 | 手动 Shader 更新和实时参数 | 修改 Slang 后手动编译、应用；编译失败保留旧版本；参数修改不要求重启程序 |
@@ -336,7 +339,7 @@ Shader 编译与资源状态模型先做最小验证，再逐步完善；不等�
 13. 添加层级和世界 Transform 更新，再单独覆盖重新挂接与删除行为。
 14. 按几何、索引、法线、UV、贴图分别增加模型导入能力。
 
-当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、单帧同步、交换链与管线重建、Slang 到 SPIR-V 的手动编译与验证、启动时的 Shader Module 加载、最小图形管线和三角形 Draw、Ray Query 离线编译探针，以及 CPU Entity 生命周期与失效句柄检查。架构设计已收敛为首版实施基线，常规接口和内部存储在实现时确定，停止逐项扩展架构讨论；这不表示目标能力已经实现。ECS／场景与模型主线的下一候选增量是一种组件的添加、获取、删除，以及实体销毁时的组件清理，再增加多组件查询和层级。Ray Query GPU 求交按缓冲、设备能力启用、绑定、加速结构和计算提交依赖另行拆分。运行期 Shader 更新仍需安全替换和失败恢复验证。
+当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、单帧同步、交换链与管线重建、Slang 到 SPIR-V 的手动编译与验证、启动时的 Shader Module 加载、最小图形管线和三角形 Draw、Ray Query 离线编译探针，以及 CPU Entity 生命周期、按类型组件增删获取和实体销毁清理。架构设计已收敛为首版实施基线，常规接口和内部存储在实现时确定，停止逐项扩展架构讨论；这不表示目标能力已经实现。ECS／场景与模型主线的下一候选增量是多组件查询，明确遍历期间的结构性修改边界，再推进场景层级和 Transform；后续所有场景对象使用 Entity，渲染通过 Mesh、Material 等组件组合接入。Ray Query GPU 求交按缓冲、设备能力启用、绑定、加速结构和计算提交依赖另行拆分。运行期 Shader 更新仍需安全替换和失败恢复验证。
 
 ## 验证策略与风险
 

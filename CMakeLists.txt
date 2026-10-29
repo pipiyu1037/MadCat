@@ -38,6 +38,19 @@ add_custom_target(MadCatEntityChecks
     VERBATIM
 )
 
+add_executable(ComponentChecks EXCLUDE_FROM_ALL tests/ComponentChecks.cpp)
+target_link_libraries(ComponentChecks PRIVATE MadCatECS)
+set_target_properties(ComponentChecks PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+    target_compile_options(ComponentChecks PRIVATE /W4 /permissive-)
+endif()
+add_custom_target(MadCatComponentChecks
+    COMMAND "$<TARGET_FILE:ComponentChecks>"
+    DEPENDS ComponentChecks
+    COMMENT "Checking CPU components and Entity destruction cleanup"
+    VERBATIM
+)
+
 add_executable(MadCat
     apps/Sandbox/main.cpp
     src/RHI/Vulkan/VulkanClearRenderer.cpp

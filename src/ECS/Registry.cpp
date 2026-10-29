@@ -32,6 +32,7 @@ bool Registry::destroy(Entity entity) noexcept
 {
     if (!isAlive(entity)) { return false; }
 
+    for (auto& [type, storage] : storages_) { storage->remove(entity); }
     auto& slot = slots_[entity.index];
     slot.alive = false;
     --aliveCount_;

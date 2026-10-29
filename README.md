@@ -79,7 +79,7 @@ Swapchain 优先选择 `B8G8R8A8_SRGB`／`SRGB_NONLINEAR`，否则选第一个�
 
 ## Entity 生命周期检查
 
-自研 ECS 已有独立的纯 CPU 库 `MadCatECS`，提供 [Entity](src/ECS/Entity.h) 值句柄与 [Registry](src/ECS/Registry.h) 的创建、销毁和存活检查。当前没有组件、查询或场景层级，也尚未接入渲染窗口。
+自研 ECS 已有独立的纯 CPU 库 `MadCatECS`，提供 [Entity](src/ECS/Entity.h) 值句柄与 [Registry](src/ECS/Registry.h) 的创建、销毁、存活检查及按类型保存的组件。多组件查询、场景层级和渲染窗口接入仍未实现。
 
 ```cpp
 #include "ECS/Registry.h"
@@ -102,6 +102,39 @@ cmake --build build --config Release --target MadCatEntityChecks
 ```
 
 [检查程序](tests/EntityChecks.cpp) 的 8 个场景覆盖无效句柄、创建与复制、销毁、槽位复用、重复删除、扩容、混合增删和多代旧句柄拒绝；Debug／Release 使用同一组显式检查，不依赖 `assert`。
+
+## ECS 组件使用与检查
+
+每个 Entity 可以组合多种组件，每种类型至多一份；Registry 拥有组件，销毁 Entity 时自动清理其全部组件。以下是 CPU 数据示例，不依赖 Vulkan：
+
+```cpp
+#include "ECS/Registry.h"
+#include <utility>
+
+struct ExampleComponent { int value; };
+
+madcat::ecs::Registry registry;
+const auto entity = registry.create();
+auto* component = registry.add<ExampleComponent>(entity, 7);
+component->value = 9;
+const auto* readOnly = std::as_const(registry).tryGet<ExampleComponent>(entity);
+const int value = readOnly->value;                   // 9
+const bool removed = registry.remove<ExampleComponent>(entity); // true
+const bool destroyed = registry.destroy(entity);   // true；也会清理剩余的其他组件
+```
+
+`add<T>` 对无效／旧句柄和重复组件返回 `nullptr`，不构造新组件或覆盖旧值；构造或分配失败抛异常，不发布新组件。`tryGet<T>` 对无效句柄或缺失组件返回 `nullptr`，const Registry 返回只读指针；`remove<T>` 在这些情况下返回 false。显式移动的构造参数遵循其自身移动语义。
+
+组件类型必须是无 const／volatile 限定、非数组的对象类型，支持不抛异常的移动构造、移动赋值和析构；不要求默认构造或复制。组件的构造、移动和析构不得重入所属 Registry。引用只供当前访问使用：同类型组件增删、带有该类型组件的实体销毁后重新获取，Registry 销毁后全部失效；其他类型组件的修改不影响本类型引用。具体存储与异常契约见[架构设计](docs/architecture-design.md#ecs-组件存储当前实现)。
+
+```powershell
+cmake --build build --config Debug --target MadCatComponentChecks MadCatEntityChecks
+cmake --build build --config Release --target MadCatComponentChecks MadCatEntityChecks
+```
+
+[组件检查](tests/ComponentChecks.cpp) 的 13 个场景覆盖增删与 const 访问、重复和无效操作、删除搬移、实体复用、资源析构、扩容与稀疏空洞、类型隔离、构造失败恢复、别名参数和混合操作模型。检查不启动窗口或 GPU。
+
+场景对象统一使用 Entity，并通过 Transform、Mesh、Material 等组件组合表达；后续 RenderScene 从这些组件提取渲染数据。该约定已确认，但本次尚未实现这些场景组件、资产标识或自动渲染链路。
 
 ## 手动编译 Shader
 
