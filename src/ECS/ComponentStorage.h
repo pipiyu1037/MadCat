@@ -29,6 +29,10 @@ class ComponentStorage final : public ComponentStorageBase
         "Component movement and destruction must not throw");
 
 public:
+    // Internal query candidates; Registry prevents relocation while iterating.
+    [[nodiscard]] size_t size() const noexcept { return dense_.size(); }
+    [[nodiscard]] Entity entityAt(size_t index) const noexcept { return dense_[index].entity; }
+
     template<typename... Args>
     T* add(Entity entity, Args&&... args)
     {

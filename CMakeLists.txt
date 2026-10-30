@@ -16,6 +16,14 @@ FetchContent_Declare(glfw
 )
 FetchContent_MakeAvailable(glfw)
 
+set(GLM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLM_BUILD_LIBRARY OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(glm
+    GIT_REPOSITORY https://github.com/g-truc/glm.git
+    GIT_TAG 0af55ccecd98d4e5a8d1fad7de25ba429d60e863 # GLM 1.0.1
+)
+FetchContent_MakeAvailable(glm)
+
 # CPU-only ECS; no Vulkan, GLFW or Shader dependencies.
 add_library(MadCatECS STATIC src/ECS/Registry.cpp)
 target_compile_features(MadCatECS PUBLIC cxx_std_23)
@@ -48,6 +56,42 @@ add_custom_target(MadCatComponentChecks
     COMMAND "$<TARGET_FILE:ComponentChecks>"
     DEPENDS ComponentChecks
     COMMENT "Checking CPU components and Entity destruction cleanup"
+    VERBATIM
+)
+
+add_executable(QueryChecks EXCLUDE_FROM_ALL tests/QueryChecks.cpp)
+target_link_libraries(QueryChecks PRIVATE MadCatECS)
+set_target_properties(QueryChecks PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+    target_compile_options(QueryChecks PRIVATE /W4 /permissive-)
+endif()
+add_custom_target(MadCatQueryChecks
+    COMMAND "$<TARGET_FILE:QueryChecks>"
+    DEPENDS QueryChecks
+    COMMENT "Checking CPU component queries and structural mutation boundaries"
+    VERBATIM
+)
+
+# Scene owns hierarchy and transforms; ECS itself remains math-independent.
+add_library(MadCatScene STATIC src/Scene/Scene.cpp)
+target_compile_features(MadCatScene PUBLIC cxx_std_23)
+set_target_properties(MadCatScene PROPERTIES CXX_EXTENSIONS OFF)
+target_link_libraries(MadCatScene PUBLIC MadCatECS glm::glm)
+target_compile_definitions(MadCatScene PUBLIC GLM_FORCE_RADIANS GLM_FORCE_DEPTH_ZERO_TO_ONE)
+if(MSVC)
+    target_compile_options(MadCatScene PRIVATE /W4 /permissive-)
+endif()
+
+add_executable(SceneChecks EXCLUDE_FROM_ALL tests/SceneChecks.cpp)
+target_link_libraries(SceneChecks PRIVATE MadCatScene)
+set_target_properties(SceneChecks PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+    target_compile_options(SceneChecks PRIVATE /W4 /permissive-)
+endif()
+add_custom_target(MadCatSceneChecks
+    COMMAND "$<TARGET_FILE:SceneChecks>"
+    DEPENDS SceneChecks
+    COMMENT "Checking scene hierarchy, inherited transforms and deletion policies"
     VERBATIM
 )
 

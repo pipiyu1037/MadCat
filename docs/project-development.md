@@ -2,11 +2,15 @@
 
 MadCat 是一个使用自研 ECS 和 Vulkan 的渲染引擎。前期服务渲染算法研究和图形效果实验，长期考虑游戏与仿真用途。开发者应能加载模型、用 C++ 编写渲染 Pass、连接多个 Pass，并在运行时调整参数、查看中间结果。
 
-本文维护开发范围、实现进度、半年计划和验收方法；架构方案独立维护于[架构设计文档](architecture-design.md)。两份文档供项目开发者及协作编码助手使用。文档更新日期为 2026 年 10 月 29 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
+本文维护开发范围、实现进度、半年计划和验收方法；架构方案独立维护于[架构设计文档](architecture-design.md)。两份文档供项目开发者及协作编码助手使用。文档更新日期为 2026 年 10 月 30 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
 
 ## 当前实现进度
 
-2026 年 10 月 29 日继续完成 ECS 组件增量：[Registry](../src/ECS/Registry.h) 提供 `add<T>`、可变／const `tryGet<T>` 和 `remove<T>`，内部按类型使用 [Sparse Set 组件池](../src/ECS/ComponentStorage.h)。每实体每类型至多一份，重复／无效操作被拒绝；实体销毁自动清理全部组件，槽位复用不继承旧数据。组件移动和析构要求不抛异常，引用在同类型结构性修改后需重新获取。Debug／Release 各 13 项[组件检查](../tests/ComponentChecks.cpp)、原有各 8 项 Entity 检查及主程序构建通过，无编译警告；未运行渲染窗口或 GPU 场景。多组件查询、层级、Transform 及 Mesh／Material 场景渲染仍待实现，F02 尚未完成。用户同时确认所有场景 Object 统一由 Entity 管理，以 Transform、Mesh、Material 等组件组合驱动后续 RenderScene 提取与渲染；完整接口见[组件存储契约](architecture-design.md#ecs-组件存储当前实现)。
+2026 年 10 月 30 日继续完成纯 CPU Scene 增量：[Scene](../src/Scene/Scene.h) 独占 Registry，所有对象由 Entity 管理，内部组件维护局部 TRS、父子链接和派生世界矩阵，通过受控接口保持有效父节点与无环。已实现保留局部变换的挂接／解除、父先子后的全量非递归更新、拒绝普通父节点删除、显式子树删除，以及用户组件与场景系统查询。有限输入校验和四元数归一化已接通，世界结果失效后需完整更新，矩阵溢出可修正后重试。GLM 1.0.1 通过 FetchContent 固定提交，ECS 自身仍仅依赖标准库。Debug／Release 各 12 组[场景检查](../tests/SceneChecks.cpp)、原有 33 组 ECS 检查及主程序构建通过，无编译警告；包括 2048 层和 512 步层级模型。GLM 配置发出两条旧版 CMake 策略弃用提示。F02 的 CPU 场景基础已具备，但尚未进行实际渲染场景验收；相机、glTF、RenderScene、场景版本和 Sandbox 接入尚未实现，本轮未运行 GPU 场景。用法与契约见 [README](../README.md#scene-层级与-transform) 和[架构设计](architecture-design.md#scene-层级与-transform当前实现)。
+
+2026 年 10 月 30 日完成 ECS 组合查询增量：[Registry](../src/ECS/Registry.h) 新增可变／const `each<A, B, ...>(callback)`，逐个提供匹配实体及组件引用，支持单组件、多个组件交集、字段修改和嵌套查询。查询期间拒绝所属 Registry 的实体与组件增删，覆盖 const 别名；回调异常向外传播并恢复保护，已修改字段保留。调用方可收集 Entity，在最外层遍历结束后应用增删；没有自动延迟命令队列。Debug／Release 各 12 组[查询检查](../tests/QueryChecks.cpp)、13 项组件与 8 项 Entity 回归及主程序构建通过，无编译警告，包含 1024 步操作模型；未运行窗口或 GPU 场景。该查询增量当时尚未包含 Scene 层级和 Transform，后续进度见前文；自动渲染仍待实现。接口见[查询契约](architecture-design.md#ecs-查询与遍历边界当前实现)，使用与复现命令见 [README](../README.md#ecs-组合查询与遍历后修改)。
+
+2026 年 10 月 29 日继续完成 ECS 组件增量：[Registry](../src/ECS/Registry.h) 提供 `add<T>`、可变／const `tryGet<T>` 和 `remove<T>`，内部按类型使用 [Sparse Set 组件池](../src/ECS/ComponentStorage.h)。每实体每类型至多一份，重复／无效操作被拒绝；实体销毁自动清理全部组件，槽位复用不继承旧数据。组件移动和析构要求不抛异常，引用在同类型结构性修改后需重新获取。Debug／Release 各 13 项[组件检查](../tests/ComponentChecks.cpp)、原有各 8 项 Entity 检查及主程序构建通过，无编译警告；未运行渲染窗口或 GPU 场景。该增量当时尚无多组件查询、层级、Transform 及 Mesh／Material 场景渲染，未完成 F02；后续查询进度见前文。用户同时确认所有场景 Object 统一由 Entity 管理，以 Transform、Mesh、Material 等组件组合驱动后续 RenderScene 提取与渲染；完整接口见[组件存储契约](architecture-design.md#ecs-组件存储当前实现)。
 
 2026 年 10 月 29 日完成 ECS 的首个纯 CPU 增量：[Entity](../src/ECS/Entity.h) 使用索引与 generation，[Registry](../src/ECS/Registry.h) 提供创建、销毁、存活检查和存活数量。槽位复用更换 generation，默认／越界／错误代际／已销毁句柄被拒绝；销毁不分配内存，代际达到上限后退役槽位以避免回绕。Debug／Release 构建与各 8 项 [Entity 检查](../tests/EntityChecks.cpp)通过，覆盖复制句柄失效、重复删除、4096 实体扩容、混合增删与同槽位 4096 次复用；主程序两种构建通过。句柄限所属 Registry 使用，跨 Registry 误用不检测；内存／索引耗尽和代际到顶分支未实测。该首个增量未运行 GPU 场景，也未包含组件、查询、层级、Transform 或 Sandbox 场景接入，未完成 F02；后续组件进度见上一段。命令见 [README](../README.md#entity-生命周期检查)，接口约定见[架构设计](architecture-design.md#ecs-实体生命周期当前实现)。
 
@@ -280,13 +284,13 @@ PBR 的第一份验收场景应能比较不同粗糙度、金属度和基础色�
 | 窗口和输入 | GLFW 3.4 已使用；[Vulkan 支持](https://www.glfw.org/docs/3.4/vulkan_guide.html) 已用于 Instance 与 Surface 初始化 | 当前实现窗口创建、事件等待、关闭、Vulkan 函数获取和窗口 Surface；其他输入能力后续增加 |
 | Vulkan 开发环境 | [LunarG Vulkan SDK](https://vulkan.lunarg.com/) 已使用 | 当前要求头文件至少 1.3.239；本机验证 SDK 1.4.363.0，运行时版本和验证层另行查询 |
 | 调试界面 | [Dear ImGui](https://github.com/ocornut/imgui) | 提供参数面板及官方 Vulkan 适配，当前不建设完整编辑器 |
-| 数学 | [GLM](https://github.com/g-truc/glm) | 向量、矩阵与四元数；统一并验证坐标、深度和布局约定 |
+| 数学 | [GLM 1.0.1](https://github.com/g-truc/glm/tree/1.0.1) 已使用 | Scene 的向量、矩阵与四元数；右手／Y 向上／列向量／TRS 已验证，投影与 GPU 布局仍待实现验证 |
 | glTF 解析 | [cgltf](https://github.com/jkuhlmann/cgltf) | 小型解析器候选；引擎仍负责资产转换、图片读取与解码 |
 | GPU 内存分配 | [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) | 在 Vulkan 后端使用，资源所有权与 GPU 使用寿命仍由引擎管理 |
 | Shader | Slang | 已接入手动编译；固定 `2026.17-25-gc7954ebd1`，产物在 `build/shaders/triangle/`，运行期更新待实现 |
 | 图片解码与测试 | 待实现该功能时选择 | 必须补齐纹理解码；测试框架保持简单，不提前扩大依赖 |
 
-当前已采用 CMake、固定提交的 GLFW 3.4 和本机 Vulkan SDK。GLFW 通过 FetchContent 管理，Vulkan 开发环境通过 `find_package(Vulkan 1.3.239 REQUIRED)` 查找。其余工具库组合仍属于建议，具体版本和包管理方式按后续实际需求确定。cgltf 不默认把外部图片解码为像素，需要额外的文件处理和图片解码步骤。[cgltf 使用说明](https://github.com/jkuhlmann/cgltf)
+当前已采用 CMake、固定提交的 GLFW 3.4／GLM 1.0.1 和本机 Vulkan SDK。GLFW 与 GLM 通过 FetchContent 管理，GLM 锁定 `0af55ccecd98d4e5a8d1fad7de25ba429d60e863`，关闭其测试与编译库；Vulkan 开发环境通过 `find_package(Vulkan 1.3.239 REQUIRED)` 查找。沿用既有依赖方式，无需为这个纯头文件库迁移包管理器；其余工具库组合仍属于建议。cgltf 不默认把外部图片解码为像素，需要额外的文件处理和图片解码步骤。[cgltf 使用说明](https://github.com/jkuhlmann/cgltf)
 
 源码目录组织建议见[架构设计文档](architecture-design.md#源码组织)，实际目录与支持范围以当前源码为准。
 
@@ -339,7 +343,7 @@ Shader 编译与资源状态模型先做最小验证，再逐步完善；不等�
 13. 添加层级和世界 Transform 更新，再单独覆盖重新挂接与删除行为。
 14. 按几何、索引、法线、UV、贴图分别增加模型导入能力。
 
-当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、单帧同步、交换链与管线重建、Slang 到 SPIR-V 的手动编译与验证、启动时的 Shader Module 加载、最小图形管线和三角形 Draw、Ray Query 离线编译探针，以及 CPU Entity 生命周期、按类型组件增删获取和实体销毁清理。架构设计已收敛为首版实施基线，常规接口和内部存储在实现时确定，停止逐项扩展架构讨论；这不表示目标能力已经实现。ECS／场景与模型主线的下一候选增量是多组件查询，明确遍历期间的结构性修改边界，再推进场景层级和 Transform；后续所有场景对象使用 Entity，渲染通过 Mesh、Material 等组件组合接入。Ray Query GPU 求交按缓冲、设备能力启用、绑定、加速结构和计算提交依赖另行拆分。运行期 Shader 更新仍需安全替换和失败恢复验证。
+当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、单帧同步、交换链与管线重建、Slang 到 SPIR-V 的手动编译与验证、启动时的 Shader Module 加载、最小图形管线和三角形 Draw、Ray Query 离线编译探针，以及 CPU Entity 生命周期、组件增删／组合查询、Scene 层级和局部／世界 Transform。遍历期间结构性修改会被拒绝，调用方可在遍历后处理。架构设计已收敛为首版实施基线，常规接口和内部存储在实现时确定，停止逐项扩展架构讨论；这不表示目标能力全部实现。ECS／场景与模型主线的下一候选增量是相机数据与视图／投影矩阵，验证零到一深度和坐标约定，随后按缓冲、几何和贴图拆分场景渲染／glTF 接入；所有场景对象继续使用 Entity，渲染通过 Mesh、Material 等组件组合接入。Ray Query GPU 求交按缓冲、设备能力启用、绑定、加速结构和计算提交依赖另行拆分。运行期 Shader 更新仍需安全替换和失败恢复验证。
 
 ## 验证策略与风险
 

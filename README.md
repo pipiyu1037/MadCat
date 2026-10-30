@@ -19,7 +19,7 @@ cmake --build build --config Debug --target MadCatShaders
 .\build\Debug\MadCat.exe
 ```
 
-首次配置通过 CMake FetchContent 获取固定提交的 GLFW 3.4，需要访问 GitHub；依赖源码和构建产物位于 `build` 下。
+首次配置通过 CMake FetchContent 获取固定提交的 GLFW 3.4 和 GLM 1.0.1，需要访问 GitHub；依赖源码和构建产物位于 `build` 下。GLM 用于纯 CPU 场景变换，锁定提交 `0af55ccecd98d4e5a8d1fad7de25ba429d60e863`，不启用其测试或编译库。
 
 程序创建一个 1280 × 720、标题为 MadCat 的可调整大小窗口，输出设备和 Surface 能力报告，选择设备、创建一个 Graphics／Compute／Present 队列，加载两个 Shader Module，再创建 Swapchain 和三角形管线。画面为深蓝背景上的插值彩色三角形：上方红色、左下蓝色、右下绿色。背景线性 RGBA 为 `(0.04, 0.08, 0.16, 1.0)`，本机 sRGB 格式下背景像素约为 RGB `(56, 80, 111)`。Debug 启用验证层，Release 不主动启用验证层。关闭前先等待 acquisition、GPU 提交和呈现资源退役，再释放帧渲染器、管线、Swapchain、两个 Shader Module、Device、Surface、Instance 和窗口；初始化或帧执行失败返回非零状态。
 
@@ -79,7 +79,7 @@ Swapchain 优先选择 `B8G8R8A8_SRGB`／`SRGB_NONLINEAR`，否则选第一个�
 
 ## Entity 生命周期检查
 
-自研 ECS 已有独立的纯 CPU 库 `MadCatECS`，提供 [Entity](src/ECS/Entity.h) 值句柄与 [Registry](src/ECS/Registry.h) 的创建、销毁、存活检查及按类型保存的组件。多组件查询、场景层级和渲染窗口接入仍未实现。
+自研 ECS 已有独立的纯 CPU 库 `MadCatECS`，提供 [Entity](src/ECS/Entity.h) 值句柄与 [Registry](src/ECS/Registry.h) 的创建、销毁、存活检查、按类型保存的组件及[组合查询](#ecs-组合查询与遍历后修改)。[Scene](#scene-层级与-transform) 在其上管理场景层级与变换，渲染窗口接入仍未实现。
 
 ```cpp
 #include "ECS/Registry.h"
@@ -134,7 +134,102 @@ cmake --build build --config Release --target MadCatComponentChecks MadCatEntity
 
 [组件检查](tests/ComponentChecks.cpp) 的 13 个场景覆盖增删与 const 访问、重复和无效操作、删除搬移、实体复用、资源析构、扩容与稀疏空洞、类型隔离、构造失败恢复、别名参数和混合操作模型。检查不启动窗口或 GPU。
 
-场景对象统一使用 Entity，并通过 Transform、Mesh、Material 等组件组合表达；后续 RenderScene 从这些组件提取渲染数据。该约定已确认，但本次尚未实现这些场景组件、资产标识或自动渲染链路。
+场景对象统一使用 Entity，通过 Scene 管理层级和 Transform，并组合用户组件；后续 RenderScene 从场景提取渲染数据。Mesh／Material 资产组件与自动渲染链路尚未实现。
+
+## ECS 组合查询与遍历后修改
+
+`each<A, B>(callback)` 遍历同时拥有这些组件的实体，将 Entity 值与按模板参数顺序排列的组件引用交给回调；至少指定一种组件类型，类型约束与 `add<T>` 相同。const Registry 提供 `const` 组件引用。缺失组件池或没有交集时不调用回调；每个匹配实体访问一次，遍历顺序不作保证，回调返回值被忽略。
+
+以下完整 CPU 示例先更新字段并收集待删除的句柄，再在遍历结束后统一删除：
+
+```cpp
+#include "ECS/Registry.h"
+#include <cstdio>
+#include <utility>
+#include <vector>
+
+struct Position { int value; };
+struct Velocity { int value; };
+
+int main()
+{
+    madcat::ecs::Registry registry;
+    const auto entity = registry.create();
+    if (!registry.add<Position>(entity, 8) || !registry.add<Velocity>(entity, 2)) { return 1; }
+
+    std::vector<madcat::ecs::Entity> pending;
+    registry.each<Position, Velocity>([&](auto current, Position& position, Velocity& velocity)
+    {
+        position.value += velocity.value;
+        if (position.value >= 10) { pending.push_back(current); }
+    });
+    std::as_const(registry).each<Position>([](auto, const Position& position)
+    {
+        std::printf("%d\n", position.value); // 10
+    });
+    for (const auto current : pending)
+    {
+        if (!registry.destroy(current)) { return 1; }
+    }
+    return 0;
+}
+```
+
+查询期间允许修改组件字段、获取组件和嵌套查询；同一 Registry 的 `create()` 抛出 `std::logic_error`，`add<T>` 返回 `nullptr`，`remove<T>`／`destroy()` 返回 false，均不执行结构性修改，包括未参与查询的类型和实体。保护覆盖 const 别名及全部嵌套层级，其他 Registry 独立。增删请求不会自动排队，调用方保存 Entity 并在最外层查询结束后处理；不要保存组件引用作为延迟操作的目标。应用时仍检查句柄，期间已销毁或复用的旧句柄会被拒绝。
+
+回调异常会向外传播并释放对应查询层级的保护；此前字段修改保留，不自动应用已收集的操作。回调不得销毁所属 Registry。const 引用遵循 C++ 自身语义，不保证组件内部指针指向的数据只读。完整契约见[架构设计](docs/architecture-design.md#ecs-查询与遍历边界当前实现)。
+
+```powershell
+cmake --build build --config Debug --target MadCatQueryChecks MadCatComponentChecks MadCatEntityChecks
+cmake --build build --config Release --target MadCatQueryChecks MadCatComponentChecks MadCatEntityChecks
+```
+
+[查询检查](tests/QueryChecks.cpp) 包含 12 组纯 CPU 场景：单／多组件交集、空池与缺失池、字段更新、const 引用、结构性修改拒绝、嵌套与异常恢复、遍历后增删、槽位复用、独立 Registry、move-only 组件／回调和 1024 步操作模型。接口未提供过滤表达式、查询缓存或自动延迟命令队列。
+
+## Scene 层级与 Transform
+
+纯 CPU 库 `MadCatScene` 提供 [Scene](src/Scene/Scene.h)，独占一个 Registry。每个场景对象仍是 Entity，创建时具有单位局部变换和根节点关系。Scene 内部组件保存局部 TRS、父子关系及派生世界矩阵；通过受控接口写入，以保证父节点有效、无环及删除行为一致。Scene 不暴露可写 Registry。
+
+下面是一个可链接 `MadCatScene` 的完整 CPU 示例，子节点继承父节点的平移：
+
+```cpp
+#include "Scene/Scene.h"
+#include <cstdio>
+
+int main()
+{
+    madcat::scene::Scene scene;
+    const auto root = scene.create();
+    const auto child = scene.create();
+    madcat::scene::LocalTransform parentLocal;
+    parentLocal.translation = {10, 0, 0};
+    madcat::scene::LocalTransform childLocal;
+    childLocal.translation = {2, 0, 0};
+    if (!scene.setLocalTransform(root, parentLocal) || !scene.setLocalTransform(child, childLocal) ||
+        !scene.setParent(child, root) || !scene.updateWorldTransforms()) { return 1; }
+    const auto* world = scene.worldTransform(child);
+    if (!world) { return 1; }
+    std::printf("%g\n", static_cast<double>((*world)[3].x)); // 12
+    return scene.destroySubtree(root) ? 0 : 1;
+}
+```
+
+数学约定采用右手系、Y 向上、米、弧度和列向量，局部矩阵为 `T * R * S`，子世界矩阵为 `parentWorld * local`。四元数构造参数是 `(w, x, y, z)`，写入时归一化；glTF 的数组顺序需在未来导入器中显式转换。世界矩阵保留剪切，不重新分解为 TRS。当前定义 `GLM_FORCE_DEPTH_ZERO_TO_ONE`，但尚未实现或验证相机投影、视口翻转和 Shader 上传布局。
+
+`setParent(child, parent)` 保留局部变换，`setParent(child, {})` 解除父节点。无效／旧句柄、自引用和循环返回 false，重复设置同一父节点不重复添加子节点。`destroy()` 仅删除无子节点的实体；`destroySubtree()` 显式删除整个子树，先准备工作列表再按子先父后清理。创建、挂接和更新可能分配内存并抛异常，失败前保留仍有效的成员关系。
+
+`setLocalTransform()` 拒绝非有限值和零四元数，保留原局部变换；允许零或负缩放。成功修改局部变换、层级或实体后，全部世界矩阵标为未更新；`worldTransform()` 返回 nullptr，直到查询外调用 `updateWorldTransforms()` 完整成功。矩阵组合溢出返回 false，不暴露部分更新结果；修正局部变换后可重试。
+
+`add<T>`／`tryGet<T>`／`remove<T>` 和可变／const `each<T...>` 用于自定义数据组件，沿用 ECS 契约；`LocalTransform` 通过专用接口管理。查询中允许修改自定义组件字段及调用 `setLocalTransform()`，拒绝创建、删除、挂接和世界矩阵更新；const 别名和嵌套查询同样受保护。系统可先查询并写局部变换，查询结束后更新世界矩阵，再提取渲染数据。组件构造、移动和析构不得重入所属 Scene；查询回调不得销毁所属 Scene。
+
+所有句柄仅限所属 Scene；跨 Scene 误用不检测。局部变换／世界矩阵指针、子节点 span 都是借用，实体创建／删除或层级修改后应重新获取；世界矩阵也应在每次更新后重新获取。已经取得的指针不会因未更新标记自动失效，调用方不得用它读取过期结果。
+
+```powershell
+cmake --build build --config Debug --target MadCatSceneChecks MadCatQueryChecks MadCatComponentChecks MadCatEntityChecks MadCat
+cmake --build build --config Release --target MadCatSceneChecks MadCatQueryChecks MadCatComponentChecks MadCatEntityChecks MadCat
+```
+
+[场景检查](tests/SceneChecks.cpp) 覆盖局部 TRS、父先子后更新、非均匀缩放产生的剪切、挂接与环拒绝、叶节点／子树删除、句柄复用、无效输入、溢出恢复、系统查询边界、2048 层深度及 512 步层级参考模型。尚未接入 Sandbox、相机、glTF、RenderScene 或场景版本；不提供保持世界位置的重新挂接、dirty 增量更新或自动命令队列。
 
 ## 手动编译 Shader
 

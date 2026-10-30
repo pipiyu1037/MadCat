@@ -7,6 +7,7 @@ namespace madcat::ecs
 {
 Entity Registry::create()
 {
+    if (queryDepth_ != 0) { throw std::logic_error("Cannot create an Entity during a Registry query"); }
     if (freeHead_ != Entity::invalidIndex)
     {
         const auto index = freeHead_;
@@ -30,7 +31,7 @@ Entity Registry::create()
 
 bool Registry::destroy(Entity entity) noexcept
 {
-    if (!isAlive(entity)) { return false; }
+    if (queryDepth_ != 0 || !isAlive(entity)) { return false; }
 
     for (auto& [type, storage] : storages_) { storage->remove(entity); }
     auto& slot = slots_[entity.index];

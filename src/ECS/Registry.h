@@ -3,7 +3,9 @@
 #include "ComponentStorage.h"
 
 #include <cstddef>
+#include <functional>
 #include <memory>
+#include <tuple>
 #include <typeindex>
 #include <unordered_map>
 #include <utility>
@@ -26,9 +28,10 @@ public:
 
     // Reuses a free slot or grows storage. Growth preserves existing handles.
     // Allocation/index exhaustion may throw, leaving all entity state intact.
+    // Throws std::logic_error during each() on this Registry.
     [[nodiscard]] Entity create();
 
-    // Invalid/default/stale handles return false without changing any entity.
+    // Invalid/default/stale handles or an active each() return false.
     // Removes all components without allocating. A slot at maximum generation
     // is permanently retired instead of making an old handle valid again.
     [[nodiscard]] bool destroy(Entity entity) noexcept;
@@ -36,7 +39,8 @@ public:
     [[nodiscard]] size_t size() const noexcept { return aliveCount_; }
 
     // One component of T per Entity. Invalid/stale Entity or duplicate T returns
-    // nullptr without constructing a component. Constructor/allocation failures
+    // nullptr without constructing a component. Active each() also returns
+    // nullptr (for every component type). Constructor/allocation failures
     // throw without publishing membership; forwarded arguments follow their
     // own construction/move semantics, including explicitly moved components.
     // T must be an unqualified object with noexcept move construction, move
@@ -45,7 +49,7 @@ public:
     template<typename T, typename... Args>
     [[nodiscard]] T* add(Entity entity, Args&&... args)
     {
-        if (!isAlive(entity)) { return nullptr; }
+        if (queryDepth_ != 0 || !isAlive(entity)) { return nullptr; }
         auto* storage = findStorage<T>();
         if (!storage)
         {
@@ -76,16 +80,72 @@ public:
         return storage ? storage->tryGet(entity) : nullptr;
     }
 
-    // Missing component or invalid/stale Entity returns false; never allocates.
+    // Missing component, invalid/stale Entity or active each() returns false;
+    // never allocates.
     template<typename T>
     [[nodiscard]] bool remove(Entity entity) noexcept
     {
-        if (!isAlive(entity)) { return false; }
+        if (queryDepth_ != 0 || !isAlive(entity)) { return false; }
         auto* storage = findStorage<T>();
         return storage ? storage->remove(entity) : false;
     }
 
+    // Visits each Entity with all requested component types exactly once.
+    // Types follow add<T>'s rules; at least one type is required. Calls function
+    // as an lvalue with (Entity, First&, Rest&...); const Registry supplies const
+    // references. Return values are ignored. Missing pools give no matches.
+    // Order is unspecified; nested queries and field edits are allowed.
+    // create/add/remove/destroy on this Registry are rejected until the outermost
+    // query exits, including queries made through const aliases. Collect Entity
+    // handles and apply structural changes after each() returns; nothing is queued
+    // automatically. Callback exceptions propagate and restore the query guard;
+    // earlier field edits remain. Callbacks must not destroy this Registry.
+    template<typename First, typename... Rest, typename Function>
+    void each(Function&& function)
+    {
+        eachImpl<First, Rest...>(*this, std::forward<Function>(function));
+    }
+
+    template<typename First, typename... Rest, typename Function>
+    void each(Function&& function) const
+    {
+        eachImpl<First, Rest...>(*this, std::forward<Function>(function));
+    }
+
 private:
+    class QueryScope
+    {
+    public:
+        explicit QueryScope(const Registry& registry) noexcept : registry_(registry) { ++registry_.queryDepth_; }
+        ~QueryScope() { --registry_.queryDepth_; }
+        QueryScope(const QueryScope&) = delete;
+        QueryScope& operator=(const QueryScope&) = delete;
+
+    private:
+        const Registry& registry_;
+    };
+
+    template<typename First, typename... Rest, typename Self, typename Function>
+    static void eachImpl(Self& registry, Function&& function)
+    {
+        // Resolve pools once; iterate the first type's dense candidates and
+        // check the intersection. No pool creation, cache or query allocation.
+        auto pools = std::tuple{registry.template findStorage<First>(), registry.template findStorage<Rest>()...};
+        std::apply([&](auto* first, auto*... rest)
+        {
+            if (!first || !(... && (rest != nullptr))) { return; }
+            const QueryScope scope(registry);
+            for (size_t index = 0; index < first->size(); ++index)
+            {
+                const auto entity = first->entityAt(index);
+                if ((... && (rest->tryGet(entity) != nullptr)))
+                {
+                    std::invoke(function, entity, *first->tryGet(entity), *rest->tryGet(entity)...);
+                }
+            }
+        }, pools);
+    }
+
     template<typename T>
     [[nodiscard]] detail::ComponentStorage<T>* findStorage() noexcept
     {
@@ -112,6 +172,7 @@ private:
     std::vector<Slot> slots_;
     uint32_t freeHead_ = Entity::invalidIndex;
     size_t aliveCount_ = 0;
+    mutable size_t queryDepth_ = 0;
     std::unordered_map<std::type_index, std::unique_ptr<detail::ComponentStorageBase>> storages_;
 };
 }
