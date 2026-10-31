@@ -2,6 +2,7 @@
 #include <GLFW/glfw3.h>
 
 #include "RHI/Vulkan/VulkanDevice.h"
+#include "RHI/Vulkan/VulkanBuffer.h"
 #include "RHI/Vulkan/VulkanClearRenderer.h"
 #include "RHI/Vulkan/VulkanInstance.h"
 #include "RHI/Vulkan/VulkanPhysicalDevice.h"
@@ -15,6 +16,7 @@
 #include <exception>
 #include <filesystem>
 #include <memory>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -57,8 +59,8 @@ class SandboxApplication
 {
 public:
     SandboxApplication(GLFWwindow* window, const madcat::rhi::VulkanDevice& device, const madcat::rhi::VulkanSurface& surface,
-        const madcat::rhi::VulkanShaderModule& vertex, const madcat::rhi::VulkanShaderModule& fragment)
-        : window_(window), device_(device), surface_(surface), vertex_(vertex), fragment_(fragment)
+        const madcat::rhi::VulkanShaderModule& vertex, const madcat::rhi::VulkanShaderModule& fragment, madcat::rhi::BufferRef vertices)
+        : window_(window), device_(device), surface_(surface), vertex_(vertex), fragment_(fragment), vertices_(std::move(vertices))
     {
         iconified_ = glfwGetWindowAttrib(window_, GLFW_ICONIFIED) == GLFW_TRUE;
         glfwSetWindowUserPointer(window_, this);
@@ -139,7 +141,7 @@ private:
             presentation_.reset();
             auto candidate = std::make_unique<Presentation>();
             if (!candidate->swapchain.initialize(device_, surface_, {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}) ||
-                !candidate->triangle.initialize(device_, candidate->swapchain.surfaceFormat().format, vertex_, fragment_) ||
+                !candidate->triangle.initialize(device_, candidate->swapchain.surfaceFormat().format, vertex_, fragment_, vertices_) ||
                 !candidate->renderer.initialize(device_, candidate->swapchain, &candidate->triangle))
             {
                 std::fprintf(stderr, "MadCat error: presentation creation/rebuild failed; stopping rendering.\n");
@@ -164,6 +166,7 @@ private:
     const madcat::rhi::VulkanSurface& surface_;
     const madcat::rhi::VulkanShaderModule& vertex_;
     const madcat::rhi::VulkanShaderModule& fragment_;
+    madcat::rhi::BufferRef vertices_;
     std::unique_ptr<Presentation> presentation_;
     int framebufferWidth_ = 0;
     int framebufferHeight_ = 0;
@@ -211,7 +214,12 @@ int main()
                 fragmentShader.initialize(device, shaderDirectory / "fragment.spv"))
             {
                 std::fprintf(stderr, "MadCat: triangle Shader Modules ready (vertexMain / fragmentMain).\n");
-                SandboxApplication app(window, device, surface, vertexShader, fragmentShader);
+                constexpr madcat::rhi::TriangleVertex geometry[] = {
+                    {{0.0f, -0.6f}, {1, 0, 0}}, {{0.6f, 0.6f}, {0, 1, 0}}, {{-0.6f, 0.6f}, {0, 0, 1}}
+                };
+                auto vertices = madcat::rhi::createVertexBuffer(device, std::as_bytes(std::span(geometry)));
+                if (!vertices) { throw std::runtime_error("Triangle vertex upload failed"); }
+                SandboxApplication app(window, device, surface, vertexShader, fragmentShader, std::move(vertices));
                 exitCode = EXIT_SUCCESS;
                 while (!glfwWindowShouldClose(window) && !app.failed())
                 {

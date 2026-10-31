@@ -182,6 +182,12 @@ try {
         $pipelines -ne [regex]::Matches($log, '(?s)Clear renderer destroyed.*?Triangle pipeline destroyed.*?Swapchain destroyed').Count) { throw 'Pipeline/Swapchain lifetime count or order mismatch' }
     if ([regex]::Matches($log, 'Shader Module created;').Count -ne 2 -or [regex]::Matches($log, 'Shader Module destroyed\.').Count -ne 2 -or
         $log -notmatch '(?s)Triangle pipeline destroyed.*Swapchain destroyed.*Shader Module destroyed.*Shader Module destroyed.*Device destroyed.*Surface destroyed.*Instance destroyed') { throw 'Module/Device destruction count or order mismatch' }
+    if ([regex]::Matches($log, 'Vertex buffer uploaded; 60 bytes, coherent memory type').Count -ne 1 -or
+        [regex]::Matches($log, 'Vertex buffer destroyed\.').Count -ne 1 -or
+        $log -notmatch '(?s)Vertex buffer uploaded.*Triangle pipeline created' -or
+        $log -notmatch '(?s)Clear renderer destroyed.*Triangle pipeline destroyed.*Swapchain destroyed.*Vertex buffer destroyed.*Shader Module destroyed.*Device destroyed') {
+        throw 'Vertex upload, rebuild reuse or GPU completion lifetime mismatch'
+    }
     Write-Output "$name PASS (exit 0, $pipelines pipelines safely retired, clean validation)"
 } finally {
     if (-not $appProcess.HasExited) {

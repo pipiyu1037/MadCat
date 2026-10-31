@@ -1,6 +1,6 @@
 # MadCat 架构设计
 
-更新日期：2026-10-30。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
+更新日期：2026-10-31。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
 
 ## 文档职责与设计状态
 
@@ -105,7 +105,7 @@ CPU 对象释放不等于 GPU 已使用完毕。使用相关工作完成信号�
 
 ### RHI 资源引用与内部存储
 
-2026 年 10 月 27 日用户已确认：RHI 对外提供类型明确的强引用，首版内部使用 `std::shared_ptr` 管理资源记录。以下规定引用语义与保活规则；示例类型尚未实现，具体 C++ 接口、资源记录字段和回收容器在实现时确定。
+2026 年 10 月 27 日用户已确认：RHI 对外提供类型明确的强引用，首版内部使用 `std::shared_ptr` 管理资源记录。以下规定引用语义与保活规则；BufferRef 已在静态顶点路径落地，见下节，其余示例类型和通用提交回收尚未实现，具体 C++ 接口、资源记录字段和回收容器在实现时确定。
 
 | 类型示意 | 含义与使用范围 |
 |---|---|
@@ -134,7 +134,24 @@ Pass 作者使用 `BufferRef` 等 RHI 类型，`std::shared_ptr` 及 Vulkan 对�
 
 采用直接共享记录，需要接受控制块和引用计数开销，并防止缓存或循环引用长期保留资源。集中资源表方案还需要设计记录复用、失效检查和保活计数；首版优先让已确认的保活规则可理解、可验证，后续依据实际问题再评估内部存储调整。此选择不改变公开引用语义，也不要求现在建立可替换存储框架。
 
-实现后应验证引用复制／释放、业务侧提前释放但提交仍保活、最后一次提交完成后的回收、纹理视图依赖、旧资源重建隔离及退出顺序；本轮仅完成设计记录，以上场景尚未执行。
+实现后应验证引用复制／释放、业务侧提前释放但提交仍保活、最后一次提交完成后的回收、纹理视图依赖、旧资源重建隔离及退出顺序；设计讨论当时尚未执行这些场景，当前静态缓冲验证范围见下节，通用提交与纹理依赖仍待实现。
+
+### 不可变顶点缓冲（当前实现）
+
+2026-10-31 新增 [BufferRef](../src/RHI/Buffer.h) 与 [Vulkan 上传实现](../src/RHI/Vulkan/VulkanBuffer.cpp)。BufferRef 是可复制／移动的强引用，内部共享一份同时拥有 VkBuffer 与 VkDeviceMemory 的记录；对外仅有有效性与字节数查询，原生句柄访问集中在 Vulkan 后端。该引用是首个实际 RHI 资源类型，没有加入多后端接口或通用资源表。
+
+| 机制 | 当前行为与边界 |
+|---|---|
+| 创建与上传 | 后端 `createVertexBuffer(device, bytes)` 创建 VERTEX_BUFFER，按实际 memoryTypeBits 选择 HOST_VISIBLE／HOST_COHERENT 类型，以专用分配绑定，map／复制／unmap 后才发布引用；失败释放部分资源，CPU 分配异常可传播 |
+| 写入与同步 | 创建时一次写入，之后不可变；普通同线程主机写入完成后才提交使用它的 Draw，coherent 内存无需 flush，队列提交建立主机到设备的写入依赖；没有 transfer 命令或 queue ownership 变化 |
+| 资源保活 | 应用和三角形管线各持 BufferRef，单在途帧上下文初始化时复制固定顶点引用，保留到析构等待 acquisition／GPU／呈现完成并释放命令后；该固定路径保守地覆盖上下文整个寿命，尚无任意资源的通用提交登记 |
+| 销毁与父对象 | 最后一个引用释放时先销毁 Buffer 再释放内存；Device 覆盖所有引用寿命。引用计数不查询 GPU 状态，使用原生命令的后端调用方仍负责完成判断与保活 |
+| 几何验证路径 | CPU 提供三个 20 字节 TriangleVertex；binding 0，位置 location 0／float2／offset 0，颜色 location 1／float3／offset 8；管线校验同 Device、恰好 60 字节，并在 Draw 前绑定缓冲 |
+| 重建与访问声明 | 每次运行上传一次，resize／交换链重建复用；首次使用在完成 coherent 主机写入后的提交中读取。Render Graph 尚未接入，未来导入必须显式声明 Vertex Input／Vertex Attribute Read，不能由引用或反射代替 |
+
+选择直接 coherent 上传，是为了先验证实际可用的缓冲、顶点输入与 GPU 完成后释放路径；没有性能结论。符合 memoryTypeBits 的 coherent 类型缺失时诊断失败，不静默使用非 coherent 内存。staging／设备本地复制、非 coherent 回退、子分配、索引／Storage 缓冲和可变上传区按后续需求扩展。[Khronos 主机写入与提交规则](https://docs.vulkan.org/spec/latest/chapters/synchronization.html#synchronization-submission-host-writes)、[映射与访问同步要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkMapMemory.html)
+
+Debug／Release 各 19 项缓冲、29 项管线、35 项 Shader Module 检查及主程序构建通过；新的 Shader 编译／验证与 12 项失败恢复检查通过。实际 Debug／Release resize、Debug 最小化关闭和连续尺寸变化场景的像素及释放检查通过，全部 Debug 场景开启同步验证且无 warning／error。仅验证静态裁剪空间三角形，Scene／相机矩阵、Shader 常量布局、深度测试与 glTF 尚未接入。
 
 ## Pass 与 Render Graph
 
@@ -553,15 +570,32 @@ Debug／Release 各 12 组[查询检查](../tests/QueryChecks.cpp)通过，覆�
 | `updateWorldTransforms()` | 查询外按父先子后全量更新，非递归；分配失败抛异常，非有限矩阵返回 false；完整成功后才开放世界矩阵读取 |
 | `worldTransform`／`worldTransformsCurrent` | 世界结果未更新时不提供矩阵；已更新且实体有效时返回借用矩阵指针 |
 
-数学约定落地为右手系、Y 向上、米、弧度、列向量，`Local = T * R * S`，`World(child) = World(parent) * Local(child)`。LocalTransform 用平移、四元数与缩放表示，GLM 四元数构造顺序为 w／x／y／z；先用 double 归一化有限 float 四元数，覆盖极大或极小分量。世界结果保持完整矩阵，允许父子非均匀缩放与旋转产生剪切，不强制分解。GLM 1.0.1 由现有 FetchContent 锁定提交 `0af55ccecd98d4e5a8d1fad7de25ba429d60e863`，仅 Scene 公开依赖数学库，ECS 保持仅依赖标准库。Scene 公开传播弧度和零到一投影深度定义；尚未实现相机、Vulkan 视口方向或 Shader 矩阵布局验证。
+数学约定落地为右手系、Y 向上、米、弧度、列向量，`Local = T * R * S`，`World(child) = World(parent) * Local(child)`。LocalTransform 用平移、四元数与缩放表示，GLM 四元数构造顺序为 w／x／y／z；先用 double 归一化有限 float 四元数，覆盖极大或极小分量。世界结果保持完整矩阵，允许父子非均匀缩放与旋转产生剪切，不强制分解。GLM 1.0.1 由现有 FetchContent 锁定提交 `0af55ccecd98d4e5a8d1fad7de25ba429d60e863`，仅 Scene 公开依赖数学库，ECS 保持仅依赖标准库。Scene 公开传播弧度和零到一投影深度定义；相机及正高度视口的 CPU 数学约定见下节，Shader 矩阵布局尚未验证。
 
 任何成功的局部、层级或实体修改都使全部世界结果失效。系统在 Scene 查询中可更新自定义组件字段或经 setter 写局部变换；最外层查询结束后统一更新世界矩阵，再提取渲染数据。查询中拒绝结构性操作和世界更新，保护 const 别名，嵌套／异常退出恢复保护；组件生命周期回调不得重入 Scene。此次尚无通用系统调度、场景版本或路径追踪重置机制。
 
 局部／世界指针和子节点 span 都只供借用，实体创建、删除、重新挂接后重新获取，世界结果每次更新后也重新获取。未更新标记只控制后续 getter，不能撤回已取得的指针；调用方必须在场景修改后停止读取旧世界结果。句柄限所属 Scene，跨 Scene 的同索引／代际误用沿用 ECS 的不检测边界。
 
-实现采用已有建议中的保留局部挂接、拒绝普通父节点删除、显式子树删除和每次全量更新；理由是当前无逆矩阵／TRS 分解需求，受控写入与可验证行为优先于优化。保持世界位置挂接、dirty 更新、模型节点矩阵导入、相机、渲染提取和场景版本待后续增量。构建命令和用法见 [README](../README.md#scene-层级与-transform)。
+实现采用已有建议中的保留局部挂接、拒绝普通父节点删除、显式子树删除和每次全量更新；理由是层级维护本身不需要逆矩阵／TRS 分解，受控写入与可验证行为优先于优化。保持世界位置挂接、dirty 更新、模型节点矩阵导入、渲染提取和场景版本待后续增量。构建命令和用法见 [README](../README.md#scene-层级与-transform)。
 
 Debug／Release 各 12 组[场景检查](../tests/SceneChecks.cpp)、33 组 ECS 回归与主程序构建通过，包含剪切、2048 层和 512 步层级模型；README 示例两种构建均输出 `12` 并返回 0。尚未运行实际场景渲染或 GPU 验证。
+
+## 相机数据与矩阵（当前实现）
+
+2026-10-31 在 `MadCatScene` 中新增 [Camera](../src/Scene/Camera.h)。`PerspectiveCamera` 是普通 ECS 数据组件，以 Entity 标识相机，包含弧度制垂直视野角、近远裁剪面；默认值为 60°、0.1／1000。相机位姿使用已有 Scene 世界变换，局部 −Z 为前方、+Y 为上方，不额外维护一份位置或朝向。
+
+`buildCameraMatrices(const Scene&, Entity, float aspectRatio)` 是只读、无分配、无缓存的 CPU 提取函数，返回 `std::optional<CameraMatrices>`。调用方先完成世界矩阵更新，显式指定相机和输出宽高比；函数不负责选择主相机、查询窗口或更新 Scene。结果按值拥有 `view`、`projection`、`viewProjection`，没有 Scene／组件借用；场景或参数改变后重新提取。
+
+| 行为 | 当前契约与理由 |
+|---|---|
+| 位姿继承 | `view = inverse(world)`，包含父节点缩放、负缩放和剪切；不另行建立刚体位姿提取规则。普通相机及祖先建议单位缩放，避免视野形变 |
+| 投影与组合 | 右手系、有限透视、`0 < FOV < pi`、`aspect > 0`、`0 < near < far`；近处深度 0、远处 1，无 reversed-Z；`viewProjection = projection * view` |
+| Y 方向 | 在投影矩阵翻转 Y，适配当前正高度 Vulkan viewport，使相机 +Y 映射到输出上方；视口／Shader 不再重复翻转，后续接入剔除须核对绕序 |
+| 数据有效性 | 必须有相机组件与已更新世界矩阵；无效／旧句柄、非有限或非法参数、不可逆世界矩阵返回 `nullopt`，不修改场景或旧快照 |
+| 数值边界 | 求逆、投影系数和组合使用 double 中间结果；窄化前检查 float 范围，并拒绝窄化后退化的矩阵。输出仍为 float，不保证病态矩阵的精度 |
+| 参数和尺寸修改 | 组件字段按 ECS 规则编辑，每次提取重新校验；宽高比由实际输出决定，零尺寸暂停、resize 后重提取；不新增场景版本或缓存失效机制 |
+
+Debug／Release 各 10 组[相机检查](../tests/CameraChecks.cpp)通过，覆盖解析视锥边界、深度、视口映射、位姿继承、缩放／剪切、快照与失效、无效参数和数值边界；原有 45 组 Scene／ECS 检查及主程序构建通过。完整示例和命令见 [README](../README.md#相机与视图投影)。尚未接入 RenderScene／Sandbox、Shader 布局和 GPU 验证，也没有相机控制器、正交投影或自动主相机选择。
 
 ## 实现参考建议
 
@@ -584,7 +618,7 @@ Debug／Release 各 12 组[场景检查](../tests/SceneChecks.cpp)、33 组 ECS 
 - 查询迭代期间拒绝结构性修改，当前由调用方收集句柄并在遍历后应用；若后续需要自动延迟命令，再按场景系统的实际需求补充。
 - 初期不引入复杂 Job System、锁自由结构或通用事件总线。
 
-局部 Transform、层级与世界矩阵已由 Scene 的私有 Node 统一管理；Camera、Light、Mesh、Material 等自定义组件按实际接入增加，尚未实现。世界矩阵是派生数据；材质与几何数据通过资源标识共享，而非复制到每个实体。
+局部 Transform、层级与世界矩阵已由 Scene 的私有 Node 统一管理，透视相机已作为普通组件实现，见[相机契约](#相机数据与矩阵当前实现)；Light、Mesh、Material 等组件按实际接入增加。世界矩阵是派生数据；材质与几何数据通过资源标识共享，而非复制到每个实体。
 
 #### 父子关系和世界变换
 

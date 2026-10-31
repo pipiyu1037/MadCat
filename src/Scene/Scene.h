@@ -70,8 +70,8 @@ public:
     [[nodiscard]] bool worldTransformsCurrent() const noexcept { return worldsCurrent_; }
     [[nodiscard]] const glm::mat4* worldTransform(ecs::Entity entity) const noexcept;
 
-    // Scene-owned data uses the accessors above. User components (future Mesh,
-    // Material, Camera...) retain Registry's type and reference contracts.
+    // Scene-owned data uses the accessors above. User components (Camera,
+    // future Mesh, Material...) retain Registry's type and reference contracts.
     // Their constructors, moves and destructors must not reenter this Scene.
     template<typename T, typename... Args> requires userComponent<T>
     [[nodiscard]] T* add(ecs::Entity entity, Args&&... args)

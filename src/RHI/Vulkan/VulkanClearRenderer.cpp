@@ -26,6 +26,9 @@ struct VulkanClearRenderer::State
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     VkExtent2D extent{};
     const VulkanTrianglePipeline* triangle = nullptr;
+    // This fixed geometry is retained for the whole one-frame context. State's
+    // destructor waits and releases recorded commands before dropping this copy.
+    BufferRef vertexKeepAlive;
     std::vector<Image> images;
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
@@ -227,6 +230,7 @@ bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwa
     created->swapchain = swapchain.handle();
     created->extent = swapchain.extent();
     created->triangle = triangle;
+    if (triangle) { created->vertexKeepAlive = triangle->vertexBuffer(); }
     if (!created->loadFunctions(device.physicalDeviceInfo().instance)) { return false; }
     created->images.resize(swapchain.images().size());
     for (size_t index = 0; index < created->images.size(); ++index)

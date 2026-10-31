@@ -73,7 +73,7 @@ add_custom_target(MadCatQueryChecks
 )
 
 # Scene owns hierarchy and transforms; ECS itself remains math-independent.
-add_library(MadCatScene STATIC src/Scene/Scene.cpp)
+add_library(MadCatScene STATIC src/Scene/Scene.cpp src/Scene/Camera.cpp)
 target_compile_features(MadCatScene PUBLIC cxx_std_23)
 set_target_properties(MadCatScene PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(MadCatScene PUBLIC MadCatECS glm::glm)
@@ -95,8 +95,22 @@ add_custom_target(MadCatSceneChecks
     VERBATIM
 )
 
+add_executable(CameraChecks EXCLUDE_FROM_ALL tests/CameraChecks.cpp)
+target_link_libraries(CameraChecks PRIVATE MadCatScene)
+set_target_properties(CameraChecks PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+    target_compile_options(CameraChecks PRIVATE /W4 /permissive-)
+endif()
+add_custom_target(MadCatCameraChecks
+    COMMAND "$<TARGET_FILE:CameraChecks>"
+    DEPENDS CameraChecks
+    COMMENT "Checking camera transforms, Vulkan projection and invalid inputs"
+    VERBATIM
+)
+
 add_executable(MadCat
     apps/Sandbox/main.cpp
+    src/RHI/Vulkan/VulkanBuffer.cpp
     src/RHI/Vulkan/VulkanClearRenderer.cpp
     src/RHI/Vulkan/VulkanDevice.cpp
     src/RHI/Vulkan/VulkanInstance.cpp
@@ -187,6 +201,7 @@ add_custom_target(MadCatRayQueryChecks
 # CPU file checks and mocked Vulkan ownership; no GPU or Shader tools required.
 add_executable(ShaderModuleChecks EXCLUDE_FROM_ALL
     tests/ShaderModuleChecks.cpp
+    src/RHI/Vulkan/VulkanBuffer.cpp
     src/Shader/Spirv.cpp
     src/RHI/Vulkan/VulkanShaderModule.cpp
     src/RHI/Vulkan/VulkanDevice.cpp
@@ -218,5 +233,15 @@ add_custom_target(MadCatTriangleChecks
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/RunShaderModuleChecks.cmake"
     DEPENDS ShaderModuleChecks
     COMMENT "Checking triangle pipeline creation, Draw and failure cleanup"
+    VERBATIM
+)
+add_custom_target(MadCatBufferChecks
+    COMMAND "${CMAKE_COMMAND}"
+        "-DCHECK_PROGRAM=$<TARGET_FILE:ShaderModuleChecks>"
+        "-DOUTPUT_ROOT=${CMAKE_CURRENT_BINARY_DIR}/verification/buffer/$<CONFIG>"
+        -DCHECK_MODE=buffer
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/RunShaderModuleChecks.cmake"
+    DEPENDS ShaderModuleChecks
+    COMMENT "Checking immutable buffer upload, shared ownership and failure cleanup"
     VERBATIM
 )

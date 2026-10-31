@@ -3,15 +3,18 @@
 #include <GLFW/glfw3.h>
 
 #include "RHI/Vulkan/VulkanDevice.h"
+#include "RHI/Vulkan/VulkanBuffer.h"
 #include "RHI/Vulkan/VulkanShaderModule.h"
 #include "RHI/Vulkan/VulkanTrianglePipeline.h"
 #include "Shader/Spirv.h"
 
 #include <bit>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -48,6 +51,17 @@ VkShaderModule expectedVertex = VK_NULL_HANDLE;
 VkShaderModule expectedFragment = VK_NULL_HANDLE;
 int layoutCreates = 0, pipelineCreates = 0;
 const auto commandToken = reinterpret_cast<VkCommandBuffer>(6);
+std::set<VkBuffer> liveBuffers;
+std::map<VkDeviceMemory, std::vector<std::byte>> liveMemory;
+std::map<VkBuffer, VkDeviceMemory> boundMemory;
+std::set<VkDeviceMemory> mappedMemory;
+std::string_view failingBufferOperation;
+uint32_t memoryTypeBits = 2;
+bool noCoherentMemory = false;
+int bufferCreates = 0;
+constexpr madcat::rhi::TriangleVertex geometry[] = {
+    {{0, -0.6f}, {1, 0, 0}}, {{0.6f, 0.6f}, {0, 1, 0}}, {{-0.6f, 0.6f}, {0, 0, 1}}
+};
 
 void writeWords(const std::filesystem::path& file, const std::vector<uint32_t>& words)
 {
@@ -65,9 +79,93 @@ VKAPI_ATTR void VKAPI_CALL destroyDevice(VkDevice, const VkAllocationCallbacks*)
 {
     check(liveModules.empty(), "Device destroyed before its modules");
     check(liveLayouts.empty() && livePipelines.empty(), "Device destroyed before pipeline/layout");
+    check(liveBuffers.empty() && liveMemory.empty(), "Device destroyed before buffer/memory");
 }
 VKAPI_ATTR VkResult VKAPI_CALL waitIdle(VkDevice) { return VK_SUCCESS; }
 VKAPI_ATTR void VKAPI_CALL getQueue(VkDevice, uint32_t, uint32_t, VkQueue* queue) { *queue = reinterpret_cast<VkQueue>(3); }
+
+VKAPI_ATTR void VKAPI_CALL memoryProperties(VkPhysicalDevice physical, VkPhysicalDeviceMemoryProperties* properties)
+{
+    check(physical == reinterpret_cast<VkPhysicalDevice>(4), "Memory query used wrong physical device");
+    *properties = {};
+    properties->memoryTypeCount = 3;
+    properties->memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    properties->memoryTypes[1].propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+        (noCoherentMemory ? 0 : VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    properties->memoryTypes[2].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    properties->memoryHeapCount = 1;
+    properties->memoryHeaps[0].size = 4096;
+}
+VKAPI_ATTR VkResult VKAPI_CALL createBuffer(VkDevice device, const VkBufferCreateInfo* info,
+    const VkAllocationCallbacks* allocator, VkBuffer* buffer)
+{
+    ++bufferCreates;
+    check(device == deviceToken && !allocator && info->sType == VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO && !info->pNext &&
+        info->size > 0 && info->size <= 256 && info->flags == 0 && info->usage == VK_BUFFER_USAGE_VERTEX_BUFFER_BIT &&
+        info->sharingMode == VK_SHARING_MODE_EXCLUSIVE && info->queueFamilyIndexCount == 0, "Wrong buffer creation parameters");
+    *buffer = reinterpret_cast<VkBuffer>(9999);
+    if (failingBufferOperation == "create") { return VK_ERROR_OUT_OF_DEVICE_MEMORY; }
+    *buffer = reinterpret_cast<VkBuffer>(++serial);
+    liveBuffers.insert(*buffer);
+    return VK_SUCCESS;
+}
+VKAPI_ATTR void VKAPI_CALL destroyBuffer(VkDevice device, VkBuffer buffer, const VkAllocationCallbacks* allocator)
+{
+    check(device == deviceToken && !allocator && liveBuffers.erase(buffer) == 1, "Invalid or repeated buffer destruction");
+    const auto found = boundMemory.find(buffer);
+    if (found != boundMemory.end())
+    {
+        check(liveMemory.contains(found->second) && !mappedMemory.contains(found->second), "Buffer memory freed/mapped during destruction");
+        boundMemory.erase(found);
+    }
+}
+VKAPI_ATTR void VKAPI_CALL getRequirements(VkDevice device, VkBuffer buffer, VkMemoryRequirements* requirements)
+{
+    check(device == deviceToken && liveBuffers.contains(buffer), "Requirements for invalid buffer");
+    *requirements = {256, 64, memoryTypeBits};
+}
+VKAPI_ATTR VkResult VKAPI_CALL allocateMemory(VkDevice device, const VkMemoryAllocateInfo* info,
+    const VkAllocationCallbacks* allocator, VkDeviceMemory* memory)
+{
+    const auto* dedicated = static_cast<const VkMemoryDedicatedAllocateInfo*>(info->pNext);
+    check(device == deviceToken && !allocator && info->sType == VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO &&
+        info->allocationSize == 256 && info->memoryTypeIndex == 1 && dedicated &&
+        dedicated->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO && !dedicated->pNext &&
+        liveBuffers.contains(dedicated->buffer) && !dedicated->image, "Wrong memory allocation or type selection");
+    *memory = reinterpret_cast<VkDeviceMemory>(9999);
+    if (failingBufferOperation == "allocate") { return VK_ERROR_OUT_OF_DEVICE_MEMORY; }
+    *memory = reinterpret_cast<VkDeviceMemory>(++serial);
+    liveMemory.emplace(*memory, std::vector<std::byte>(256));
+    return VK_SUCCESS;
+}
+VKAPI_ATTR void VKAPI_CALL freeMemory(VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks* allocator)
+{
+    check(device == deviceToken && !allocator && !mappedMemory.contains(memory), "Invalid free or memory still mapped");
+    for (const auto& [buffer, bound] : boundMemory) { check(bound != memory, "Memory freed before buffer"); (void)buffer; }
+    check(liveMemory.erase(memory) == 1, "Invalid/repeated memory free");
+}
+VKAPI_ATTR VkResult VKAPI_CALL bindMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize offset)
+{
+    check(device == deviceToken && liveBuffers.contains(buffer) && liveMemory.contains(memory) && offset == 0, "Wrong memory bind");
+    if (failingBufferOperation == "bind") { return VK_ERROR_OUT_OF_DEVICE_MEMORY; }
+    check(boundMemory.emplace(buffer, memory).second, "Memory bound twice");
+    return VK_SUCCESS;
+}
+VKAPI_ATTR VkResult VKAPI_CALL mapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset,
+    VkDeviceSize size, VkMemoryMapFlags flags, void** mapped)
+{
+    check(device == deviceToken && liveMemory.contains(memory) && offset == 0 && size > 0 && size <= 256 && flags == 0,
+        "Wrong memory mapping");
+    *mapped = reinterpret_cast<void*>(1);
+    if (failingBufferOperation == "map") { return VK_ERROR_MEMORY_MAP_FAILED; }
+    check(mappedMemory.insert(memory).second, "Memory mapped twice");
+    *mapped = liveMemory.at(memory).data();
+    return VK_SUCCESS;
+}
+VKAPI_ATTR void VKAPI_CALL unmapMemory(VkDevice device, VkDeviceMemory memory)
+{
+    check(device == deviceToken && mappedMemory.erase(memory) == 1, "Invalid memory unmap");
+}
 
 VKAPI_ATTR VkResult VKAPI_CALL createModule(VkDevice device, const VkShaderModuleCreateInfo* info,
     const VkAllocationCallbacks* allocator, VkShaderModule* module)
@@ -123,8 +221,16 @@ VKAPI_ATTR VkResult VKAPI_CALL createPipelines(VkDevice device, VkPipelineCache 
     check(rendering && rendering->sType == VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO && rendering->pNext == nullptr &&
         rendering->viewMask == 0 && rendering->colorAttachmentCount == 1 && *rendering->pColorAttachmentFormats == expectedFormat &&
         rendering->depthAttachmentFormat == VK_FORMAT_UNDEFINED && rendering->stencilAttachmentFormat == VK_FORMAT_UNDEFINED, "Wrong dynamic-rendering formats");
-    check(info->pVertexInputState->vertexBindingDescriptionCount == 0 && info->pVertexInputState->vertexAttributeDescriptionCount == 0 &&
-        info->pInputAssemblyState->topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST && info->pInputAssemblyState->primitiveRestartEnable == VK_FALSE &&
+    const auto& input = *info->pVertexInputState;
+    check(input.vertexBindingDescriptionCount == 1 && input.vertexAttributeDescriptionCount == 2 &&
+        input.pVertexBindingDescriptions[0].binding == 0 && input.pVertexBindingDescriptions[0].stride == 20 &&
+        input.pVertexBindingDescriptions[0].inputRate == VK_VERTEX_INPUT_RATE_VERTEX &&
+        input.pVertexAttributeDescriptions[0].location == 0 && input.pVertexAttributeDescriptions[0].binding == 0 &&
+        input.pVertexAttributeDescriptions[0].format == VK_FORMAT_R32G32_SFLOAT && input.pVertexAttributeDescriptions[0].offset == 0 &&
+        input.pVertexAttributeDescriptions[1].location == 1 && input.pVertexAttributeDescriptions[1].binding == 0 &&
+        input.pVertexAttributeDescriptions[1].format == VK_FORMAT_R32G32B32_SFLOAT && input.pVertexAttributeDescriptions[1].offset == 8,
+        "Wrong vertex buffer layout");
+    check(info->pInputAssemblyState->topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST && info->pInputAssemblyState->primitiveRestartEnable == VK_FALSE &&
         info->pRasterizationState->polygonMode == VK_POLYGON_MODE_FILL && info->pRasterizationState->cullMode == VK_CULL_MODE_NONE &&
         info->pRasterizationState->lineWidth == 1.0f && info->pRasterizationState->rasterizerDiscardEnable == VK_FALSE &&
         info->pMultisampleState->rasterizationSamples == VK_SAMPLE_COUNT_1_BIT && info->pDepthStencilState->depthTestEnable == VK_FALSE &&
@@ -163,14 +269,30 @@ VKAPI_ATTR void VKAPI_CALL setScissor(VkCommandBuffer command, uint32_t first, u
 }
 VKAPI_ATTR void VKAPI_CALL draw(VkCommandBuffer command, uint32_t vertices, uint32_t instances, uint32_t firstVertex, uint32_t firstInstance)
 {
-    check(command == commandToken && recorded == "BVS" && vertices == 3 && instances == 1 && firstVertex == 0 && firstInstance == 0, "Wrong Draw arguments/order");
+    check(command == commandToken && recorded == "BVSG" && vertices == 3 && instances == 1 && firstVertex == 0 && firstInstance == 0, "Wrong Draw arguments/order");
     recorded += 'D';
+}
+VKAPI_ATTR void VKAPI_CALL bindVertices(VkCommandBuffer command, uint32_t first, uint32_t count,
+    const VkBuffer* buffers, const VkDeviceSize* offsets)
+{
+    check(command == commandToken && recorded == "BVS" && first == 0 && count == 1 && offsets[0] == 0 &&
+        liveBuffers.contains(buffers[0]) && boundMemory.contains(buffers[0]), "Wrong vertex buffer binding/order");
+    recorded += 'G';
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL deviceProc(VkDevice device, const char* name)
 {
     check(device == deviceToken, "Function lookup used wrong Device");
     if (name == missingFunction) { return nullptr; }
+    if (std::strcmp(name, "vkCreateBuffer") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(createBuffer); }
+    if (std::strcmp(name, "vkDestroyBuffer") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(destroyBuffer); }
+    if (std::strcmp(name, "vkGetBufferMemoryRequirements") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(getRequirements); }
+    if (std::strcmp(name, "vkAllocateMemory") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(allocateMemory); }
+    if (std::strcmp(name, "vkFreeMemory") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(freeMemory); }
+    if (std::strcmp(name, "vkBindBufferMemory") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(bindMemory); }
+    if (std::strcmp(name, "vkMapMemory") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(mapMemory); }
+    if (std::strcmp(name, "vkUnmapMemory") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(unmapMemory); }
+    if (std::strcmp(name, "vkCmdBindVertexBuffers") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(bindVertices); }
     if (std::strcmp(name, "vkCreateShaderModule") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(createModule); }
     if (std::strcmp(name, "vkDestroyShaderModule") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(destroyModule); }
     if (std::strcmp(name, "vkDeviceWaitIdle") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(waitIdle); }
@@ -318,6 +440,66 @@ void moduleChecks(const std::filesystem::path& root)
     check(destroys == 3 && liveModules.empty(), "Retried module leaked");
 }
 
+void bufferChecks()
+{
+    using madcat::rhi::BufferRef;
+    using madcat::rhi::createVertexBuffer;
+    const auto bytes = std::as_bytes(std::span(geometry));
+    BufferRef empty;
+    check(!empty && empty.sizeBytes() == 0 && !madcat::rhi::detail::BufferAccess::handle(empty), "Empty reference has data");
+    madcat::rhi::VulkanDevice device;
+    check(!createVertexBuffer(device, bytes), "Uninitialized Device accepted");
+    ++cases;
+    const auto input = candidate();
+    check(device.initialize({&input, 1}), "Mock Device failed");
+    check(!createVertexBuffer(device, {}) && bufferCreates == 0, "Empty upload reached Vulkan");
+    ++cases;
+    for (const auto* name : {"vkGetPhysicalDeviceMemoryProperties", "vkGetDeviceProcAddr", "vkCreateBuffer", "vkDestroyBuffer",
+        "vkGetBufferMemoryRequirements", "vkAllocateMemory", "vkFreeMemory", "vkBindBufferMemory", "vkMapMemory", "vkUnmapMemory"})
+    {
+        missingFunction = name;
+        const auto before = bufferCreates;
+        check(!createVertexBuffer(device, bytes) && bufferCreates == before && liveBuffers.empty() && liveMemory.empty(),
+            "Missing function acquired resources");
+        ++cases;
+    }
+    missingFunction = {};
+    memoryTypeBits = 4;
+    check(!createVertexBuffer(device, bytes) && liveBuffers.empty() && liveMemory.empty(), "Ignored memoryTypeBits");
+    ++cases;
+    memoryTypeBits = 2;
+    noCoherentMemory = true;
+    check(!createVertexBuffer(device, bytes) && liveBuffers.empty() && liveMemory.empty(), "Noncoherent memory accepted");
+    ++cases;
+    noCoherentMemory = false;
+    for (const auto* operation : {"create", "allocate", "bind", "map"})
+    {
+        failingBufferOperation = operation;
+        check(!createVertexBuffer(device, bytes) && liveBuffers.empty() && liveMemory.empty() && mappedMemory.empty(),
+            "Failure leaked buffer/memory or mapped an unsuccessful output");
+        failingBufferOperation = {};
+        auto retry = createVertexBuffer(device, bytes);
+        check(static_cast<bool>(retry), "Upload retry failed");
+        ++cases;
+    }
+    check(liveBuffers.empty() && liveMemory.empty(), "Retry resource leak");
+    auto source = std::to_array(geometry);
+    auto buffer = createVertexBuffer(device, std::as_bytes(std::span(source)));
+    check(buffer && buffer.sizeBytes() == sizeof(geometry) && mappedMemory.empty(), "Upload failed or remained mapped");
+    const auto native = madcat::rhi::detail::BufferAccess::handle(buffer);
+    const auto memory = boundMemory.at(native);
+    source[0].position[0] = 123;
+    check(std::memcmp(liveMemory.at(memory).data(), geometry, sizeof(geometry)) == 0, "Data not copied or source retained");
+    auto copy = buffer;
+    auto moved = std::move(buffer);
+    check(!buffer && buffer.sizeBytes() == 0 && liveBuffers.size() == 1, "Move changed shared allocation");
+    moved = {};
+    check(copy && liveBuffers.contains(native), "First release destroyed shared buffer");
+    copy = {};
+    check(liveBuffers.empty() && liveMemory.empty(), "Last reference did not release buffer/memory");
+    ++cases;
+}
+
 void triangleChecks(const std::filesystem::path& root)
 {
     using madcat::rhi::VulkanTrianglePipeline;
@@ -326,30 +508,33 @@ void triangleChecks(const std::filesystem::path& root)
     writeWords(file, fixture);
     madcat::rhi::VulkanDevice device;
     madcat::rhi::VulkanShaderModule vertex, fragment, empty;
+    madcat::rhi::BufferRef vertices;
     {
         VulkanTrianglePipeline pipeline;
-        check(!pipeline.initialize(device, expectedFormat, vertex, fragment), "Uninitialized Device accepted");
+        check(!pipeline.initialize(device, expectedFormat, vertex, fragment, vertices), "Uninitialized Device accepted");
         check(!pipeline.recordDraw(commandToken, {640, 480}), "Uninitialized pipeline recorded Draw");
         cases += 2;
     }
     const auto input = candidate();
     check(device.initialize({&input, 1}) && vertex.initialize(device, file) && fragment.initialize(device, file), "Mock setup failed");
+    vertices = madcat::rhi::createVertexBuffer(device, std::as_bytes(std::span(geometry)));
+    check(static_cast<bool>(vertices), "Mock upload failed");
     expectedVertex = vertex.handle();
     expectedFragment = fragment.handle();
     for (int invalid = 0; invalid < 3; ++invalid)
     {
         VulkanTrianglePipeline pipeline;
         check(!pipeline.initialize(device, invalid == 2 ? VK_FORMAT_UNDEFINED : expectedFormat,
-            invalid == 0 ? empty : vertex, invalid == 1 ? empty : fragment), "Invalid module/format accepted");
+            invalid == 0 ? empty : vertex, invalid == 1 ? empty : fragment, vertices), "Invalid module/format accepted");
         check(layoutCreates == 0, "Invalid input reached Vulkan");
         ++cases;
     }
     for (const auto* name : {"vkGetDeviceProcAddr", "vkCreatePipelineLayout", "vkDestroyPipelineLayout", "vkCreateGraphicsPipelines",
-        "vkDestroyPipeline", "vkCmdBindPipeline", "vkCmdSetViewport", "vkCmdSetScissor", "vkCmdDraw"})
+        "vkDestroyPipeline", "vkCmdBindPipeline", "vkCmdSetViewport", "vkCmdSetScissor", "vkCmdDraw", "vkCmdBindVertexBuffers"})
     {
         missingFunction = name;
         VulkanTrianglePipeline pipeline;
-        check(!pipeline.initialize(device, expectedFormat, vertex, fragment) && pipeline.handle() == VK_NULL_HANDLE &&
+        check(!pipeline.initialize(device, expectedFormat, vertex, fragment, vertices) && pipeline.handle() == VK_NULL_HANDLE &&
             pipeline.deviceHandle() == VK_NULL_HANDLE && pipeline.colorFormat() == VK_FORMAT_UNDEFINED && layoutCreates == 0, "Missing function acquired pipeline resources");
         ++cases;
     }
@@ -359,21 +544,21 @@ void triangleChecks(const std::filesystem::path& root)
         {
             VulkanTrianglePipeline pipeline;
             failingPipelineOperation = operation;
-            check(!pipeline.initialize(device, expectedFormat, vertex, fragment) && pipeline.handle() == VK_NULL_HANDLE &&
+            check(!pipeline.initialize(device, expectedFormat, vertex, fragment, vertices) && pipeline.handle() == VK_NULL_HANDLE &&
                 liveLayouts.empty() && livePipelines.empty(), "Failed creation leaked a pipeline/layout");
             ++cases;
             failingPipelineOperation = {};
-            check(pipeline.initialize(device, expectedFormat, vertex, fragment), "Pipeline creation retry failed");
+            check(pipeline.initialize(device, expectedFormat, vertex, fragment, vertices), "Pipeline creation retry failed");
             const auto handle = pipeline.handle();
             const auto before = pipelineCreates;
             check(pipeline.deviceHandle() == device.handle() && pipeline.colorFormat() == expectedFormat &&
-                !pipeline.initialize(device, expectedFormat, vertex, fragment) && pipeline.handle() == handle && pipelineCreates == before, "Repeated creation changed live pipeline");
+                !pipeline.initialize(device, expectedFormat, vertex, fragment, vertices) && pipeline.handle() == handle && pipelineCreates == before, "Repeated creation changed live pipeline");
             ++cases;
             for (VkExtent2D extent : {VkExtent2D{640, 480}, VkExtent2D{937, 611}})
             {
                 recorded.clear();
                 expectedExtent = extent;
-                check(pipeline.recordDraw(commandToken, extent) && recorded == "BVSD", "Wrong recording sequence");
+                check(pipeline.recordDraw(commandToken, extent) && recorded == "BVSGD", "Wrong recording sequence");
                 ++cases;
             }
             recorded.clear();
@@ -386,10 +571,32 @@ void triangleChecks(const std::filesystem::path& root)
     expectedFormat = VK_FORMAT_R8G8B8A8_UNORM;
     {
         VulkanTrianglePipeline pipeline;
-        check(pipeline.initialize(device, expectedFormat, vertex, fragment) && pipeline.colorFormat() == expectedFormat, "New color format was not used during rebuild");
+        check(pipeline.initialize(device, expectedFormat, vertex, fragment, vertices) && pipeline.colorFormat() == expectedFormat, "New color format was not used during rebuild");
         ++cases;
     }
     check(livePipelines.empty() && liveLayouts.empty(), "Rebuilt format leaked resources");
+    for (const auto& invalid : {madcat::rhi::BufferRef{}, madcat::rhi::createVertexBuffer(device, std::as_bytes(std::span(geometry).first(1)))})
+    {
+        VulkanTrianglePipeline pipeline;
+        const auto before = layoutCreates;
+        check(!pipeline.initialize(device, expectedFormat, vertex, fragment, invalid) && layoutCreates == before, "Invalid geometry accepted");
+        ++cases;
+    }
+    madcat::rhi::BufferRef frameReference;
+    VkBuffer retained = VK_NULL_HANDLE;
+    {
+        auto uploaded = madcat::rhi::createVertexBuffer(device, std::as_bytes(std::span(geometry)));
+        retained = madcat::rhi::detail::BufferAccess::handle(uploaded);
+        VulkanTrianglePipeline pipeline;
+        check(pipeline.initialize(device, expectedFormat, vertex, fragment, uploaded), "Retention setup failed");
+        uploaded = {};
+        check(liveBuffers.contains(retained), "Pipeline failed to retain vertices");
+        frameReference = pipeline.vertexBuffer();
+    }
+    check(liveBuffers.contains(retained), "Frame reference failed to outlive pipeline");
+    frameReference = {};
+    check(!liveBuffers.contains(retained), "Frame reference leaked buffer");
+    ++cases;
 }
 }
 
@@ -399,6 +606,7 @@ GLFWAPI GLFWvkproc glfwGetInstanceProcAddress(VkInstance instance, const char* n
 {
     if (instance != instanceToken) { std::fprintf(stderr, "Wrong Instance for lookup.\n"); std::abort(); }
     if (name == missingFunction) { return nullptr; }
+    if (std::strcmp(name, "vkGetPhysicalDeviceMemoryProperties") == 0) { return reinterpret_cast<GLFWvkproc>(memoryProperties); }
     if (std::strcmp(name, "vkGetDeviceProcAddr") == 0) { return reinterpret_cast<GLFWvkproc>(deviceProc); }
     if (std::strcmp(name, "vkCreateDevice") == 0) { return reinterpret_cast<GLFWvkproc>(createDevice); }
     if (std::strcmp(name, "vkDestroyDevice") == 0) { return reinterpret_cast<GLFWvkproc>(destroyDevice); }
@@ -410,10 +618,16 @@ int main(int argc, char** argv)
 {
     try
     {
-        check(argc == 2 || (argc == 3 && std::string_view(argv[2]) == "triangle"), "Expected output directory and optional triangle mode");
+        check(argc == 2 || (argc == 3 && (std::string_view(argv[2]) == "triangle" || std::string_view(argv[2]) == "buffer")),
+            "Expected output directory and optional triangle/buffer mode");
         const auto root = std::filesystem::absolute(std::filesystem::path(argv[1]));
         std::filesystem::create_directories(root);
-        if (argc == 3)
+        if (argc == 3 && std::string_view(argv[2]) == "buffer")
+        {
+            bufferChecks();
+            std::printf("Buffer checks: %d cases passed (mocked Vulkan).\n", cases);
+        }
+        else if (argc == 3)
         {
             triangleChecks(root);
             std::printf("Triangle pipeline checks: %d cases passed (mocked Vulkan).\n", cases);

@@ -5,18 +5,11 @@ struct VertexOutput
 };
 
 [shader("vertex")]
-VertexOutput vertexMain(uint vertexIndex : SV_VulkanVertexID)
+VertexOutput vertexMain(float2 position : POSITION, float3 color : COLOR0)
 {
-    // Vulkan VertexIndex directly, without requiring the BaseVertex built-in.
-    const float2 positions[3] = {
-        float2(0.0, -0.6), float2(0.6, 0.6), float2(-0.6, 0.6)
-    };
-    const float3 colors[3] = {
-        float3(1.0, 0.0, 0.0), float3(0.0, 1.0, 0.0), float3(0.0, 0.0, 1.0)
-    };
     VertexOutput output;
-    output.position = float4(positions[vertexIndex], 0.0, 1.0);
-    output.color = colors[vertexIndex];
+    output.position = float4(position, 0.0, 1.0);
+    output.color = color;
     return output;
 }
 

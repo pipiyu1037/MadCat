@@ -1,6 +1,7 @@
 #include "VulkanTrianglePipeline.h"
 
 #include "VulkanDevice.h"
+#include "VulkanBuffer.h"
 #include "VulkanFunctions.h"
 #include "VulkanShaderModule.h"
 
@@ -11,6 +12,7 @@ namespace madcat::rhi
 {
 struct VulkanTrianglePipeline::State
 {
+    BufferRef vertices;
     VkDevice device = VK_NULL_HANDLE;
     VkFormat format = VK_FORMAT_UNDEFINED;
     VkPipelineLayout layout = VK_NULL_HANDLE;
@@ -23,6 +25,7 @@ struct VulkanTrianglePipeline::State
     PFN_vkCmdSetViewport setViewport = nullptr;
     PFN_vkCmdSetScissor setScissor = nullptr;
     PFN_vkCmdDraw draw = nullptr;
+    PFN_vkCmdBindVertexBuffers bindVertices = nullptr;
 
     bool loadFunctions(VkInstance instance)
     {
@@ -37,7 +40,7 @@ struct VulkanTrianglePipeline::State
         return load(createLayout, "vkCreatePipelineLayout") && load(destroyLayout, "vkDestroyPipelineLayout") &&
             load(createPipelines, "vkCreateGraphicsPipelines") && load(destroyPipeline, "vkDestroyPipeline") &&
             load(bindPipeline, "vkCmdBindPipeline") && load(setViewport, "vkCmdSetViewport") &&
-            load(setScissor, "vkCmdSetScissor") && load(draw, "vkCmdDraw");
+            load(setScissor, "vkCmdSetScissor") && load(draw, "vkCmdDraw") && load(bindVertices, "vkCmdBindVertexBuffers");
     }
 
     ~State()
@@ -59,7 +62,7 @@ VulkanTrianglePipeline::~VulkanTrianglePipeline()
 }
 
 bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat colorFormat,
-    const VulkanShaderModule& vertex, const VulkanShaderModule& fragment)
+    const VulkanShaderModule& vertex, const VulkanShaderModule& fragment, BufferRef vertices)
 {
     if (state_)
     {
@@ -67,13 +70,15 @@ bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat col
         return false;
     }
     if (!device.handle() || !vertex.handle() || !fragment.handle() ||
-        vertex.deviceHandle() != device.handle() || fragment.deviceHandle() != device.handle() || colorFormat == VK_FORMAT_UNDEFINED)
+        vertex.deviceHandle() != device.handle() || fragment.deviceHandle() != device.handle() || colorFormat == VK_FORMAT_UNDEFINED ||
+        detail::BufferAccess::device(vertices) != device.handle() || vertices.sizeBytes() != 3 * sizeof(TriangleVertex))
     {
-        std::fprintf(stderr, "Vulkan error: triangle pipeline requires initialized Shader Modules from the same Device and a color format.\n");
+        std::fprintf(stderr, "Vulkan error: triangle pipeline requires same-Device Shader Modules, three vertices and a color format.\n");
         return false;
     }
     auto created = std::make_unique<State>();
     created->device = device.handle();
+    created->vertices = std::move(vertices);
     created->format = colorFormat;
     if (!created->loadFunctions(device.physicalDeviceInfo().instance)) { return false; }
     VkPipelineLayoutCreateInfo layout{};
@@ -92,6 +97,16 @@ bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat col
     stages[1].pName = "fragmentMain";
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    static_assert(std::is_standard_layout_v<TriangleVertex> && sizeof(TriangleVertex) == 5 * sizeof(float));
+    const VkVertexInputBindingDescription binding{0, sizeof(TriangleVertex), VK_VERTEX_INPUT_RATE_VERTEX};
+    const VkVertexInputAttributeDescription attributes[] = {
+        {0, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(TriangleVertex, position)},
+        {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(TriangleVertex, color)}
+    };
+    vertexInput.vertexBindingDescriptionCount = 1;
+    vertexInput.pVertexBindingDescriptions = &binding;
+    vertexInput.vertexAttributeDescriptionCount = 2;
+    vertexInput.pVertexAttributeDescriptions = attributes;
     VkPipelineInputAssemblyStateCreateInfo assembly{};
     assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -154,6 +169,7 @@ bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat col
 VkPipeline VulkanTrianglePipeline::handle() const { return state_ ? state_->pipeline : VK_NULL_HANDLE; }
 VkDevice VulkanTrianglePipeline::deviceHandle() const { return state_ ? state_->device : VK_NULL_HANDLE; }
 VkFormat VulkanTrianglePipeline::colorFormat() const { return state_ ? state_->format : VK_FORMAT_UNDEFINED; }
+BufferRef VulkanTrianglePipeline::vertexBuffer() const { return state_ ? state_->vertices : BufferRef{}; }
 
 bool VulkanTrianglePipeline::recordDraw(VkCommandBuffer commandBuffer, VkExtent2D extent) const
 {
@@ -171,6 +187,9 @@ bool VulkanTrianglePipeline::recordDraw(VkCommandBuffer commandBuffer, VkExtent2
     state.bindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, state.pipeline);
     state.setViewport(commandBuffer, 0, 1, &viewport);
     state.setScissor(commandBuffer, 0, 1, &scissor);
+    const auto buffer = detail::BufferAccess::handle(state.vertices);
+    constexpr VkDeviceSize offset = 0;
+    state.bindVertices(commandBuffer, 0, 1, &buffer, &offset);
     state.draw(commandBuffer, 3, 1, 0, 0);
     return true;
 }

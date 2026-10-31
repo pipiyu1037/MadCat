@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RHI/Buffer.h"
+
 #include <vulkan/vulkan.h>
 
 #include <memory>
@@ -9,8 +11,16 @@ namespace madcat::rhi
 class VulkanDevice;
 class VulkanShaderModule;
 
-// Backend exercise for triangle.slang: no vertex buffers, descriptors or depth.
-// Owns a pipeline and empty layout, borrowing the Device. Single-threaded use.
+// Fixed location-0 float2 position / location-1 float3 color vertex layout.
+struct TriangleVertex
+{
+    float position[2];
+    float color[3];
+};
+
+// Backend exercise for triangle.slang: vertex buffer, no descriptors or depth.
+// Owns a pipeline and empty layout, retains vertices, and borrows the Device.
+// Single-threaded use.
 // Finish submitted commands using this pipeline before destroying this owner;
 // command buffers that recorded it must not be submitted after destruction.
 class VulkanTrianglePipeline
@@ -29,11 +39,13 @@ public:
     // colorFormat must be the rendering attachment's supported color format.
     // Failure releases partial resources; repeated initialization preserves state.
     [[nodiscard]] bool initialize(const VulkanDevice& device, VkFormat colorFormat,
-        const VulkanShaderModule& vertex, const VulkanShaderModule& fragment);
+        const VulkanShaderModule& vertex, const VulkanShaderModule& fragment, BufferRef vertices);
 
     [[nodiscard]] VkPipeline handle() const;
     [[nodiscard]] VkDevice deviceHandle() const;
     [[nodiscard]] VkFormat colorFormat() const;
+    // The frame context retains a copy until its recorded GPU work completes.
+    [[nodiscard]] BufferRef vertexBuffer() const;
 
     // Caller provides a recording primary graphics command buffer from the same
     // Device, inside compatible dynamic rendering. Extent must fit Device limits.

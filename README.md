@@ -1,6 +1,6 @@
 # MadCat
 
-使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前可显示 Slang Shader 绘制的彩色三角形，支持单帧同步、resize／最小化恢复时的 Swapchain 与管线重建，以及 Shader 手动编译、SPIR-V 验证和 Vulkan 资源的 RAII 管理。
+使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前可通过 CPU 上传的顶点缓冲绘制彩色三角形，支持单帧同步、resize／最小化恢复时的 Swapchain 与管线重建，以及 Shader 手动编译、SPIR-V 验证和 Vulkan 资源的 RAII 管理。
 
 文档：[开发范围、进度与验收](docs/project-development.md) · [架构设计](docs/architecture-design.md)。
 
@@ -214,7 +214,7 @@ int main()
 }
 ```
 
-数学约定采用右手系、Y 向上、米、弧度和列向量，局部矩阵为 `T * R * S`，子世界矩阵为 `parentWorld * local`。四元数构造参数是 `(w, x, y, z)`，写入时归一化；glTF 的数组顺序需在未来导入器中显式转换。世界矩阵保留剪切，不重新分解为 TRS。当前定义 `GLM_FORCE_DEPTH_ZERO_TO_ONE`，但尚未实现或验证相机投影、视口翻转和 Shader 上传布局。
+数学约定采用右手系、Y 向上、米、弧度和列向量，局部矩阵为 `T * R * S`，子世界矩阵为 `parentWorld * local`。四元数构造参数是 `(w, x, y, z)`，写入时归一化；glTF 的数组顺序需在未来导入器中显式转换。世界矩阵保留剪切，不重新分解为 TRS。当前定义 `GLM_FORCE_DEPTH_ZERO_TO_ONE`；相机投影与正高度视口的 CPU 约定见下节，Shader 上传布局尚未验证。
 
 `setParent(child, parent)` 保留局部变换，`setParent(child, {})` 解除父节点。无效／旧句柄、自引用和循环返回 false，重复设置同一父节点不重复添加子节点。`destroy()` 仅删除无子节点的实体；`destroySubtree()` 显式删除整个子树，先准备工作列表再按子先父后清理。创建、挂接和更新可能分配内存并抛异常，失败前保留仍有效的成员关系。
 
@@ -229,7 +229,47 @@ cmake --build build --config Debug --target MadCatSceneChecks MadCatQueryChecks 
 cmake --build build --config Release --target MadCatSceneChecks MadCatQueryChecks MadCatComponentChecks MadCatEntityChecks MadCat
 ```
 
-[场景检查](tests/SceneChecks.cpp) 覆盖局部 TRS、父先子后更新、非均匀缩放产生的剪切、挂接与环拒绝、叶节点／子树删除、句柄复用、无效输入、溢出恢复、系统查询边界、2048 层深度及 512 步层级参考模型。尚未接入 Sandbox、相机、glTF、RenderScene 或场景版本；不提供保持世界位置的重新挂接、dirty 增量更新或自动命令队列。
+[场景检查](tests/SceneChecks.cpp) 覆盖局部 TRS、父先子后更新、非均匀缩放产生的剪切、挂接与环拒绝、叶节点／子树删除、句柄复用、无效输入、溢出恢复、系统查询边界、2048 层深度及 512 步层级参考模型。相机已提供 CPU 接口，见下节；场景尚未接入 Sandbox、glTF、RenderScene 或场景版本，不提供保持世界位置的重新挂接、dirty 增量更新或自动命令队列。
+
+## 相机与视图投影
+
+`MadCatScene` 同时提供 [PerspectiveCamera 与矩阵提取](src/Scene/Camera.h)。将组件添加到 Entity，相机位置与朝向由 Scene 世界变换决定，局部 −Z 为前方、+Y 为上方。默认垂直视野角为 60°（字段使用弧度），近远裁剪面为 0.1／1000；宽高比由调用方根据输出像素尺寸提供，尺寸变化后重新计算，零尺寸时暂停提取。
+
+以下完整 CPU 示例把相机放在 `(0, 0, 5)`，输出世界原点的投影深度 `0.9`：
+
+```cpp
+#include "Scene/Camera.h"
+#include "Scene/Scene.h"
+#include <cstdio>
+
+int main()
+{
+    madcat::scene::Scene scene;
+    const auto entity = scene.create();
+    const madcat::scene::PerspectiveCamera camera{glm::radians(60.0f), 1.0f, 9.0f};
+    if (!scene.add<madcat::scene::PerspectiveCamera>(entity, camera)) { return 1; }
+    madcat::scene::LocalTransform pose;
+    pose.translation = {0, 0, 5};
+    if (!scene.setLocalTransform(entity, pose) || !scene.updateWorldTransforms()) { return 1; }
+    const auto matrices = madcat::scene::buildCameraMatrices(scene, entity, 1280.0f / 720.0f);
+    if (!matrices) { return 1; }
+    const auto clip = matrices->viewProjection * glm::vec4(0, 0, 0, 1);
+    std::printf("%.1f\n", static_cast<double>(clip.z / clip.w)); // 0.9
+    return 0;
+}
+```
+
+- `buildCameraMatrices(const Scene&, Entity, aspectRatio)` 只读、无分配，返回拥有自身矩阵值的 `std::optional<CameraMatrices>`，包括 `view`、`projection` 和 `viewProjection`。不会自动更新 Scene；场景修改后先更新世界矩阵，再重新提取，旧返回值不会跟踪修改。相机参数可通过组件字段编辑，每次提取重新校验，不依赖缓存。
+- `view = inverse(world)`，完整保留父级缩放与剪切的影响，不分解或剥离缩放。普通相机及祖先建议使用单位缩放，避免视野形变；零缩放等不可逆世界变换会失败。
+- 投影使用右手系、有限近远平面、普通深度（近处 0、远处 1）。`projection * view * worldPosition` 得到裁剪空间位置，再除以 w。投影矩阵已翻转 Y，以配合当前 Vulkan 的正高度 viewport；后续视口或 Shader 不应重复翻转。该翻转也影响图元绕序，接入剔除时须验证。
+- 缺少相机、无效／旧句柄、世界矩阵未更新、非有限参数、`FOV` 不在 `(0, pi)`、宽高比不大于 0、裁剪面不满足 `0 < near < far`，以及逆矩阵／组合矩阵溢出或缩窄为 float 后退化，均返回 `nullopt`。内部使用 double 中间结果，输出仍为 float，不保证极端病态变换的精度。
+
+```powershell
+cmake --build build --config Debug --target MadCatCameraChecks
+cmake --build build --config Release --target MadCatCameraChecks
+```
+
+[相机检查](tests/CameraChecks.cpp) 共 10 组，覆盖视锥边缘、深度、宽高比、正高度视口映射、位姿与父子继承、完整逆矩阵、句柄与快照、无效输入及数值边界。相机仍是 CPU 数据，未上传 Shader、未接入 Sandbox，也未提供鼠标／键盘控制、正交投影或 reversed-Z；CPU 验证不能替代 GPU 场景验收。
 
 ## 手动编译 Shader
 
@@ -242,7 +282,7 @@ cmake --build build --config Debug --target MadCatShaders
 cmake --build build --config Debug --target MadCatShaderChecks
 ```
 
-`MadCatShaders` 每次手动调用都会编译两个阶段，Debug／Release 使用同一套参数和产物目录。源码为 [triangle.slang](shaders/triangle.slang)，顶点入口为 `vertexMain`，片元入口为 `fragmentMain`；保留入口名称，直接生成 SPIR-V 1.6，使用 `-O0`，将警告视为错误，再执行 `spirv-val --target-env vulkan1.3`。顶点使用 `SV_VulkanVertexID`，没有顶点缓冲或 Descriptor；实测两个模块只声明 `Shader` capability，颜色接口位于 location 0。[Slang 命令行参考](https://docs.shader-slang.org/en/stable/external/slang/docs/command-line-slangc-reference.html)、[SPIR-V 系统语义](https://docs.shader-slang.org/en/stable/external/slang/docs/user-guide/a2-01-spirv-target-specific.html)
+`MadCatShaders` 每次手动调用都会编译两个阶段，Debug／Release 使用同一套参数和产物目录。源码为 [triangle.slang](shaders/triangle.slang)，顶点入口为 `vertexMain`，片元入口为 `fragmentMain`；保留入口名称，直接生成 SPIR-V 1.6，使用 `-O0`，将警告视为错误，再执行 `spirv-val --target-env vulkan1.3`。当前顶点输入为 location 0 的 float2 位置和 location 1 的 float3 颜色，来自 CPU 上传的顶点缓冲；实测两个模块只声明 `Shader` capability，阶段间颜色接口仍位于 location 0，无 Descriptor。[Slang 命令行参考](https://docs.shader-slang.org/en/stable/external/slang/docs/command-line-slangc-reference.html)
 
 成功产物位于 `build/shaders/triangle/`：
 
@@ -308,9 +348,35 @@ cmake --build build --config Debug --target MadCatShaderModuleChecks
 
 该目标包含 35 项 CPU 与模拟 Vulkan 场景，覆盖路径、字节序、损坏文件、缺失函数、创建失败、重试、重复初始化和部分创建清理；预期失败诊断保存在 `build/verification/shader-module/Debug/`。它不替代真实驱动上的 Validation Layers 和渲染场景验证。
 
+## 缓冲资源与顶点上传
+
+[BufferRef](src/RHI/Buffer.h) 是不可变 GPU 缓冲的强引用；复制共享同一份资源，移动转移引用，空引用的 `sizeBytes()` 为 0。内部共享记录同时拥有 VkBuffer 和专用 VkDeviceMemory，原生访问集中在 [Vulkan 后端](src/RHI/Vulkan/VulkanBuffer.h)。当前仅提供 `createVertexBuffer(device, bytes)`，要求 Device 已初始化、字节非空，创建后不提供修改或映射接口。
+
+以下片段使用已初始化的 `device`，完整设备／管线组装见 [Sandbox](apps/Sandbox/main.cpp)：
+
+```cpp
+const madcat::rhi::TriangleVertex vertices[] = {
+    {{0, -0.6f}, {1, 0, 0}}, {{0.6f, 0.6f}, {0, 1, 0}}, {{-0.6f, 0.6f}, {0, 0, 1}}
+};
+auto buffer = madcat::rhi::createVertexBuffer(device, std::as_bytes(std::span(vertices)));
+if (!buffer) { return EXIT_FAILURE; }
+// The CPU input can now be released. The pipeline receives a BufferRef copy.
+```
+
+上传会按实际 memoryTypeBits 选择兼容的 `HOST_VISIBLE | HOST_COHERENT` 内存，按 Vulkan 返回的内存需求分配，绑定后 map／复制／unmap；失败清理部分资源并返回空引用，CPU 分配失败仍可能抛异常。写入在发布引用、记录和同线程提交之前完成；coherent 内存不需要 flush，提交建立主机写入到设备读取的依赖。[Khronos 主机写入规则](https://docs.vulkan.org/spec/latest/chapters/synchronization.html#synchronization-submission-host-writes)
+
+Sandbox 在首次绘制前上传 60 字节，应用、管线和帧上下文分别保留引用；resize 只重建呈现资源，复用顶点缓冲。帧上下文析构先等待 acquisition／GPU／呈现完成并释放命令，再放开引用；最后一份引用销毁 Buffer 后释放内存。Device 必须覆盖全部引用寿命；引用计数本身不代表 GPU 已完成，直接使用原生命令的后端调用方也必须保活。
+
+```powershell
+cmake --build build --config Debug --target MadCatBufferChecks MadCatTriangleChecks MadCatShaders MadCat
+cmake --build build --config Release --target MadCatBufferChecks MadCatTriangleChecks MadCat
+```
+
+`MadCatBufferChecks` 包含 19 项模拟 Vulkan 检查，覆盖缺失函数、内存类型筛选、创建／分配／绑定／映射失败、清理、重试、源数据复制和引用释放。当前没有 staging／设备本地复制、非 coherent 回退、索引／Storage 缓冲、可变上传区或通用提交回收系统；这是一条供三角形实际验证的最小静态顶点路径。未来 Render Graph 导入仍须声明 Vertex Input／Vertex Attribute Read，不能因引用存在而省略访问声明。
+
 ## 三角形绘制与检查
 
-[`VulkanTrianglePipeline`](src/RHI/Vulkan/VulkanTrianglePipeline.h) 是当前后端验证场景的专用封装：空 Pipeline Layout、Triangle List、一个与 Swapchain 格式匹配的颜色附件、单采样、填充且不剔除、不启用深度或混合。它通过 `VkPipelineRenderingCreateInfo` 接入动态渲染；顶点位置和颜色来自 Shader，不使用顶点缓冲、索引、Descriptor 或 Push Constant。`recordDraw` 绑定管线，设置覆盖当前像素尺寸的正高度 viewport 与 scissor，再记录 `vkCmdDraw(3, 1, 0, 0)`。三角形采用固定裁剪空间坐标，随窗口比例伸缩；尚无相机或场景坐标系统。[动态渲染格式](https://docs.vulkan.org/refpages/latest/refpages/source/VkPipelineRenderingCreateInfo.html)
+[`VulkanTrianglePipeline`](src/RHI/Vulkan/VulkanTrianglePipeline.h) 是当前后端验证场景的专用封装：空 Pipeline Layout、Triangle List、一个与 Swapchain 格式匹配的颜色附件、单采样、填充且不剔除、不启用深度或混合。它通过 `VkPipelineRenderingCreateInfo` 接入动态渲染；顶点位置和颜色来自 CPU 上传的缓冲，无索引、Descriptor 或 Push Constant。`TriangleVertex` 固定为 20 字节，binding 0、逐顶点，位置为 location 0／float2／偏移 0，颜色为 location 1／float3／偏移 8。管线要求同 Device 的 60 字节缓冲并保留引用。`recordDraw` 绑定管线，设置覆盖当前像素尺寸的正高度 viewport 与 scissor，绑定顶点缓冲，再记录 `vkCmdDraw(3, 1, 0, 0)`。三角形仍使用固定裁剪空间坐标，随窗口比例伸缩；尚未接入 CPU 相机或 Scene 世界变换。[动态渲染格式](https://docs.vulkan.org/refpages/latest/refpages/source/VkPipelineRenderingCreateInfo.html)
 
 管线必须活到引用它的 GPU 提交完成；`Presentation` 按 Swapchain、管线、帧渲染器的顺序声明成员，保证反向释放时先等待 GPU／WSI 并释放命令，再释放管线与交换链。管线创建失败会清理已创建的 Layout；该类型不自行等待整个 Device，也不提供通用材质／Pass 接口。[Pipeline 销毁要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroyPipeline.html)
 
@@ -319,7 +385,7 @@ cmake --build build --config Debug --target MadCatTriangleChecks
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug
 ```
 
-`MadCatTriangleChecks` 复用模拟 Vulkan 测试程序，包含 25 项管线创建、失败清理、格式、动态尺寸和 Draw 检查，不依赖 GPU 或 Shader 工具。窗口脚本会启动程序、改变窗口状态、采集截图并正常关闭，要求桌面可见且无其他窗口遮挡；当前参考颜色适用于 SDR 的 R8／B8 sRGB 交换链和仓库原始 `triangle.slang`。它采样六个背景点和四个三角形内部点，按重心坐标与 sRGB 转换检查插值颜色。
+`MadCatTriangleChecks` 复用模拟 Vulkan 测试程序，包含 29 项管线创建、失败清理、格式、顶点布局／绑定、动态尺寸、Draw 和缓冲保活检查，不依赖 GPU 或 Shader 工具。窗口脚本会启动程序、改变窗口状态、采集截图并正常关闭，要求桌面可见且无其他窗口遮挡；当前参考颜色适用于 SDR 的 R8／B8 sRGB 交换链和 Sandbox 的固定三角形数据。它采样六个背景点和四个三角形内部点，按重心坐标与 sRGB 转换检查插值颜色，并检查仅上传一次、重建复用和释放顺序。
 
 脚本支持 `-Configuration Release`、`-BuildDirectory <构建目录>`，以及 `-Scenario modal`（原生缩放循环）、`stress`（连续尺寸变化与快速恢复）、`close-minimized`（最小化关闭）。实际鼠标拖动的人工验收仍需单独进行。日志、模拟检查结果和截图均位于 `<构建目录>/verification/triangle/`。
 
@@ -335,8 +401,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.p
 | [`VulkanDevice`](src/RHI/Vulkan/VulkanDevice.h) | 从候选快照中选择设备，拥有逻辑设备及所选物理设备的数据副本，提供借用的句柄、队列族索引和只读查询数据 |
 | [`VulkanSwapchain`](src/RHI/Vulkan/VulkanSwapchain.h) | 拥有交换链，创建前刷新 Surface 支持，提供实际格式／颜色空间、尺寸和借用的图像句柄 |
 | [`VulkanShaderModule`](src/RHI/Vulkan/VulkanShaderModule.h) | 加载离线验证的 SPIR-V，拥有 Shader Module，借用 Device；不负责管线创建和 Shader 执行 |
-| [`VulkanTrianglePipeline`](src/RHI/Vulkan/VulkanTrianglePipeline.h) | 拥有最小三角形管线与空 Layout，借用 Device，封装绑定、viewport／scissor 与 Draw |
-| [`VulkanClearRenderer`](src/RHI/Vulkan/VulkanClearRenderer.h) | 借用同一 Device 的 Swapchain 和可选三角形管线，拥有图像视图、一个命令池／命令缓冲、两个二进制信号量及 acquire／submit／present Fence，记录清屏和可选 Draw 并提交 |
+| [`BufferRef`](src/RHI/Buffer.h)／[Vulkan 创建入口](src/RHI/Vulkan/VulkanBuffer.h) | 不可变顶点数据的强引用，共享记录拥有 Buffer 与专用内存，创建时上传；Device 和 GPU 完成边界由调用路径保证 |
+| [`VulkanTrianglePipeline`](src/RHI/Vulkan/VulkanTrianglePipeline.h) | 拥有最小三角形管线与空 Layout，保留顶点引用，借用 Device，封装管线／顶点绑定、viewport／scissor 与 Draw |
+| [`VulkanClearRenderer`](src/RHI/Vulkan/VulkanClearRenderer.h) | 借用同一 Device 的 Swapchain 和可选三角形管线，保留固定顶点引用直到 GPU 完成，拥有图像视图、一个命令池／命令缓冲、两个二进制信号量及 acquire／submit／present Fence，记录清屏和可选 Draw 并提交 |
 
 `queryPhysicalDevices(instance, devices)` 不要求先创建 Surface。`querySurfaceSupport(device, surface, support)` 检查两者属于同一个 Instance，然后查询实际窗口支持；`printPhysicalDeviceReport` 仅打印数据，不再查询 Vulkan。两种查询都在成功时整体替换输出，失败时保留原结果；保存的数据不包含指向临时查询结构的 `pNext` 指针。
 
