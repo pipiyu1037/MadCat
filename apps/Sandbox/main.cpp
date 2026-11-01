@@ -3,6 +3,7 @@
 
 #include "RHI/Vulkan/VulkanDevice.h"
 #include "RHI/Vulkan/VulkanBuffer.h"
+#include "RHI/Vulkan/VulkanDepthTexture.h"
 #include "RHI/Vulkan/VulkanClearRenderer.h"
 #include "RHI/Vulkan/VulkanInstance.h"
 #include "RHI/Vulkan/VulkanPhysicalDevice.h"
@@ -10,6 +11,8 @@
 #include "RHI/Vulkan/VulkanSurface.h"
 #include "RHI/Vulkan/VulkanSwapchain.h"
 #include "RHI/Vulkan/VulkanTrianglePipeline.h"
+#include "TriangleScene.h"
+#include "StaticModel.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -46,11 +49,12 @@ bool initializeDevice(const madcat::rhi::VulkanInstance& instance, const madcat:
     return device.initialize(candidates);
 }
 
-// Renderer waits for GPU/WSI work and releases commands before the pipeline
-// and Swapchain it borrows are destroyed (reverse member declaration order).
+// Renderer waits and releases commands before the pipeline, depth texture and
+// Swapchain are released (reverse member declaration order).
 struct Presentation
 {
     madcat::rhi::VulkanSwapchain swapchain;
+    madcat::rhi::TextureRef depth;
     madcat::rhi::VulkanTrianglePipeline triangle;
     madcat::rhi::VulkanClearRenderer renderer;
 };
@@ -59,11 +63,19 @@ class SandboxApplication
 {
 public:
     SandboxApplication(GLFWwindow* window, const madcat::rhi::VulkanDevice& device, const madcat::rhi::VulkanSurface& surface,
-        const madcat::rhi::VulkanShaderModule& vertex, const madcat::rhi::VulkanShaderModule& fragment, madcat::rhi::BufferRef vertices)
-        : window_(window), device_(device), surface_(surface), vertex_(vertex), fragment_(fragment), vertices_(std::move(vertices))
+        const madcat::rhi::VulkanShaderModule& vertex, const madcat::rhi::VulkanShaderModule& fragment,
+        madcat::rhi::BufferRef vertices, madcat::rhi::BufferRef indices)
+        : window_(window), device_(device), surface_(surface), vertex_(vertex), fragment_(fragment),
+          vertices_(std::move(vertices)), indices_(std::move(indices))
     {
         iconified_ = glfwGetWindowAttrib(window_, GLFW_ICONIFIED) == GLFW_TRUE;
         glfwSetWindowUserPointer(window_, this);
+        glfwSetKeyCallback(window_, [](GLFWwindow* target, int key, int, int action, int) {
+            if (action == GLFW_PRESS && key >= GLFW_KEY_1 && key <= GLFW_KEY_7)
+            {
+                static_cast<SandboxApplication*>(glfwGetWindowUserPointer(target))->requestedPose_ = key - GLFW_KEY_1;
+            }
+        });
         glfwSetFramebufferSizeCallback(window_, [](GLFWwindow* target, int, int) {
             static_cast<SandboxApplication*>(glfwGetWindowUserPointer(target))->rebuildPending_ = true;
         });
@@ -83,6 +95,7 @@ public:
     {
         // No callback may retain this owner during destruction/window teardown.
         glfwSetWindowRefreshCallback(window_, nullptr);
+        glfwSetKeyCallback(window_, nullptr);
         glfwSetFramebufferSizeCallback(window_, nullptr);
         glfwSetWindowIconifyCallback(window_, nullptr);
         glfwSetWindowUserPointer(window_, nullptr);
@@ -141,8 +154,9 @@ private:
             presentation_.reset();
             auto candidate = std::make_unique<Presentation>();
             if (!candidate->swapchain.initialize(device_, surface_, {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}) ||
-                !candidate->triangle.initialize(device_, candidate->swapchain.surfaceFormat().format, vertex_, fragment_, vertices_) ||
-                !candidate->renderer.initialize(device_, candidate->swapchain, &candidate->triangle))
+                !(candidate->depth = madcat::rhi::createDepthTexture(device_, candidate->swapchain.extent().width, candidate->swapchain.extent().height)) ||
+                !candidate->triangle.initialize(device_, candidate->swapchain.surfaceFormat().format, vertex_, fragment_, vertices_, indices_, madcat::rhi::detail::TextureAccess::format(candidate->depth)) ||
+                !candidate->renderer.initialize(device_, candidate->swapchain, candidate->depth, &candidate->triangle))
             {
                 std::fprintf(stderr, "MadCat error: presentation creation/rebuild failed; stopping rendering.\n");
                 return false;
@@ -155,7 +169,25 @@ private:
             std::fprintf(stderr, "MadCat: presentation ready; framebuffer %d x %d, Swapchain %u x %u.\n",
                 width, height, extent.width, extent.height);
         }
-        const auto result = presentation_->renderer.draw({0.04f, 0.08f, 0.16f, 1.0f});
+        if (activePose_ != requestedPose_)
+        {
+            if (!triangleScene_.selectPose(static_cast<madcat::sandbox::TrianglePose>(requestedPose_))) { return false; }
+            activePose_ = requestedPose_;
+        }
+        const auto extent = presentation_->swapchain.extent();
+        const auto transform = triangleScene_.drawTransforms(static_cast<float>(extent.width) / static_cast<float>(extent.height));
+        if (!transform)
+        {
+            std::fprintf(stderr, "MadCat error: Scene camera/model matrix extraction failed.\n");
+            return false;
+        }
+        const auto result = presentation_->renderer.draw({0.04f, 0.08f, 0.16f, 1.0f},
+            std::span(transform->transforms.data(), transform->count));
+        if (result == madcat::rhi::ClearFrameResult::Presented && loggedPose_ != activePose_)
+        {
+            std::fprintf(stderr, "MadCat: Scene pose presented; %d (keys 1-7).\n", activePose_ + 1);
+            loggedPose_ = activePose_;
+        }
         if (result == madcat::rhi::ClearFrameResult::Failed) { return false; }
         rebuildPending_ |= result == madcat::rhi::ClearFrameResult::SwapchainUnavailable;
         return true;
@@ -167,6 +199,8 @@ private:
     const madcat::rhi::VulkanShaderModule& vertex_;
     const madcat::rhi::VulkanShaderModule& fragment_;
     madcat::rhi::BufferRef vertices_;
+    madcat::rhi::BufferRef indices_;
+    madcat::sandbox::TriangleScene triangleScene_;
     std::unique_ptr<Presentation> presentation_;
     int framebufferWidth_ = 0;
     int framebufferHeight_ = 0;
@@ -175,11 +209,55 @@ private:
     bool paused_ = false;
     bool rendering_ = false;
     bool failed_ = false;
+    int requestedPose_ = 0;
+    int activePose_ = 0;
+    int loggedPose_ = -1;
 };
 }
 
-int main()
+#ifdef _WIN32
+int wmain(int argc, wchar_t** argv)
+#else
+int main(int argc, char** argv)
+#endif
 {
+    std::optional<madcat::sandbox::StaticModel> model;
+    try
+    {
+        if (argc != 1)
+        {
+            if (argc != 3 || std::filesystem::path(argv[1]) != std::filesystem::path("--gltf"))
+            {
+                std::fprintf(stderr, "Usage: MadCat [--gltf <model.gltf|model.glb>]\n");
+                return EXIT_FAILURE;
+            }
+            const std::filesystem::path path(argv[2]);
+            const auto imported = madcat::assets::importGltfGeometry(path);
+            if (!imported)
+            {
+                const auto filename = imported.error().file.u8string();
+                std::fprintf(stderr, "MadCat: glTF import failed: %s: %s\n",
+                    reinterpret_cast<const char*>(filename.c_str()), imported.error().message.c_str());
+                return EXIT_FAILURE;
+            }
+            auto prepared = madcat::sandbox::prepareStaticModel(*imported);
+            if (!prepared)
+            {
+                std::fprintf(stderr, "MadCat: glTF preview failed: %s\n", prepared.error().c_str());
+                return EXIT_FAILURE;
+            }
+            model = std::move(*prepared);
+            std::fprintf(stderr, "MadCat: glTF preview ready; %zu node instances, %zu primitives, %zu vertices, %zu indices.\n",
+                model->nodeInstances, model->primitives, model->vertices.size(), model->indices.size());
+            std::fprintf(stderr, "MadCat: preview fit; asset center %.9g %.9g %.9g, scale %.9g; diagnostic position colors.\n",
+                model->assetCenter.x, model->assetCenter.y, model->assetCenter.z, model->previewScale);
+        }
+    }
+    catch (const std::exception& error)
+    {
+        std::fprintf(stderr, "MadCat: model preparation failed: %s\n", error.what());
+        return EXIT_FAILURE;
+    }
     glfwSetErrorCallback([](int code, const char* description) {
         std::fprintf(stderr, "GLFW error (%d): %s\n", code, description);
     });
@@ -214,12 +292,20 @@ int main()
                 fragmentShader.initialize(device, shaderDirectory / "fragment.spv"))
             {
                 std::fprintf(stderr, "MadCat: triangle Shader Modules ready (vertexMain / fragmentMain).\n");
-                constexpr madcat::rhi::TriangleVertex geometry[] = {
-                    {{0.0f, -0.6f}, {1, 0, 0}}, {{0.6f, 0.6f}, {0, 1, 0}}, {{-0.6f, 0.6f}, {0, 0, 1}}
+                constexpr madcat::rhi::ColoredVertex geometry[] = {
+                    // Center is shared by three triangles. Its color is the
+                    // barycentric average, preserving the original gradient.
+                    {{0.0f, -0.2f, 0}, {1.0f / 3, 1.0f / 3, 1.0f / 3}},
+                    {{0.6f, -0.6f, 0}, {0, 1, 0}}, {{0.0f, 0.6f, 0}, {1, 0, 0}}, {{-0.6f, -0.6f, 0}, {0, 0, 1}}
                 };
-                auto vertices = madcat::rhi::createVertexBuffer(device, std::as_bytes(std::span(geometry)));
+                constexpr uint32_t triangleIndices[] = {2, 3, 0, 3, 1, 0, 1, 2, 0};
+                const auto vertexData = model ? std::span<const madcat::rhi::ColoredVertex>(model->vertices) : std::span<const madcat::rhi::ColoredVertex>(geometry);
+                const auto indexData = model ? std::span<const uint32_t>(model->indices) : std::span<const uint32_t>(triangleIndices);
+                auto vertices = madcat::rhi::createVertexBuffer(device, std::as_bytes(vertexData));
                 if (!vertices) { throw std::runtime_error("Triangle vertex upload failed"); }
-                SandboxApplication app(window, device, surface, vertexShader, fragmentShader, std::move(vertices));
+                auto indices = madcat::rhi::createIndexBuffer(device, indexData);
+                if (!indices) { throw std::runtime_error("Triangle index upload failed"); }
+                SandboxApplication app(window, device, surface, vertexShader, fragmentShader, std::move(vertices), std::move(indices));
                 exitCode = EXIT_SUCCESS;
                 while (!glfwWindowShouldClose(window) && !app.failed())
                 {

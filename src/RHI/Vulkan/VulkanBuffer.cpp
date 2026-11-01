@@ -4,6 +4,7 @@
 #include "VulkanFunctions.h"
 
 #include <cstring>
+#include <algorithm>
 #include <type_traits>
 #include <utility>
 
@@ -15,6 +16,8 @@ struct detail::BufferState
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     std::size_t size = 0;
+    VkBufferUsageFlags usage = 0;
+    uint32_t maximumIndex = 0;
     PFN_vkDestroyBuffer destroyBuffer = nullptr;
     PFN_vkFreeMemory freeMemory = nullptr;
 
@@ -23,7 +26,7 @@ struct detail::BufferState
         // Callers retain a reference until submitted reads are complete.
         if (buffer) { destroyBuffer(device, buffer, nullptr); }
         if (memory) { freeMemory(device, memory, nullptr); }
-        if (buffer) { std::fprintf(stderr, "Vulkan: Vertex buffer destroyed.\n"); }
+        if (buffer) { std::fprintf(stderr, "Vulkan: %s buffer destroyed.\n", usage == VK_BUFFER_USAGE_INDEX_BUFFER_BIT ? "Index" : "Vertex"); }
     }
 };
 
@@ -37,11 +40,22 @@ VkDevice detail::BufferAccess::device(const BufferRef& buffer) noexcept
     return buffer.state_ ? buffer.state_->device : VK_NULL_HANDLE;
 }
 
-BufferRef createVertexBuffer(const VulkanDevice& device, std::span<const std::byte> data)
+VkBufferUsageFlags detail::BufferAccess::usage(const BufferRef& buffer) noexcept
+{
+    return buffer.state_ ? buffer.state_->usage : 0;
+}
+uint32_t detail::BufferAccess::maximumIndex(const BufferRef& buffer) noexcept
+{
+    return buffer.state_ ? buffer.state_->maximumIndex : 0;
+}
+
+namespace
+{
+std::shared_ptr<detail::BufferState> uploadBuffer(const VulkanDevice& device, std::span<const std::byte> data, VkBufferUsageFlags usage)
 {
     if (!device.handle() || data.empty())
     {
-        std::fprintf(stderr, "Vulkan error: vertex upload requires an initialized Device and nonempty data.\n");
+        std::fprintf(stderr, "Vulkan error: buffer upload requires an initialized Device and nonempty data.\n");
         return {};
     }
     const auto instance = device.physicalDeviceInfo().instance;
@@ -51,6 +65,7 @@ BufferRef createVertexBuffer(const VulkanDevice& device, std::span<const std::by
     auto state = std::make_shared<detail::BufferState>();
     state->device = device.handle();
     state->size = data.size();
+    state->usage = usage;
     PFN_vkCreateBuffer createBuffer = nullptr;
     PFN_vkGetBufferMemoryRequirements getRequirements = nullptr;
     PFN_vkAllocateMemory allocateMemory = nullptr;
@@ -71,7 +86,7 @@ BufferRef createVertexBuffer(const VulkanDevice& device, std::span<const std::by
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = data.size();
-    bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    bufferInfo.usage = usage;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     VkBuffer buffer = VK_NULL_HANDLE;
     if (!detail::checkResult(createBuffer(state->device, &bufferInfo, nullptr, &buffer), "vkCreateBuffer")) { return {}; }
@@ -93,7 +108,7 @@ BufferRef createVertexBuffer(const VulkanDevice& device, std::span<const std::by
     }
     if (memoryType == UINT32_MAX)
     {
-        std::fprintf(stderr, "Vulkan error: vertex buffer has no compatible HOST_VISIBLE | HOST_COHERENT memory type.\n");
+        std::fprintf(stderr, "Vulkan error: buffer has no compatible HOST_VISIBLE | HOST_COHERENT memory type.\n");
         return {};
     }
     VkMemoryDedicatedAllocateInfo dedicated{};
@@ -114,9 +129,37 @@ BufferRef createVertexBuffer(const VulkanDevice& device, std::span<const std::by
     unmapMemory(state->device, memory);
     // Coherent host writes complete before queue submission; the submit performs
     // the host-to-device domain operation. No transfer command/barrier is needed.
+    std::fprintf(stderr, "Vulkan: %s buffer uploaded; %zu bytes, coherent memory type %u.\n",
+        usage == VK_BUFFER_USAGE_INDEX_BUFFER_BIT ? "Index" : "Vertex", data.size(), memoryType);
+    return state;
+}
+}
+
+BufferRef createVertexBuffer(const VulkanDevice& device, std::span<const std::byte> data)
+{
     BufferRef result;
-    result.state_ = std::move(state);
-    std::fprintf(stderr, "Vulkan: Vertex buffer uploaded; %zu bytes, coherent memory type %u.\n", data.size(), memoryType);
+    result.state_ = uploadBuffer(device, data, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    return result;
+}
+
+BufferRef createIndexBuffer(const VulkanDevice& device, std::span<const uint32_t> data)
+{
+    if (data.empty() || data.size() > UINT32_MAX)
+    {
+        std::fprintf(stderr, "Vulkan error: index upload requires a nonempty uint32 index count.\n");
+        return {};
+    }
+    const auto maximum = *std::max_element(data.begin(), data.end());
+    // The current Device leaves fullDrawIndexUint32 disabled. Use the guaranteed
+    // 24-bit range and the queried limit, even on hardware advertising more.
+    if (device.handle() && maximum > std::min(device.physicalDeviceInfo().properties.limits.maxDrawIndexedIndexValue, uint32_t{0x00ffffff}))
+    {
+        std::fprintf(stderr, "Vulkan error: index value exceeds the current Device draw-index limit.\n");
+        return {};
+    }
+    BufferRef result;
+    result.state_ = uploadBuffer(device, std::as_bytes(data), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+    if (result.state_) { result.state_->maximumIndex = maximum; }
     return result;
 }
 }

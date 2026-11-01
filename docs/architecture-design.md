@@ -1,6 +1,6 @@
 # MadCat 架构设计
 
-更新日期：2026-10-31。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
+更新日期：2026-11-01。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
 
 ## 文档职责与设计状态
 
@@ -68,7 +68,7 @@
 
 ECS 保存场景事实，例如局部 Transform、模型资源标识和灯光参数。世界矩阵由 Scene 计算，GPU 缓冲、材质表和光追实例表由 RenderScene 派生。ECS 不保存 `VkBuffer`、`VkImage`、Descriptor Set 或 Command Buffer。
 
-2026-10-29 用户确认：引擎中所有场景 Object 均以 Entity 表示，包括模型实例、相机、灯光和仅用于组织层级的对象；对象的能力由添加的组件组合决定。渲染用法以类似 Unity 的组合方式为目标：给 Entity 添加 Transform、Mesh、Material 等所需组件并引用有效资产后，RenderScene 自动提取供 Pass 使用的数据，不要求调用方再维护一份独立的场景渲染对象。Mesh、Material 组件保存资产标识与实例参数，Assets 仍拥有可共享的几何与材质数据，GPU 资源由 RenderScene／RHI 管理；销毁 Entity 清理其组件，GPU 数据按完成条件退役。具体组件类型名与字段随模型接入落实，该运行链路尚未实现。
+2026-10-29 用户确认：引擎中所有场景 Object 均以 Entity 表示，包括模型实例、相机、灯光和仅用于组织层级的对象；对象的能力由添加的组件组合决定。渲染用法以类似 Unity 的组合方式为目标：给 Entity 添加 Transform、Mesh、Material 等所需组件并引用有效资产后，RenderScene 自动提取供 Pass 使用的数据，不要求调用方再维护一份独立的场景渲染对象。Mesh、Material 组件保存资产标识与实例参数，Assets 仍拥有可共享的几何与材质数据，GPU 资源由 RenderScene／RHI 管理；销毁 Entity 清理其组件，GPU 数据按完成条件退役。CPU 模型资产、`ModelNode`／`MeshInstance` 组件与节点实例化已落地，见[模型实例契约](#模型资产与-scene-实例化当前实现)；Material、自动 RenderScene 与共享 GPU 实例绘制尚未实现。
 
 **ECS System 与 Render Pass 是两种职责。** System 查询并更新场景状态；Pass 消费提取后的渲染数据并记录 GPU 工作。一个实体不对应一个 Pass，Render Graph 也不负责调度物理或动画。
 
@@ -105,7 +105,7 @@ CPU 对象释放不等于 GPU 已使用完毕。使用相关工作完成信号�
 
 ### RHI 资源引用与内部存储
 
-2026 年 10 月 27 日用户已确认：RHI 对外提供类型明确的强引用，首版内部使用 `std::shared_ptr` 管理资源记录。以下规定引用语义与保活规则；BufferRef 已在静态顶点路径落地，见下节，其余示例类型和通用提交回收尚未实现，具体 C++ 接口、资源记录字段和回收容器在实现时确定。
+2026 年 10 月 27 日用户已确认：RHI 对外提供类型明确的强引用，首版内部使用 `std::shared_ptr` 管理资源记录。以下规定引用语义与保活规则；BufferRef 已在静态顶点路径落地，TextureRef 已用于深度附件，见后续当前实现章节。其余示例类型和通用提交回收尚未实现，具体 C++ 接口、资源记录字段和回收容器在实现时确定。
 
 | 类型示意 | 含义与使用范围 |
 |---|---|
@@ -146,12 +146,47 @@ Pass 作者使用 `BufferRef` 等 RHI 类型，`std::shared_ptr` 及 Vulkan 对�
 | 写入与同步 | 创建时一次写入，之后不可变；普通同线程主机写入完成后才提交使用它的 Draw，coherent 内存无需 flush，队列提交建立主机到设备的写入依赖；没有 transfer 命令或 queue ownership 变化 |
 | 资源保活 | 应用和三角形管线各持 BufferRef，单在途帧上下文初始化时复制固定顶点引用，保留到析构等待 acquisition／GPU／呈现完成并释放命令后；该固定路径保守地覆盖上下文整个寿命，尚无任意资源的通用提交登记 |
 | 销毁与父对象 | 最后一个引用释放时先销毁 Buffer 再释放内存；Device 覆盖所有引用寿命。引用计数不查询 GPU 状态，使用原生命令的后端调用方仍负责完成判断与保活 |
-| 几何验证路径 | CPU 提供三个 20 字节 TriangleVertex；binding 0，位置 location 0／float2／offset 0，颜色 location 1／float3／offset 8；管线校验同 Device、恰好 60 字节，并在 Draw 前绑定缓冲 |
+| 几何验证路径 | ColoredVertex 固定 24 字节；binding 0，位置 location 0／float3／offset 0，颜色 location 1／float3／offset 12；当前管线校验同 Device、Vertex 用途、完整顶点步长和可表示数量，再配对下节索引缓冲绘制 |
 | 重建与访问声明 | 每次运行上传一次，resize／交换链重建复用；首次使用在完成 coherent 主机写入后的提交中读取。Render Graph 尚未接入，未来导入必须显式声明 Vertex Input／Vertex Attribute Read，不能由引用或反射代替 |
 
-选择直接 coherent 上传，是为了先验证实际可用的缓冲、顶点输入与 GPU 完成后释放路径；没有性能结论。符合 memoryTypeBits 的 coherent 类型缺失时诊断失败，不静默使用非 coherent 内存。staging／设备本地复制、非 coherent 回退、子分配、索引／Storage 缓冲和可变上传区按后续需求扩展。[Khronos 主机写入与提交规则](https://docs.vulkan.org/spec/latest/chapters/synchronization.html#synchronization-submission-host-writes)、[映射与访问同步要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkMapMemory.html)
+选择直接 coherent 上传，是为了先验证实际可用的缓冲、顶点输入与 GPU 完成后释放路径；没有性能结论。符合 memoryTypeBits 的 coherent 类型缺失时诊断失败，不静默使用非 coherent 内存。staging／设备本地复制、非 coherent 回退、子分配、Storage 缓冲和可变上传区按后续需求扩展，索引已在下节接入。[Khronos 主机写入与提交规则](https://docs.vulkan.org/spec/latest/chapters/synchronization.html#synchronization-submission-host-writes)、[映射与访问同步要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkMapMemory.html)
 
-Debug／Release 各 19 项缓冲、29 项管线、35 项 Shader Module 检查及主程序构建通过；新的 Shader 编译／验证与 12 项失败恢复检查通过。实际 Debug／Release resize、Debug 最小化关闭和连续尺寸变化场景的像素及释放检查通过，全部 Debug 场景开启同步验证且无 warning／error。仅验证静态裁剪空间三角形，Scene／相机矩阵、Shader 常量布局、深度测试与 glTF 尚未接入。
+该缓冲增量的 Debug／Release 各 19 项缓冲、29 项管线、35 项 Shader Module 检查及主程序构建通过；Shader 编译／验证与 12 项失败恢复检查通过。实际 Debug／Release resize、Debug 最小化关闭和连续尺寸变化场景的像素及释放检查通过，全部 Debug 场景开启同步验证且无 warning／error。当时仅验证静态裁剪空间三角形，后续 Scene／相机接入见[矩阵绘制契约](#sandbox-矩阵绘制当前实现)，深度接入见下节；glTF 仍待实现。
+
+### 不可变索引缓冲与索引绘制（当前实现）
+
+2026-11-01 在既有 [BufferRef](../src/RHI/Buffer.h) 上接入 [createIndexBuffer](../src/RHI/Vulkan/VulkanBuffer.h)。两个工厂共用私有上传过程，按各自的 VERTEX_BUFFER／INDEX_BUFFER 用途创建；BufferState 记录用途，索引额外保存创建时扫描的最大值，发布后数据及元信息不可变。公开 BufferRef 仍只暴露有效性和字节数，原生用途、句柄和最大值只在 Vulkan 后端访问。
+
+| 机制 | 当前契约 |
+|---|---|
+| 索引输入 | 非空紧密 uint32 span，数量不超过 UINT32_MAX；工厂复制到专用 HOST_VISIBLE／HOST_COHERENT 内存，失败清理部分对象，输入在返回后可释放 |
+| 设备范围 | 当前 Device 不启用 `fullDrawIndexUint32`；索引最大值不得超过 `min(maxDrawIndexedIndexValue, 0x00ffffff)`，在任何上传资源创建前拒绝超限，不因设备支持更大范围而自动启用 feature |
+| 几何配对 | 管线持有同 Device 且正确用途的两个引用；ColoredVertex 数量至少三、步长完整且可由 uint32 表示；索引数量为非零三的倍数，最大索引小于顶点数；失败不创建 Layout／Pipeline |
+| 命令 | `recordDraw` 绑定顶点后，以 offset 0／UINT32 绑定索引，复制矩阵，再录制 `DrawIndexed(indexCount, 1, 0, 0, 0)`；不启用 primitive restart，不支持子范围／vertexOffset／间接绘制 |
+| 保活和同步 | 应用、管线、单在途帧上下文分别持有两个引用；上下文先等待 acquisition／提交／呈现并释放命令，再释放引用；resize 不重新上传，Device 覆盖所有引用寿命 |
+| Render Graph 交接 | 同线程 coherent 写入完成后提交读取；未来图外导入须分别声明 Vertex Attribute Input／Vertex Attribute Read 与 Index Input／Index Read，强引用和元信息不代替实际访问声明 |
+
+该索引增量当时上传四个 20 字节顶点和九个 uint32 索引：中心、绿、红、蓝；`{2,3,0, 3,1,0, 1,2,0}` 共享顶点组成三个小三角形。中心局部位置 `(0,-.2)`、颜色各 1/3，外轮廓与原有渐变保持一致，独立解析投影／深度像素检查继续适用；顺序读顶点无法替代此索引路径。两个模型及七种姿态共享这组数据。后续三维布局将顶点升级为 24 字节，见[模型预览](#gltf-静态预览当前实现)。
+
+Debug／Release 各 40 项缓冲、45 项管线及既有 26 项深度、35 项 Shader Module、5 组场景检查与主程序构建通过。覆盖两种用途的失败清理、设备索引范围、错误用途／步长／顶点边界／三角形数量、索引绑定与 DrawIndexed 参数、不同索引数及双引用释放。实际两种配置的遮挡／反序／resize／恢复，Debug 相机／裁剪、最小化退出和连续尺寸变化通过，Debug 同步验证无 warning／error。Shader 未修改且沿用既有已验证产物。该索引增量当时为固定 float2 位置／float3 颜色布局；后续三维格式与 glTF GPU 预览见下文，Scene 资产组件与 RenderScene 仍待实现；无 uint16 索引、staging、通用 Draw 接口和图状态计划。[Khronos 索引绑定](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdBindIndexBuffer.html)、[DrawIndexed](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdDrawIndexed.html)、[索引范围](https://docs.vulkan.org/spec/latest/chapters/features.html#features-fullDrawIndexUint32)
+
+### 深度纹理与附件（当前实现）
+
+2026-10-31 新增 [TextureRef](../src/RHI/Texture.h) 和 [VulkanDepthTexture](../src/RHI/Vulkan/VulkanDepthTexture.h)。公共引用仅提供有效性与宽高查询，内部 shared_ptr 记录共同拥有图像、深度视图及内存，最后释放时依次销毁视图、图像、内存。复制只保活，不授予并发写入权；Device 必须覆盖所有外部引用寿命。当前只支持附件用途，尚不是通用纹理创建／上传 API。
+
+| 机制 | 当前契约与理由 |
+|---|---|
+| 能力与格式 | 依次查询 D32_SFLOAT、D16_UNORM 的 optimal tiling 深度附件特性，再查询 2D／depth attachment 用途对应的 extent／mip／layer／单采样限制；格式不支持则回退，其他查询错误失败并诊断 |
+| 内存与视图 | 按 memoryTypeBits 选择 DEVICE_LOCAL 类型，专用分配并绑定，创建同格式、单 mip／layer、DEPTH aspect 视图；创建／分配／绑定／视图失败清理部分资源，CPU 分配异常可传播 |
+| 初始状态 | 新图像为 UNDEFINED，创建入口不录制命令。当前帧上下文独占此附件的 GPU 写入；状态由该上下文明确记录，不能将其当作任意外部写入的全局状态追踪 |
+| 逐帧访问 | 首次 NONE／UNDEFINED → Early+Late Fragment Tests／深度读写／DEPTH_STENCIL_ATTACHMENT_OPTIMAL；成功提交后标记已使用，后续在相同布局同步前次深度写入到本次读写 |
+| 渲染与比较 | 动态渲染的深度视图／布局和 PipelineRendering 的深度格式一致；每帧 CLEAR=1、STORE=DONT_CARE，管线开启 depthTest、depthWrite、LESS，stencil 关闭；沿用普通 0～1 投影 |
+| 跨帧与重建 | 一个在途帧和提交等待允许共用一张深度图；Presentation 持有纹理，renderer 复制引用，先等待 GPU／WSI 并释放命令，再释放管线和纹理，随后释放交换链。重建按新交换链实际尺寸创建新深度图；不得直接扩展为多在途帧共享写入 |
+| Render Graph 边界 | 当前在后端验证路径手工声明并执行 barrier，尚无图。未来必须声明深度读写及实际阶段／状态，强引用不能代替图的访问声明 |
+
+`VulkanClearRenderer::draw(color, transforms)` 接收本帧矩阵 span，在同一次渲染中逐个 Draw，所有矩阵值按既有 Push Constant 规则录入命令。示例的两个模型共享顶点数据，使用不同局部变换产生相交平面；按键 6／7 仅交换提交顺序。CPU 场景快照最多两项，不引入通用调度或批处理框架。
+
+Debug／Release 各 26 项深度纹理、36 项管线、19 项缓冲、35 项 Shader Module、5 组解析场景检查及主程序构建通过。真实两种构建的相交遮挡、顺序反转、单／双模型切换、resize／恢复，以及 Debug 旧场景、最小化关闭和连续变化场景通过；重叠区两个样本分别由不同平面位于前方，按最小 NDC 深度验证颜色，全部 Debug 同步验证无 warning／error。实际为 RTX 5060 Ti／D32_SFLOAT，D16 回退仅模拟验证；无 stencil、MSAA、深度采样／查看器、图同步或多帧并行。[Khronos 深度说明](https://docs.vulkan.org/guide/latest/depth.html)、[图像用途与尺寸查询](https://docs.vulkan.org/refpages/latest/refpages/source/vkGetPhysicalDeviceImageFormatProperties.html)
 
 ## Pass 与 Render Graph
 
@@ -563,22 +598,23 @@ Debug／Release 各 12 组[查询检查](../tests/QueryChecks.cpp)通过，覆�
 |---|---|
 | `create()` | 新建单位局部变换的根实体；组件分配失败清理新实体，抛异常；活动查询期间抛 logic_error |
 | `setLocalTransform(entity, local)` | 校验有限平移／缩放／四元数，拒绝零四元数并归一化其余旋转；失败返回 false、保留原值；零／负缩放允许 |
-| `setParent(entity, parent)` | 保留局部 TRS；默认 Entity 表示根；拒绝无效父子、自引用、祖先环和活动查询；同一父节点不重复挂接；先分配新链接再移除旧链接 |
+| `setLocalMatrix(entity, local)`／`localMatrix(entity)` | 保存完整有限仿射矩阵，不分解 TRS；拒绝投影矩阵和无效句柄；读取返回按值拥有的 optional 矩阵，支持 TRS 与矩阵两种表示 |
+| `setParent(entity, parent)` | 保留局部变换及其表示；默认 Entity 表示根；拒绝无效父子、自引用、祖先环和活动查询；同一父节点不重复挂接；先分配新链接再移除旧链接 |
 | `destroy(entity)` | 仅删除叶节点，清理父链接和全部用户组件；有子节点、无效句柄或活动查询返回 false |
 | `destroySubtree(entity)` | 先分配并收集子树，再从叶到根删除；无效句柄或活动查询返回 false，分配失败抛异常且保留场景 |
-| `parent`／`children`／`localTransform` | 只读层级和局部值；无效句柄返回默认 Entity／空 span／nullptr |
+| `parent`／`children`／`localTransform` | 只读层级和局部值；无效句柄返回默认 Entity／空 span／nullptr；矩阵模式下 localTransform 返回 nullptr，TRS setter 可显式替换它 |
 | `updateWorldTransforms()` | 查询外按父先子后全量更新，非递归；分配失败抛异常，非有限矩阵返回 false；完整成功后才开放世界矩阵读取 |
 | `worldTransform`／`worldTransformsCurrent` | 世界结果未更新时不提供矩阵；已更新且实体有效时返回借用矩阵指针 |
 
-数学约定落地为右手系、Y 向上、米、弧度、列向量，`Local = T * R * S`，`World(child) = World(parent) * Local(child)`。LocalTransform 用平移、四元数与缩放表示，GLM 四元数构造顺序为 w／x／y／z；先用 double 归一化有限 float 四元数，覆盖极大或极小分量。世界结果保持完整矩阵，允许父子非均匀缩放与旋转产生剪切，不强制分解。GLM 1.0.1 由现有 FetchContent 锁定提交 `0af55ccecd98d4e5a8d1fad7de25ba429d60e863`，仅 Scene 公开依赖数学库，ECS 保持仅依赖标准库。Scene 公开传播弧度和零到一投影深度定义；相机及正高度视口的 CPU 数学约定见下节，Shader 矩阵布局尚未验证。
+数学约定落地为右手系、Y 向上、米、弧度、列向量，`Local = T * R * S`，`World(child) = World(parent) * Local(child)`。LocalTransform 用平移、四元数与缩放表示，GLM 四元数构造顺序为 w／x／y／z；先用 double 归一化有限 float 四元数，覆盖极大或极小分量。世界结果保持完整矩阵，允许父子非均匀缩放与旋转产生剪切，不强制分解。GLM 1.0.1 由现有 FetchContent 锁定提交 `0af55ccecd98d4e5a8d1fad7de25ba429d60e863`，Scene 与 Assets 公开依赖数学库，ECS 保持仅依赖标准库。Scene 公开传播弧度和零到一投影深度定义；相机及正高度视口约定见下节，固定 Shader 矩阵传输见[矩阵绘制契约](#sandbox-矩阵绘制当前实现)。
 
 任何成功的局部、层级或实体修改都使全部世界结果失效。系统在 Scene 查询中可更新自定义组件字段或经 setter 写局部变换；最外层查询结束后统一更新世界矩阵，再提取渲染数据。查询中拒绝结构性操作和世界更新，保护 const 别名，嵌套／异常退出恢复保护；组件生命周期回调不得重入 Scene。此次尚无通用系统调度、场景版本或路径追踪重置机制。
 
 局部／世界指针和子节点 span 都只供借用，实体创建、删除、重新挂接后重新获取，世界结果每次更新后也重新获取。未更新标记只控制后续 getter，不能撤回已取得的指针；调用方必须在场景修改后停止读取旧世界结果。句柄限所属 Scene，跨 Scene 的同索引／代际误用沿用 ECS 的不检测边界。
 
-实现采用已有建议中的保留局部挂接、拒绝普通父节点删除、显式子树删除和每次全量更新；理由是层级维护本身不需要逆矩阵／TRS 分解，受控写入与可验证行为优先于优化。保持世界位置挂接、dirty 更新、模型节点矩阵导入、渲染提取和场景版本待后续增量。构建命令和用法见 [README](../README.md#scene-层级与-transform)。
+实现采用已有建议中的保留局部挂接、拒绝普通父节点删除、显式子树删除和每次全量更新；理由是层级维护本身不需要逆矩阵／TRS 分解，受控写入与可验证行为优先于优化。2026-11-01 为模型实例化增加局部 TRS／完整矩阵两种互斥表示，避免对已支持的 glTF 仿射矩阵分解而丢失剪切；切换表示使旧局部借用失效。显式矩阵 setter 与 TRS setter 均允许查询内字段更新，`isIterating()` 只读报告查询状态。保持世界位置挂接、dirty 更新、渲染提取和场景版本待后续增量。构建命令和用法见 [README](../README.md#scene-层级与-transform)。
 
-Debug／Release 各 12 组[场景检查](../tests/SceneChecks.cpp)、33 组 ECS 回归与主程序构建通过，包含剪切、2048 层和 512 步层级模型；README 示例两种构建均输出 `12` 并返回 0。尚未运行实际场景渲染或 GPU 验证。
+该 CPU 增量的 Debug／Release 各 12 组[场景检查](../tests/SceneChecks.cpp)、33 组 ECS 回归与主程序构建通过，包含剪切、2048 层和 512 步层级模型；README 示例两种构建均输出 `12` 并返回 0。当时尚未运行实际场景渲染，后续 Sandbox 接入见[矩阵绘制契约](#sandbox-矩阵绘制当前实现)。
 
 ## 相机数据与矩阵（当前实现）
 
@@ -595,7 +631,84 @@ Debug／Release 各 12 组[场景检查](../tests/SceneChecks.cpp)、33 组 ECS 
 | 数值边界 | 求逆、投影系数和组合使用 double 中间结果；窄化前检查 float 范围，并拒绝窄化后退化的矩阵。输出仍为 float，不保证病态矩阵的精度 |
 | 参数和尺寸修改 | 组件字段按 ECS 规则编辑，每次提取重新校验；宽高比由实际输出决定，零尺寸暂停、resize 后重提取；不新增场景版本或缓存失效机制 |
 
-Debug／Release 各 10 组[相机检查](../tests/CameraChecks.cpp)通过，覆盖解析视锥边界、深度、视口映射、位姿继承、缩放／剪切、快照与失效、无效参数和数值边界；原有 45 组 Scene／ECS 检查及主程序构建通过。完整示例和命令见 [README](../README.md#相机与视图投影)。尚未接入 RenderScene／Sandbox、Shader 布局和 GPU 验证，也没有相机控制器、正交投影或自动主相机选择。
+该 CPU 相机增量的 Debug／Release 各 10 组[相机检查](../tests/CameraChecks.cpp)通过，覆盖解析视锥边界、深度、视口映射、位姿继承、缩放／剪切、快照与失效、无效参数和数值边界；原有 45 组 Scene／ECS 检查及主程序构建通过。完整示例和命令见 [README](../README.md#相机与视图投影)。后续 Sandbox 矩阵传输见下节；没有通用 RenderScene、自由相机控制器、正交投影或自动主相机选择。
+
+### Sandbox 矩阵绘制（当前实现）
+
+2026-10-31 将 Scene／相机接入真实三角形绘制。[TriangleScene](../apps/Sandbox/TriangleScene.h) 是 CPU 示例组装器，当前拥有模型父节点／两个模型及相机父子五个 Entity；组件中没有 GPU 对象。它显式选择模型和相机，更新过期世界矩阵后计算 `projection * view * modelWorld`，用 double 中间结果检查 float 范围并逐列写入快照。Scene／Camera 库继续仅依赖 CPU 数学；Sandbox 负责连接 RHI 数据，不将绘图职责加入 ECS。
+
+| 接口／阶段 | 当前契约 |
+|---|---|
+| `TriangleScene::selectPose` | 七种确定姿态：默认、模型父节点变化、相机父节点变化、近裁剪、远裁剪、双模型正序／反序；非法枚举返回 false 且不改场景。按键请求在下一次渲染准备阶段应用 |
+| `drawTransforms(aspectRatio)` | 更新过期世界变换，提取相机与模型矩阵；失败返回空 optional，CPU 分配异常可传播；成功返回拥有一／两项矩阵值和实际数量的快照，不保存 Scene 借用 |
+| `DrawTransform` | RHI 的无 Vulkan／GLM 参数结构；offset 0 的列主序 16 个 float，64 字节、16 字节对齐，编译期检查大小、字段偏移与可复制性 |
+| `recordDraw(..., transform)` | Vertex 阶段 Push Constant 范围为 offset 0／64 字节；每次录制 Draw 前复制全部矩阵，非有限参数在任何 Vulkan 录制函数前拒绝；没有 Descriptor 或可变上传缓冲 |
+| Shader | 显式 `column_major float4x4`、`mul(matrix, localPosition)`；锁定 Slang 的实际产物为 Offset 0／RowMajor／MatrixStride 16、PushConstant 存储类和 VectorTimesMatrix；与所需列主序传输的等效结果由解析投影和像素检查确认 |
+| 参数和资源复用 | 相同管线及顶点缓冲可用于不同姿态；矩阵值随命令录入，CPU 临时快照不延长到 GPU 完成，命令复用仍等待上一帧完成；resize 以实际交换链尺寸重算投影 |
+
+采用单个 64 字节合成矩阵，是为了先验证 C++／Shader 布局、坐标与 GPU 命令参数，不同时引入 Descriptor／上传区复用。矩阵存储方向和数学向量方向分别约定，不能仅凭 SPIR-V 的 RowMajor 名称要求调用方转置。[Slang 矩阵说明](https://docs.shader-slang.org/en/stable/external/slang/docs/user-guide/a1-01-matrix-layout.html)、[Khronos Push Constants](https://docs.vulkan.org/guide/latest/push_constants.html)
+
+该路径的模型是固定平面三角形；模型 Y 旋转让三个顶点产生不同相机深度，因此插值须使用透视校正。默认镜头为 60°、0.1／20；近裁剪姿态改为 4，远裁剪姿态改为 2，各自使整个三角形不可见。深度增量已加入两个相交平面与遮挡验证，见[深度契约](#深度纹理与附件当前实现)；没有通用 Mesh／Material 提取、通用 Pass／Render Graph 或自由移动控制器；glTF 静态预览见后文。用法与命令见 [README](../README.md#scene-与相机绘制)。
+
+Debug／Release 各 4 组解析场景绘制、34 项管线、19 项缓冲、35 项 Shader Module、10 组相机、12 组 Scene 检查与主程序构建通过，无编译警告；Shader 编译／验证及 12 项失败恢复检查通过。实际两种构建的五姿态、重复切换、姿态不重建管线、resize 后投影与独立透视插值像素检查通过；Debug 常规 resize／最小化恢复、最小化关闭及连续变化检查通过，全部 Debug 场景同步验证无 warning／error。验证范围仅覆盖上述固定矩阵布局。
+
+## 模型资产与 Scene 实例化（当前实现）
+
+2026-11-01 新增纯 CPU 桥接库 `MadCatSceneModels`，公开依赖 Scene 与 Assets；Scene 核心库本身不增加模型解析或 Vulkan 依赖。该增量只建立实例数据，应用窗口的静态烘焙预览仍独立，GPU 提取尚未接入。
+
+| 类型／接口 | 当前契约 |
+|---|---|
+| [ModelAssets](../src/Assets/ModelAssets.h) | 拥有不可变 GltfGeometry，按值添加并分配仅限本库的 ModelAssetId；仅追加、不卸载、不替换、不去重；后续添加保持 const 借用地址与 ID 稳定，库销毁后失效，跨库 ID 误用不检测 |
+| [ModelNode／MeshInstance](../src/Scene/Model.h) | 普通 ECS 组件；前者保存模型 ID 和源节点索引，后者保存模型 ID 和 Mesh 索引；不复制顶点、Primitive 或名称，不持有 GPU 对象；消费者需保证资产库仍存活并解析有效引用 |
+| `instantiateModel(scene, models, id, parent)` | 先检查选中场景森林，再非递归创建 Entity；保留局部矩阵及父子顺序，使用 Scene 重新派生世界变换；不依赖导入时世界缓存，不修改资产、不拟合预览大小 |
+| `ModelInstance` | 非拥有的分组根句柄与源节点索引映射；根为单位 TRS、可挂到已有父节点，激活源根挂在分组根下面；未选中节点映射为默认 Entity；用户删除／重挂后映射不自动更新 |
+| 生命周期 | `destroySubtree(root)` 按当前层级删除实例，其他实例及共享资产不受影响；重挂到根外的实体不随原根删除；资产 ID 不拥有资产库 |
+| 失败 | 无效资产／父 Entity、活动查询、空选中场景、重复／循环／多父／不一致链接、越界 Mesh 或非有限／非仿射局部矩阵返回 expected 错误；分配失败沿创建逆序用不分配内存的叶删除回滚后抛出 |
+
+资产库添加入口通常接收已成功导入的数据，不重新校验几何；实例化只校验实际访问的节点与 Mesh 引用，不扫描顶点或索引内容，未选中节点不会成为 Entity。源场景根要求无父节点。导入资产仍可包含未选中数据，选中范围由 sceneRoots 决定。
+
+实例化不自动更新世界矩阵。成功后按 Scene 的阶段约定在查询外更新；失败回滚保证不留下本次节点和悬空父子链接，既有 Entity 与组件值保留，但借用引用可能因池扩容失效，世界缓存可能被标为未更新。世界组合的数值溢出仍由 `updateWorldTransforms()` 报告。
+
+验证覆盖两个真实 Suzanne 的独立根变换／删除和共享 CPU 几何、TransformProbe 的解析坐标／层级／多个 Primitive、外部父节点／多根／顺序、剪切／零缩放、未选中隔离、查询／失效引用拒绝及 2048 层实例化与删除。Debug 8 组行为检查，Release 9 组（包含 30 个分配失败位置、回滚与重试）；新增矩阵契约随 Scene 14 组检查验证，其他 CPU 回归见开发文档。MSVC Debug 的 STL vector 在 noexcept 移动中分配调试代理，因此该模式明确跳过全局分配失败注入，完整注入在 Release 执行。
+
+当前无资产卸载、GPU Mesh 缓存、自动 RenderScene、共享 GPU 几何绘制、材质组件或贴图。下一增量从 Scene 的 MeshInstance 与世界矩阵提取绘制数据，再由 RenderScene／RHI 持有 GPU 引用，不能将 CPU 几何共享描述为 GPU 实例绘制已完成。
+
+## CPU glTF 几何（当前实现）
+
+[MadCatAssets](../src/Assets/Gltf.h) 独立于 ECS、Scene、RHI 和 Vulkan，公开依赖 GLM 与 C++23 标准库。cgltf 1.15 固定到 `360db1a95480fe102ae9c69b27c5d101167ff5ba`，实现仅在私有 C 翻译单元中编译；公开接口不泄漏解析器类型或借用指针。
+
+| 数据／接口 | 所有权与约定 |
+|---|---|
+| `MeshPrimitive` | 拥有 Mesh 局部空间的 `glm::vec3` 位置与 uint32 三角形索引；无索引输入生成顺序索引，不作为 GPU 顶点布局 ABI |
+| `ModelMesh` | 拥有名称与 Primitive 数组，保留多个 Primitive；多个节点通过 Mesh 索引共享几何 |
+| `ModelNode` | 拥有名称、可选父节点／Mesh 索引、子节点索引，以及局部／世界矩阵；不是 Entity，不承担实时 Scene 写入职责 |
+| `GltfGeometry` | 拥有全部 Mesh／节点，保持源文件顺序，包括未被选中场景引用的数据；`sceneRoots` 选择默认场景，其次首场景，无场景则取全部无父节点 |
+| `importGltfGeometry(path)` | 成功返回独立的 CPU 值；文件／格式／转换失败返回 `std::expected` 中的 `GltfError{file, message}`，含失败上下文，不发布部分结果；C++ 分配异常可能传播 |
+
+导入流程为解析与指针修正、范围预检、缓冲加载、cgltf 校验、几何和节点复制。范围预检先于可能扫描原始索引的校验，使用不溢出的减法／除法检查 bufferView 与 accessor 范围、步长及对齐；复制时拒绝越界／restart 索引及非有限位置。解析器与其缓冲由局部 RAII 管理，函数返回前释放；结果不会引用这些内存。自定义文件回调通过 UTF-8 路径转 `std::filesystem::path`，支持 Windows 中文主文件与百分号解码的相对缓冲文件名，回调不允许异常跨越 C 边界。
+
+静态节点采用右手系、Y 向上、米和列向量，无坐标轴翻转。TRS 显式将 glTF xyzw 四元数转为 GLM wxyz，要求有限值与单位四元数，在容差内归一化，局部矩阵为 `T * R * S`；允许零／负缩放。显式 matrix 与 TRS 不能并存，要求有限仿射矩阵；当前不校验其 TRS 可分解性。父先子后的非递归遍历计算 `parentWorld * local`，用 double 中间乘法检查 float 可表示性，保留继承剪切。拒绝环及多父节点，失败后调用方可以修正资产并重新导入。
+
+当前只转换 glTF 2.0／GLB 静态 TRIANGLES 的 FLOAT VEC3 POSITION、可选 u8／u16／u32 索引与节点数据。缓冲支持本地外部 URI、GLB BIN 与 base64；不加载远程 URI。法线、UV、材质、图片、相机、灯光和 extras 被忽略，必需扩展、稀疏 accessor、压缩、蒙皮、动画、形变及 GPU instancing 明确拒绝。此接口是几何转换器，不是完整 glTF 合规验证器，资产库本身不承担 GPU 上传。ModelAssets 与 SceneModels 桥接已提供稳定库内 ID 和逐节点 CPU 实例，见[实例契约](#模型资产与-scene-实例化当前实现)；Sandbox 静态预览见下节。自动 RenderScene 与共享 GPU 几何仍待实现；不能直接把 CPU 数学类型作为上传布局。验证与命令见 [README](../README.md#cpu-gltf-几何导入)。
+
+## glTF 静态预览（当前实现）
+
+2026-11-01 的 [StaticModel](../apps/Sandbox/StaticModel.h) 是 Sandbox 中的 CPU 转换桥接，直接消费 Assets 值数据，独立于 Vulkan 和 Scene；没有将 GPU 对象加入 ECS 或 CPU 资产。它只服务静态预览，尚不是通用 RenderScene 或逐节点 Scene 实例化。
+
+| 阶段 | 当前契约与边界 |
+|---|---|
+| 激活几何 | 只从 `sceneRoots` 非递归遍历可达节点，使用导入器给出的完整世界矩阵，检查索引／重复节点／有限仿射矩阵；无激活几何返回 expected 错误，不退回任意未选中 Mesh |
+| 静态合并 | 每个 Mesh 节点逐 Primitive 变换位置并重编号索引；多个节点共享 Mesh 时当前复制几何，不保留 GPU 实例共享。允许负缩放与剪切，保留三维 Z，没有额外轴翻转 |
+| 预览适配 | 在 double 中变换与计算 AABB，居中后将最大边等比缩放到 1.2 场景单位；零空间范围拒绝，平面允许。该缩放仅影响预览副本，不修改 Assets 的米制位置或节点矩阵 |
+| 顶点与颜色 | [ColoredVertex](../src/RHI/ColoredVertex.h) 是无 GLM／Vulkan 依赖的显式 ABI：位置 float3 offset 0，颜色 float3 offset 12，stride 24，并检查标准布局和可复制性；位置颜色由 AABB 归一化坐标生成到 0.2～0.8，零长度轴取 0.5，不读取文件颜色／材质 |
+| 输出与限制 | 返回独立拥有的顶点／uint32 索引向量、实例／Primitive 计数与预览中心／缩放；错误无部分结果，分配异常可传播。合并顶点上限 0x01000000、索引数可由 uint32 表示，上传另检查实际设备值域 |
+| Shader 与绘制 | 顶点输入升级为 location 0 float3、location 1 float3，Slang 使用 float4(position,1)；固定矩阵、深度、索引绘制和单帧双缓冲保活沿用既有契约；旧 float2 顶点产物须关闭程序后手动重编 |
+
+Sandbox 的 `--gltf <路径>` 在 GLFW／Vulkan 初始化前完成导入和预览转换，支持中文／空格路径；相对路径以当前工作目录为准，失败诊断并返回 1。成功后在初次绘制前上传一次，resize 复用。模型依旧由现有 Scene 模型 Entity 的外层矩阵驱动，按键 1～7 沿用；所有 glTF 节点在这个增量中只是资产内部的静态事实，没有创建平行于 Entity 的可写场景对象。
+
+[原创 TransformProbe](../assets/models/README.md) 提供可复现的层级／共享 Mesh／多 Primitive／未选中场景验证；CPU 和 [GPU 像素参考](../tests/ModelPixelReference.ps1)独立使用解析世界坐标、AABB、投影、透视颜色及最小深度，不能从上传值或应用日志生成预期结果。Debug／Release 8 组转换与相关回归、真实两种配置的 22 点参考帧、中文路径、模型裁剪及窗口生命周期检查通过，Debug 同步验证无 warning／error。Box.glb 仅作为 Release 冒烟与截图验证，不声称材质或完整像素验收；命令和证据见 [README](../README.md#gltf-静态模型预览)。
+
+CPU 资产引用、MeshInstance 组件与 Scene 节点实例化已由[实例契约](#模型资产与-scene-实例化当前实现)实现，尚未替换窗口的静态烘焙路径。下一增量需要 RenderScene 提取与共享 GPU 几何绘制，处理动态变换和 GPU 生命周期。法线、UV、材质、图片、光照、运行期替换和通用 Draw／Pass／Render Graph 仍未实现，F03 尚未完成。
 
 ## 实现参考建议
 

@@ -130,7 +130,29 @@ bool Scene::setLocalTransform(ecs::Entity entity, const LocalTransform& local) n
 const LocalTransform* Scene::localTransform(ecs::Entity entity) const noexcept
 {
     const auto* node = registry_.tryGet<Node>(entity);
-    return node ? &node->local : nullptr;
+    return node ? std::get_if<LocalTransform>(&node->local) : nullptr;
+}
+
+bool Scene::setLocalMatrix(ecs::Entity entity, const glm::mat4& local) noexcept
+{
+    auto* node = registry_.tryGet<Node>(entity);
+    if (!node || !finite(local) || local[0][3] != 0 || local[1][3] != 0 || local[2][3] != 0 || local[3][3] != 1)
+    {
+        return false;
+    }
+    node->local = local;
+    worldsCurrent_ = false;
+    return true;
+}
+
+std::optional<glm::mat4> Scene::localMatrix(ecs::Entity entity) const noexcept
+{
+    const auto* node = registry_.tryGet<Node>(entity);
+    if (!node) { return std::nullopt; }
+    if (const auto* matrix = std::get_if<glm::mat4>(&node->local)) { return *matrix; }
+    const auto& local = std::get<LocalTransform>(node->local);
+    return glm::translate(glm::mat4(1.0f), local.translation) *
+        glm::mat4_cast(local.rotation) * glm::scale(glm::mat4(1.0f), local.scale);
 }
 
 bool Scene::updateWorldTransforms()
@@ -146,8 +168,7 @@ bool Scene::updateWorldTransforms()
     for (size_t index = 0; index < ordered.size(); ++index)
     {
         auto* node = registry_.tryGet<Node>(ordered[index]);
-        const auto local = glm::translate(glm::mat4(1.0f), node->local.translation) *
-            glm::mat4_cast(node->local.rotation) * glm::scale(glm::mat4(1.0f), node->local.scale);
+        const auto local = *localMatrix(ordered[index]);
         const auto* parentNode = registry_.tryGet<Node>(node->parent);
         node->world = parentNode ? parentNode->world * local : local;
         if (!finite(node->world)) { return false; }

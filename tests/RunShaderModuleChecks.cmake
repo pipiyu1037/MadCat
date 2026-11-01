@@ -1,7 +1,7 @@
 # Expected failure diagnostics must not be interpreted as MSBuild errors.
 file(MAKE_DIRECTORY "${OUTPUT_ROOT}")
 set(mode)
-if(CHECK_MODE STREQUAL "triangle" OR CHECK_MODE STREQUAL "buffer")
+if(CHECK_MODE STREQUAL "triangle" OR CHECK_MODE STREQUAL "buffer" OR CHECK_MODE STREQUAL "depth")
     set(mode "${CHECK_MODE}")
 endif()
 execute_process(

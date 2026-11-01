@@ -6,8 +6,10 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <span>
+#include <optional>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace madcat::scene
@@ -27,7 +29,7 @@ class Scene
     // and derived matrices. No mutable Registry escapes this boundary.
     struct Node
     {
-        LocalTransform local;
+        std::variant<LocalTransform, glm::mat4> local;
         ecs::Entity parent;
         std::vector<ecs::Entity> children;
         glm::mat4 world{1.0f};
@@ -43,6 +45,7 @@ public:
     [[nodiscard]] ecs::Entity create();
     [[nodiscard]] bool isAlive(ecs::Entity entity) const noexcept { return registry_.isAlive(entity); }
     [[nodiscard]] size_t size() const noexcept { return registry_.size(); }
+    [[nodiscard]] bool isIterating() const noexcept { return iterationDepth_ != 0; }
 
     // Ordinary deletion refuses parents with children. Subtree deletion is
     // explicit, iterative and children-first. Both refuse active Scene queries.
@@ -51,7 +54,7 @@ public:
     [[nodiscard]] bool destroySubtree(ecs::Entity entity);
 
     // Only Scene changes parent/child membership. Default Entity detaches to root.
-    // Reparenting preserves local TRS, rejects dead parents, self/cycles and each().
+    // Reparenting preserves the local transform, rejects dead parents, self/cycles and each().
     // Allocation failure leaves the old hierarchy intact.
     [[nodiscard]] bool setParent(ecs::Entity entity, ecs::Entity parent);
     [[nodiscard]] ecs::Entity parent(ecs::Entity entity) const noexcept;
@@ -60,7 +63,14 @@ public:
     // Invalid handles, nonfinite fields or zero quaternion return false unchanged.
     // Zero/negative scales are allowed. Field edits are allowed during each().
     [[nodiscard]] bool setLocalTransform(ecs::Entity entity, const LocalTransform& local) noexcept;
+    // Null for matrix-backed nodes; setLocalTransform explicitly replaces that
+    // matrix with TRS. Borrowed pointers expire on local representation changes.
     [[nodiscard]] const LocalTransform* localTransform(ecs::Entity entity) const noexcept;
+    // Preserve imported affine matrices, including shear, without decomposition.
+    // Nonfinite/projective matrices or invalid Entity return false unchanged.
+    // Field edits are allowed during each(); result is an owned local snapshot.
+    [[nodiscard]] bool setLocalMatrix(ecs::Entity entity, const glm::mat4& local) noexcept;
+    [[nodiscard]] std::optional<glm::mat4> localMatrix(ecs::Entity entity) const noexcept;
 
     // Rebuild all world matrices, parents first, without recursion or TRS
     // decomposition. Call outside each(), after all local/hierarchy edits.

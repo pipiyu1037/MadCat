@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <span>
 
@@ -23,6 +24,7 @@ public:
 private:
     friend struct detail::BufferAccess;
     friend BufferRef createVertexBuffer(const VulkanDevice&, std::span<const std::byte>);
+    friend BufferRef createIndexBuffer(const VulkanDevice&, std::span<const uint32_t>);
     std::shared_ptr<detail::BufferState> state_;
 };
 }

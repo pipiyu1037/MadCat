@@ -1,6 +1,6 @@
 # MadCat
 
-使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前可通过 CPU 上传的顶点缓冲绘制彩色三角形，支持单帧同步、resize／最小化恢复时的 Swapchain 与管线重建，以及 Shader 手动编译、SPIR-V 验证和 Vulkan 资源的 RAII 管理。
+使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前可绘制彩色三角形，并通过 `--gltf` 预览静态 glTF／GLB 几何。支持三维顶点／索引、Scene／相机矩阵、深度遮挡、单帧同步、resize／最小化恢复，以及 Shader 手动编译、SPIR-V 验证和 Vulkan 资源的 RAII 管理。材质与贴图尚未接入。
 
 文档：[开发范围、进度与验收](docs/project-development.md) · [架构设计](docs/architecture-design.md)。
 
@@ -19,7 +19,7 @@ cmake --build build --config Debug --target MadCatShaders
 .\build\Debug\MadCat.exe
 ```
 
-首次配置通过 CMake FetchContent 获取固定提交的 GLFW 3.4 和 GLM 1.0.1，需要访问 GitHub；依赖源码和构建产物位于 `build` 下。GLM 用于纯 CPU 场景变换，锁定提交 `0af55ccecd98d4e5a8d1fad7de25ba429d60e863`，不启用其测试或编译库。
+首次配置通过 CMake FetchContent 获取固定提交的 GLFW 3.4、GLM 1.0.1 和 cgltf 1.15，需要访问 GitHub；依赖源码和构建产物位于 `build` 下。GLM 用于 CPU 场景与资产变换，锁定提交 `0af55ccecd98d4e5a8d1fad7de25ba429d60e863`，不启用其测试或编译库。cgltf 使用 MIT 许可，锁定提交 `360db1a95480fe102ae9c69b27c5d101167ff5ba`，仅作为资产模块内部的解析依赖。
 
 程序创建一个 1280 × 720、标题为 MadCat 的可调整大小窗口，输出设备和 Surface 能力报告，选择设备、创建一个 Graphics／Compute／Present 队列，加载两个 Shader Module，再创建 Swapchain 和三角形管线。画面为深蓝背景上的插值彩色三角形：上方红色、左下蓝色、右下绿色。背景线性 RGBA 为 `(0.04, 0.08, 0.16, 1.0)`，本机 sRGB 格式下背景像素约为 RGB `(56, 80, 111)`。Debug 启用验证层，Release 不主动启用验证层。关闭前先等待 acquisition、GPU 提交和呈现资源退役，再释放帧渲染器、管线、Swapchain、两个 Shader Module、Device、Surface、Instance 和窗口；初始化或帧执行失败返回非零状态。
 
@@ -46,7 +46,7 @@ Vulkan: Swapchain created; <宽> x <高>, format <格式>, color space <颜色�
 Vulkan: Swapchain usage <标志>, transform <标志>, composite alpha <标志>; exclusive sharing.
 Vulkan: Triangle pipeline created; vertexMain / fragmentMain, color format <格式>, dynamic viewport/scissor.
 Vulkan: Clear renderer ready; one frame in flight, dynamic rendering, acquire/submit/present fences.
-Vulkan: triangle Draw enabled (3 vertices, 1 instance).
+Vulkan: triangle DrawIndexed enabled (9 uint32 indices, 1 instance).
 MadCat: presentation ready; framebuffer <宽> x <高>, Swapchain <宽> x <高>.
 Vulkan: Clear frame presented (1); linear RGBA 0.040 0.080 0.160 1.000.
 ```
@@ -79,7 +79,7 @@ Swapchain 优先选择 `B8G8R8A8_SRGB`／`SRGB_NONLINEAR`，否则选第一个�
 
 ## Entity 生命周期检查
 
-自研 ECS 已有独立的纯 CPU 库 `MadCatECS`，提供 [Entity](src/ECS/Entity.h) 值句柄与 [Registry](src/ECS/Registry.h) 的创建、销毁、存活检查、按类型保存的组件及[组合查询](#ecs-组合查询与遍历后修改)。[Scene](#scene-层级与-transform) 在其上管理场景层级与变换，渲染窗口接入仍未实现。
+自研 ECS 已有独立的纯 CPU 库 `MadCatECS`，提供 [Entity](src/ECS/Entity.h) 值句柄与 [Registry](src/ECS/Registry.h) 的创建、销毁、存活检查、按类型保存的组件及[组合查询](#ecs-组合查询与遍历后修改)。[Scene](#scene-层级与-transform) 在其上管理场景层级与变换，已接入专用三角形绘制，通用场景提取仍待实现。
 
 ```cpp
 #include "ECS/Registry.h"
@@ -188,7 +188,7 @@ cmake --build build --config Release --target MadCatQueryChecks MadCatComponentC
 
 ## Scene 层级与 Transform
 
-纯 CPU 库 `MadCatScene` 提供 [Scene](src/Scene/Scene.h)，独占一个 Registry。每个场景对象仍是 Entity，创建时具有单位局部变换和根节点关系。Scene 内部组件保存局部 TRS、父子关系及派生世界矩阵；通过受控接口写入，以保证父节点有效、无环及删除行为一致。Scene 不暴露可写 Registry。
+纯 CPU 库 `MadCatScene` 提供 [Scene](src/Scene/Scene.h)，独占一个 Registry。每个场景对象仍是 Entity，创建时具有单位局部变换和根节点关系。Scene 内部组件保存局部 TRS 或显式矩阵、父子关系及派生世界矩阵；通过受控接口写入，以保证父节点有效、无环及删除行为一致。Scene 不暴露可写 Registry。
 
 下面是一个可链接 `MadCatScene` 的完整 CPU 示例，子节点继承父节点的平移：
 
@@ -214,11 +214,13 @@ int main()
 }
 ```
 
-数学约定采用右手系、Y 向上、米、弧度和列向量，局部矩阵为 `T * R * S`，子世界矩阵为 `parentWorld * local`。四元数构造参数是 `(w, x, y, z)`，写入时归一化；glTF 的数组顺序需在未来导入器中显式转换。世界矩阵保留剪切，不重新分解为 TRS。当前定义 `GLM_FORCE_DEPTH_ZERO_TO_ONE`；相机投影与正高度视口的 CPU 约定见下节，Shader 上传布局尚未验证。
+数学约定采用右手系、Y 向上、米、弧度和列向量，局部矩阵为 `T * R * S`，子世界矩阵为 `parentWorld * local`。四元数构造参数是 `(w, x, y, z)`，写入时归一化；[glTF 导入器](#cpu-gltf-几何导入)已显式转换其 `(x, y, z, w)` 数组顺序。世界矩阵保留剪切，不重新分解为 TRS。当前定义 `GLM_FORCE_DEPTH_ZERO_TO_ONE`；相机投影与正高度视口约定见下节，固定矩阵上传布局与 Sandbox 用法见[场景绘制](#scene-与相机绘制)。
 
 `setParent(child, parent)` 保留局部变换，`setParent(child, {})` 解除父节点。无效／旧句柄、自引用和循环返回 false，重复设置同一父节点不重复添加子节点。`destroy()` 仅删除无子节点的实体；`destroySubtree()` 显式删除整个子树，先准备工作列表再按子先父后清理。创建、挂接和更新可能分配内存并抛异常，失败前保留仍有效的成员关系。
 
 `setLocalTransform()` 拒绝非有限值和零四元数，保留原局部变换；允许零或负缩放。成功修改局部变换、层级或实体后，全部世界矩阵标为未更新；`worldTransform()` 返回 nullptr，直到查询外调用 `updateWorldTransforms()` 完整成功。矩阵组合溢出返回 false，不暴露部分更新结果；修正局部变换后可重试。
+
+`setLocalMatrix()` 保存有限仿射矩阵，不进行 TRS 分解，可保留导入节点的剪切、反射和零缩放。矩阵模式下 `localTransform()` 返回 nullptr；调用 `setLocalTransform()` 显式切回 TRS。`localMatrix()` 对两种模式均返回按值拥有的局部矩阵快照，无效实体返回空 optional。切换表示后重新获取局部借用；`setParent()` 保留当前表示，两个局部 setter 都允许在组件查询中调用。
 
 `add<T>`／`tryGet<T>`／`remove<T>` 和可变／const `each<T...>` 用于自定义数据组件，沿用 ECS 契约；`LocalTransform` 通过专用接口管理。查询中允许修改自定义组件字段及调用 `setLocalTransform()`，拒绝创建、删除、挂接和世界矩阵更新；const 别名和嵌套查询同样受保护。系统可先查询并写局部变换，查询结束后更新世界矩阵，再提取渲染数据。组件构造、移动和析构不得重入所属 Scene；查询回调不得销毁所属 Scene。
 
@@ -229,7 +231,7 @@ cmake --build build --config Debug --target MadCatSceneChecks MadCatQueryChecks 
 cmake --build build --config Release --target MadCatSceneChecks MadCatQueryChecks MadCatComponentChecks MadCatEntityChecks MadCat
 ```
 
-[场景检查](tests/SceneChecks.cpp) 覆盖局部 TRS、父先子后更新、非均匀缩放产生的剪切、挂接与环拒绝、叶节点／子树删除、句柄复用、无效输入、溢出恢复、系统查询边界、2048 层深度及 512 步层级参考模型。相机已提供 CPU 接口，见下节；场景尚未接入 Sandbox、glTF、RenderScene 或场景版本，不提供保持世界位置的重新挂接、dirty 增量更新或自动命令队列。
+[场景检查](tests/SceneChecks.cpp) 覆盖局部 TRS、显式矩阵与表示切换、父先子后更新、剪切、挂接与环拒绝、叶节点／子树删除、句柄复用、无效输入、溢出恢复、系统查询边界、2048 层深度及 512 步层级参考模型。Scene／相机已接入 Sandbox 的专用三角形场景；glTF 的 CPU 实例化见[模型资产与 Scene 实例化](#模型资产与-scene-实例化)，通用 RenderScene 和场景版本待实现，不提供保持世界位置的重新挂接、dirty 增量更新或自动命令队列。
 
 ## 相机与视图投影
 
@@ -269,7 +271,152 @@ cmake --build build --config Debug --target MadCatCameraChecks
 cmake --build build --config Release --target MadCatCameraChecks
 ```
 
-[相机检查](tests/CameraChecks.cpp) 共 10 组，覆盖视锥边缘、深度、宽高比、正高度视口映射、位姿与父子继承、完整逆矩阵、句柄与快照、无效输入及数值边界。相机仍是 CPU 数据，未上传 Shader、未接入 Sandbox，也未提供鼠标／键盘控制、正交投影或 reversed-Z；CPU 验证不能替代 GPU 场景验收。
+[相机检查](tests/CameraChecks.cpp) 共 10 组，覆盖视锥边缘、深度、宽高比、正高度视口映射、位姿与父子继承、完整逆矩阵、句柄与快照、无效输入及数值边界。相机组件继续仅保存 CPU 场景事实；Sandbox 从它派生绘制矩阵并传给 Shader，见下节。目前没有自由移动控制器、正交投影或 reversed-Z。
+
+## Scene 与相机绘制
+
+[TriangleScene](apps/Sandbox/TriangleScene.h) 是专用 Sandbox 示例：一个模型父节点、两个模型实体、相机父节点和相机实体都由 Scene 管理，相机组件挂在相机实体上；GPU 顶点仍由应用持有，不进入 ECS。示例显式选择模型和相机，没有实现通用 RenderScene、Mesh／Material 资产提取或场景编辑器。
+
+窗口中的按键用于切换确定的场景姿态：
+
+| 按键 | 画面行为 |
+|---|---|
+| 1 | 默认姿态，恢复模型、相机和裁剪参数 |
+| 2 | 改变模型父节点的平移／旋转，子模型随之变化 |
+| 3 | 改变相机父节点的平移／旋转，观察位置随之变化 |
+| 4 | 近裁剪面改为 4，整个三角形位于近裁剪面之前，仅显示背景 |
+| 5 | 远裁剪面改为 2，整个三角形位于远裁剪面之后，仅显示背景 |
+| 6 | 绘制两个相交三角形，逐像素由深度决定可见颜色 |
+| 7 | 交换两个三角形的绘制顺序，遮挡结果应与 6 相同 |
+
+示例默认相机视野角为 60°、近远裁剪面为 0.1／20。每帧先应用姿态请求并更新过期世界矩阵，再根据实际 Swapchain 宽高比提取相机，计算 `clipFromLocal = projection * view * modelWorld`。模型局部平面 z 为 0，模型的 Y 旋转使各顶点在相机空间具有不同深度。窗口 resize 重新计算投影，不再把裁剪空间三角形按窗口比例拉伸；相机投影负责唯一一次 Y 翻转。
+
+[DrawTransform](src/RHI/DrawTransform.h) 在 offset 0 保存列主序 16 个 float，大小 64、对齐 16；提取逐列逐元素写入，避免依赖 GLM 对象 ABI。管线声明 Vertex 阶段 offset 0／size 64 的 Push Constant，每次录制在 Draw 前复制快照。Shader 使用显式 `column_major` 和 `mul(matrix, position)`；锁定 Slang 的 SPIR-V 为 `RowMajor`／MatrixStride 16 与 `VectorTimesMatrix` 的组合。该组合已通过独立投影与实际像素核对，不能仅凭装饰名称要求主机转置。[Slang 矩阵布局](https://docs.shader-slang.org/en/stable/external/slang/docs/user-guide/a1-01-matrix-layout.html)
+
+姿态变化只更新命令中的参数，复用顶点缓冲和管线。参数按值录入命令，CPU 临时对象不必存活到 GPU 完成；原有单帧等待继续保护命令资源复用。非法宽高比／提取失败会报告错误，非有限矩阵在调用 Vulkan 录制函数前拒绝；没有可变 GPU 上传内存或 Descriptor。[Push Constants 录制方式](https://docs.vulkan.org/guide/latest/push_constants.html)
+
+```powershell
+cmake --build build --config Debug --target MadCatSceneDrawChecks MadCatTriangleChecks MadCatShaders MadCat
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario scene
+```
+
+[CPU 场景绘制检查](tests/TriangleSceneChecks.cpp) 用独立逐点解析变换验证七种姿态、不同宽高比、矩阵打包、近远裁剪、快照、错误恢复和相反绘制顺序。`drawTransforms()` 返回拥有至多两个矩阵值的快照，renderer 在同一次动态渲染中按顺序 Draw；两个模型共享同一顶点缓冲。窗口脚本独立计算投影、透视校正颜色及屏幕空间深度，检查重复切换和姿态改变不重建管线。尚无自由相机控制、通用 Pass／Render Graph；glTF 静态预览见下节。
+
+## 深度附件与遮挡
+
+[TextureRef](src/RHI/Texture.h) 是图像、视图和内存的强引用；当前仅有 [纯深度纹理创建入口](src/RHI/Vulkan/VulkanDepthTexture.h)。它查询实际格式特性以及 2D／optimal tiling／depth attachment 用途的图像尺寸与单采样能力，优先 D32_SFLOAT，回退 D16_UNORM，再按 memoryTypeBits 选择 DEVICE_LOCAL 内存进行专用分配。创建后布局为 UNDEFINED；失败返回空引用并清理部分资源，CPU 分配异常可传播。
+
+每份呈现对象拥有与 Swapchain 实际像素尺寸一致的深度纹理，帧上下文也保留引用。当前只有一个在途帧，因此各交换链图像可以共享这一份深度附件；增加在途帧前须重做分配与同步安排。重建时先等待 GPU／WSI、释放命令与管线，再释放深度视图、图像、内存，随后重建匹配新尺寸的资源；Device 覆盖所有引用的寿命。
+
+每帧深度清除为 1，启用深度写入和 LESS 比较，沿用近处 0／远处 1 的投影。首次使用从 UNDEFINED 转为 DEPTH_STENCIL_ATTACHMENT_OPTIMAL；后续显式同步 Early／Late Fragment Tests 中前次深度写入与本次读写。动态渲染绑定深度视图并声明与管线一致的格式，使用 CLEAR／DONT_CARE；此附件只服务本次遮挡，不保留可供后续查看的深度内容。[Khronos 深度机制](https://docs.vulkan.org/guide/latest/depth.html)
+
+```powershell
+cmake --build build --config Debug --target MadCatDepthChecks MadCatTriangleChecks MadCatSceneDrawChecks MadCat
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario depth
+```
+
+`MadCatDepthChecks` 包含 26 项模拟检查，覆盖 D16 回退、图像能力／内存类型、缺失函数、查询／创建／分配／绑定／视图失败、重试、引用和释放顺序。深度窗口场景在重叠区寻找两个采样点，分别由不同三角形位于前方，按最近 NDC 深度计算颜色，检查顺序反转、逐帧清除、resize 和恢复。实际 Debug／Release 场景通过，本机为 RTX 5060 Ti／D32_SFLOAT；D16 回退尚未在真实驱动场景单独验收。当前无 stencil、MSAA、深度采样／查看器、通用纹理上传或 Render Graph 自动同步。
+
+## CPU glTF 几何导入
+
+`MadCatAssets` 提供 [importGltfGeometry](src/Assets/Gltf.h)，将 glTF 2.0／GLB 复制为独立拥有的 CPU 几何与静态节点数据。单独的[命令行工具](apps/GltfInspect/main.cpp)可以检查资产，无需启动窗口。先按上文配置项目，再执行：
+
+```powershell
+cmake --build build --config Debug --target MadCatGltfChecks MadCatGltfInspect
+cmake --build build --config Release --target MadCatGltfChecks MadCatGltfInspect
+.\build\Debug\MadCatGltfInspect.exe build\verification\gltf\fixtures\index-5123\model.gltf
+.\build\Release\MadCatGltfInspect.exe build\_deps\cgltf-src\fuzz\data\Box.glb
+```
+
+第一条检查目标生成自己的测试资产。两个命令行示例分别输出 3 个顶点／3 个索引，以及 Box 的 24 个顶点／36 个索引／两个节点。工具接受一个文件路径；成功返回 0，文件、格式或导入失败返回 1 并输出路径及诊断。Windows 入口支持中文路径。CPU 目标不链接 Vulkan、GLFW、ECS 或 Scene，但根项目首次配置仍需要上文列出的 SDK。
+
+| 数据 | 当前支持与行为 |
+|---|---|
+| 文件与缓冲 | `.gltf`、GLB BIN、本地相对外部缓冲、base64 data URI；支持交错顶点、中文路径与 URI 百分号解码；不加载远程 URI |
+| 几何 | 静态 TRIANGLES，FLOAT VEC3 POSITION；可选 u8／u16／u32 索引，统一复制成 uint32；无索引时顺序生成；保留多个 Mesh 和 Primitive |
+| 节点 | 名称、父子索引、共享 Mesh 索引、局部及世界矩阵；右手／Y 向上／米／列向量，`world = parent * local`，TRS 为 `T * R * S`，显式转换 glTF 四元数 xyzw 顺序 |
+| 场景 | 导入全部 Mesh／节点并保留原顺序；`sceneRoots` 选默认场景，否则首个场景，没有场景时取所有无父节点 |
+| 错误 | `std::expected<GltfGeometry, GltfError>`，失败不返回部分模型；诊断包含文件与失败上下文；CPU 内存分配失败可能抛异常 |
+
+返回的向量与矩阵在解析器释放、输入文件关闭后仍然有效，不含 cgltf 或 Vulkan 对象。位置保留在 Mesh 局部空间，多节点引用同一 Mesh，不复制实例顶点。TRS 要求有限值与单位四元数，允许零／负缩放；显式矩阵要求有限仿射矩阵，保留完整世界矩阵及继承剪切，不做 TRS 分解或完整 glTF 合规验证。
+
+当前忽略法线、UV、材质、图片、相机、灯光和 extras；明确拒绝必需扩展、稀疏 accessor、压缩、蒙皮、动画、形变目标与 GPU instancing。[15 组 CPU 检查](tests/GltfChecks.cpp)覆盖三种索引、无索引、交错布局、多个 Primitive、GLB／base64、中文路径、数据所有权、共享 Mesh、场景选择、层级变换、损坏输入与不支持项，以及 2048 层非递归更新；Debug／Release 均已通过，另用固定依赖中的 Box.glb 与 TriangleWithoutIndices.gltf 检查成功。接口边界见[资产导入契约](docs/architecture-design.md#cpu-gltf-几何当前实现)。
+
+CPU 导入结果可通过 Sandbox 的静态预览桥接到 GPU，也可通过下节接口创建保留层级的 CPU Scene 实例；资产模块本身继续只负责 CPU 数据。通用 RenderScene、法线／UV、材质与贴图仍待实现。
+
+## 模型资产与 Scene 实例化
+
+纯 CPU 库 `MadCatSceneModels` 连接 [ModelAssets](src/Assets/ModelAssets.h) 与 [Scene 模型实例化](src/Scene/Model.h)。调用方导入一次资产，再创建多个实例；Mesh 几何留在资产库，每个 Entity 只保存 `ModelNode` 源节点标识和可选的 `MeshInstance` 模型 ID／Mesh 索引，不保存 Vulkan 对象。
+
+```cpp
+#include "Scene/Model.h"
+
+madcat::assets::ModelAssets models;
+auto imported = madcat::assets::importGltfGeometry("assets/models/Suzanne/Suzanne.gltf");
+if (!imported) { return 1; }
+const auto id = models.add(std::move(*imported));
+madcat::scene::Scene scene;
+auto first = madcat::scene::instantiateModel(scene, models, id);
+auto second = madcat::scene::instantiateModel(scene, models, id);
+if (!first || !second) { return 1; }
+madcat::scene::LocalTransform placement;
+placement.translation = {2, 0, 0};
+if (!scene.setLocalTransform(first->root, placement) || !scene.updateWorldTransforms()) { return 1; }
+// Two independent Entity hierarchies now reference the same immutable Mesh.
+if (!scene.destroySubtree(first->root)) { return 1; }
+// second remains live; update worlds again before reading it.
+if (!scene.updateWorldTransforms()) { return 1; }
+```
+
+`ModelAssets::add` 按值接收 CPU 资产，左值复制、右值转移；`find(id)` 只返回 const 借用。首版仅追加，不卸载、不替换、不按路径去重；ID 和借用指针在后续添加时保持有效，资产库销毁后失效。ID 只限所属库，跨库误用不检测；资产库应覆盖组件 ID 的解析使用期。添加本身不重复校验全部几何，通常传入已成功导入的结果。
+
+`instantiateModel(scene, models, id, parent = {})` 返回 expected。每个实例增加一个单位变换的分组根 Entity，源场景根挂在它下面；可将分组根挂到已有父 Entity，并通过根的 TRS 独立放置实例。返回的 `nodes` 向量按源节点索引映射，未选中节点为默认 Entity。只实例化选中场景可达节点，保留父子顺序和完整局部矩阵，世界矩阵由 Scene 重新派生，不复制导入时的世界缓存；不会居中、缩放或修改资产。
+
+无效资产／父实体、活动查询、空选中场景、重复节点／环、多父关系、不一致链接、越界 Mesh 或非法局部矩阵返回错误；分配异常在清理本次新建节点后传播。已有实体与层级保留，但世界缓存可能失效，结构变化后的借用应重新获取。成功后也须在查询外调用 `updateWorldTransforms()`。返回值只持有句柄，不自动删除实例；`destroySubtree(root)` 删除当前仍在根下面的节点，重挂到根外的节点遵循普通 Scene 生命周期，映射不会自动更新。
+
+```powershell
+cmake --build build --config Debug --target MadCatModelSceneChecks MadCatSceneChecks
+cmake --build build --config Release --target MadCatModelSceneChecks MadCatSceneChecks
+```
+
+[模型实例检查](tests/ModelSceneChecks.cpp) 使用原样下载的 Suzanne 验证两个实例独立变换、删除隔离及几何共享，用 TransformProbe 验证多 Primitive、父子继承与未选中隔离，并覆盖多根、外部父节点、矩阵剪切／零缩放、查询保护、错误恢复及 2048 层遍历。MSVC Debug 运行 8 组行为检查，Release 另运行完整分配失败检查（共 9 组、30 个分配失败位置）；Debug 的 STL `vector` 移动会分配调试代理，故不在该模式注入全局分配失败。既有 Scene／Camera／场景矩阵绘制／glTF 导入和静态转换检查一并回归。
+
+本增量仅接通 CPU 模型实例，窗口 `--gltf` 仍使用下节的静态烘焙路径。自动 RenderScene 提取、共享 GPU 几何绘制、法线／UV 和材质贴图继续分步接入。
+
+## glTF 静态模型预览
+
+从项目根目录构建 C++，**关闭旧程序并重新编译 Shader**：本次位置输入由 float2 改为 float3，不能配用旧顶点 SPIR-V。然后运行仓库内的原创验证模型：
+
+```powershell
+cmake --build build --config Debug --target MadCat MadCatShaders MadCatStaticModelChecks
+.\build\Debug\MadCat.exe --gltf assets\models\TransformProbe.gltf
+```
+
+`--gltf <路径>` 支持中文、空格路径及 CPU 导入器的静态子集，路径相对于当前工作目录；Shader 仍使用配置记录的构建目录绝对路径。无参数继续显示原三角形，按键 1～7 仍控制模型／相机父节点、近远裁剪及双模型顺序。参数错误、导入失败、空选中场景或转换失败返回 1 并输出诊断，在创建窗口和 Vulkan 资源前终止；当前只支持启动时加载。
+
+[StaticModel](apps/Sandbox/StaticModel.h) 是 Sandbox 的 CPU 预览桥接：只遍历选中场景根可达的节点，烘焙节点世界矩阵，合并多个 Mesh／Primitive 并重新编号索引。多个节点引用同一 Mesh 时复制几何；原始 CPU 资产保持共享与文件坐标不变。桥接在 double 中计算 AABB，再居中并将最大边等比缩放到 1.2 场景单位，使不同大小的模型进入现有相机范围。显示颜色由三轴包围盒坐标生成，零长度轴用中值；不是文件材质、顶点色或光照。
+
+上传使用 [ColoredVertex](src/RHI/ColoredVertex.h) 的显式布局：24 字节，位置 float3／offset 0，颜色 float3／offset 12；uint32 索引保持独立。CPU 数学对象不直接作为 GPU ABI。合并顶点最多 `0x01000000` 个，索引数量须可由 uint32 表示，实际上传仍受设备限制。应用、管线和帧上下文沿用双缓冲保活，resize 复用上传数据，退出先等待 GPU／WSI 完成。
+
+[TransformProbe](assets/models/README.md) 验证父子变换、Y 旋转、非均匀缩放、共享 Mesh、多个 Primitive 与未选中场景隔离，预览统计应为两个节点实例、四个 Primitive、12 顶点／12 索引。两种构建的 8 组 [CPU 转换检查](tests/StaticModelChecks.cpp)已通过；真实 Debug／Release 每帧 22 个独立解析像素检查通过。另已检查中文路径、模型近远裁剪、原三角形遮挡回归及模型连续重建／最小化退出，Debug 同步验证无 warning／error。固定依赖中的 Box.glb 在 Release 成功显示 24 顶点／36 索引；该外部样本是冒烟与截图验证，没有完整材质或逐像素参考。
+
+```powershell
+cmake --build build --config Release --target MadCat MadCatStaticModelChecks
+.\build\Release\MadCat.exe --gltf build\_deps\cgltf-src\fuzz\data\Box.glb
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario model
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Release -Scenario model
+```
+
+窗口脚本的 `-ModelPath <路径>` 可以覆盖模型，并与 `scene`、`depth`、`stress`、`close-minimized` 场景组合。TransformProbe 及其原样副本使用独立几何／深度／颜色参考；其他资产只做可见性冒烟检查，输出明确区分。
+
+仓库还收录了 Khronos 官方示例库的经典 [Suzanne 模型](assets/models/Suzanne/README.md)（CC0），原样保留 glTF、外部缓冲和贴图，无格式转换。Debug／Release 均已通过 11808 顶点／11808 索引的导入及窗口冒烟检查，覆盖模型／相机变换、resize、最小化恢复与退出，Debug 同步验证无 warning／error。当前显示位置诊断色，材质与贴图尚未参与渲染。
+
+```powershell
+.\build\Debug\MadCat.exe --gltf assets\models\Suzanne\Suzanne.gltf
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario model -ModelPath assets/models/Suzanne/Suzanne.gltf
+```
+
+当前窗口把选中节点烘焙成静态预览几何，由已有模型 Entity 的矩阵驱动，尚未使用上节已实现的逐节点 CPU 实例与 MeshInstance 组件。下一步将这些实例接入 RenderScene 绘制提取和共享 GPU 几何，再推进法线／UV、材质与贴图；模型与贴图阶段仍未完整完成。
 
 ## 手动编译 Shader
 
@@ -282,7 +429,7 @@ cmake --build build --config Debug --target MadCatShaders
 cmake --build build --config Debug --target MadCatShaderChecks
 ```
 
-`MadCatShaders` 每次手动调用都会编译两个阶段，Debug／Release 使用同一套参数和产物目录。源码为 [triangle.slang](shaders/triangle.slang)，顶点入口为 `vertexMain`，片元入口为 `fragmentMain`；保留入口名称，直接生成 SPIR-V 1.6，使用 `-O0`，将警告视为错误，再执行 `spirv-val --target-env vulkan1.3`。当前顶点输入为 location 0 的 float2 位置和 location 1 的 float3 颜色，来自 CPU 上传的顶点缓冲；实测两个模块只声明 `Shader` capability，阶段间颜色接口仍位于 location 0，无 Descriptor。[Slang 命令行参考](https://docs.shader-slang.org/en/stable/external/slang/docs/command-line-slangc-reference.html)
+`MadCatShaders` 每次手动调用都会编译两个阶段，Debug／Release 使用同一套参数和产物目录。源码为 [triangle.slang](shaders/triangle.slang)，顶点入口为 `vertexMain`，片元入口为 `fragmentMain`；保留入口名称，直接生成 SPIR-V 1.6，使用 `-O0`，将警告视为错误，再执行 `spirv-val --target-env vulkan1.3`。当前顶点输入为 location 0 的 float3 位置和 location 1 的 float3 颜色，来自 CPU 上传的顶点缓冲；实测两个模块只声明 `Shader` capability，阶段间颜色接口仍位于 location 0，无 Descriptor。[Slang 命令行参考](https://docs.shader-slang.org/en/stable/external/slang/docs/command-line-slangc-reference.html)
 
 成功产物位于 `build/shaders/triangle/`：
 
@@ -350,33 +497,39 @@ cmake --build build --config Debug --target MadCatShaderModuleChecks
 
 ## 缓冲资源与顶点上传
 
-[BufferRef](src/RHI/Buffer.h) 是不可变 GPU 缓冲的强引用；复制共享同一份资源，移动转移引用，空引用的 `sizeBytes()` 为 0。内部共享记录同时拥有 VkBuffer 和专用 VkDeviceMemory，原生访问集中在 [Vulkan 后端](src/RHI/Vulkan/VulkanBuffer.h)。当前仅提供 `createVertexBuffer(device, bytes)`，要求 Device 已初始化、字节非空，创建后不提供修改或映射接口。
+[BufferRef](src/RHI/Buffer.h) 是不可变 GPU 缓冲的强引用；复制共享同一份资源，移动转移引用，空引用的 `sizeBytes()` 为 0。内部共享记录同时拥有 VkBuffer 和专用 VkDeviceMemory，原生访问集中在 [Vulkan 后端](src/RHI/Vulkan/VulkanBuffer.h)。`createVertexBuffer(device, bytes)` 接收非空字节；`createIndexBuffer(device, uint32Span)` 接收非空且数量可由 uint32 表示的索引。两者要求已初始化的 Device，创建后不提供修改或映射接口。
 
 以下片段使用已初始化的 `device`，完整设备／管线组装见 [Sandbox](apps/Sandbox/main.cpp)：
 
 ```cpp
-const madcat::rhi::TriangleVertex vertices[] = {
-    {{0, -0.6f}, {1, 0, 0}}, {{0.6f, 0.6f}, {0, 1, 0}}, {{-0.6f, 0.6f}, {0, 0, 1}}
+const madcat::rhi::ColoredVertex vertices[] = {
+    {{0, -0.6f, 0}, {1, 0, 0}}, {{0.6f, 0.6f, 0}, {0, 1, 0}}, {{-0.6f, 0.6f, 0}, {0, 0, 1}}
 };
 auto buffer = madcat::rhi::createVertexBuffer(device, std::as_bytes(std::span(vertices)));
-if (!buffer) { return EXIT_FAILURE; }
-// The CPU input can now be released. The pipeline receives a BufferRef copy.
+const uint32_t order[] = {2, 0, 1};
+auto indices = madcat::rhi::createIndexBuffer(device, order);
+if (!buffer || !indices) { return EXIT_FAILURE; }
+// CPU inputs can now be released. Pass both BufferRef values to the pipeline.
 ```
 
 上传会按实际 memoryTypeBits 选择兼容的 `HOST_VISIBLE | HOST_COHERENT` 内存，按 Vulkan 返回的内存需求分配，绑定后 map／复制／unmap；失败清理部分资源并返回空引用，CPU 分配失败仍可能抛异常。写入在发布引用、记录和同线程提交之前完成；coherent 内存不需要 flush，提交建立主机写入到设备读取的依赖。[Khronos 主机写入规则](https://docs.vulkan.org/spec/latest/chapters/synchronization.html#synchronization-submission-host-writes)
 
-Sandbox 在首次绘制前上传 60 字节，应用、管线和帧上下文分别保留引用；resize 只重建呈现资源，复用顶点缓冲。帧上下文析构先等待 acquisition／GPU／呈现完成并释放命令，再放开引用；最后一份引用销毁 Buffer 后释放内存。Device 必须覆盖全部引用寿命；引用计数本身不代表 GPU 已完成，直接使用原生命令的后端调用方也必须保活。
+索引上传还记录不可变的最大索引值，区分 Vertex／Index 用途。当前 Device 未启用 `fullDrawIndexUint32`，因此上传拒绝超过设备 `maxDrawIndexedIndexValue` 与 `0x00ffffff` 较小值的索引，不假定物理设备支持就已启用完整范围。[Khronos 索引范围](https://docs.vulkan.org/spec/latest/chapters/features.html#features-fullDrawIndexUint32)
+
+无参数 Sandbox 首次绘制前上传四个三维顶点共 96 字节和九个 uint32 索引共 36 字节。顶点顺序为中心、绿、红、蓝，索引为 `{2,3,0, 3,1,0, 1,2,0}`，三个小三角形共享中心与边界顶点；中心颜色为 RGB 各 1/3，使外轮廓及原有渐变不变。应用、管线和帧上下文分别保留两份引用；resize 只重建呈现资源，复用两个缓冲。帧上下文析构先等待 acquisition／GPU／呈现完成并释放命令，再放开引用；最后一份引用销毁 Buffer 后释放内存。Device 必须覆盖全部引用寿命，引用计数本身不代表 GPU 已完成。
 
 ```powershell
 cmake --build build --config Debug --target MadCatBufferChecks MadCatTriangleChecks MadCatShaders MadCat
 cmake --build build --config Release --target MadCatBufferChecks MadCatTriangleChecks MadCat
 ```
 
-`MadCatBufferChecks` 包含 19 项模拟 Vulkan 检查，覆盖缺失函数、内存类型筛选、创建／分配／绑定／映射失败、清理、重试、源数据复制和引用释放。当前没有 staging／设备本地复制、非 coherent 回退、索引／Storage 缓冲、可变上传区或通用提交回收系统；这是一条供三角形实际验证的最小静态顶点路径。未来 Render Graph 导入仍须声明 Vertex Input／Vertex Attribute Read，不能因引用存在而省略访问声明。
+`MadCatBufferChecks` 包含 40 项模拟 Vulkan 检查，覆盖两个用途的缺失函数、内存类型筛选、创建／分配／绑定／映射失败、清理、重试、源数据复制、引用释放与索引值上限。当前没有 staging／设备本地复制、非 coherent 回退、uint16 索引、Storage 缓冲、可变上传区或通用提交回收系统。未来 Render Graph 导入分别声明 Vertex Attribute Input／Vertex Attribute Read 与 Index Input／Index Read，不能因引用存在而省略访问声明。
 
 ## 三角形绘制与检查
 
-[`VulkanTrianglePipeline`](src/RHI/Vulkan/VulkanTrianglePipeline.h) 是当前后端验证场景的专用封装：空 Pipeline Layout、Triangle List、一个与 Swapchain 格式匹配的颜色附件、单采样、填充且不剔除、不启用深度或混合。它通过 `VkPipelineRenderingCreateInfo` 接入动态渲染；顶点位置和颜色来自 CPU 上传的缓冲，无索引、Descriptor 或 Push Constant。`TriangleVertex` 固定为 20 字节，binding 0、逐顶点，位置为 location 0／float2／偏移 0，颜色为 location 1／float3／偏移 8。管线要求同 Device 的 60 字节缓冲并保留引用。`recordDraw` 绑定管线，设置覆盖当前像素尺寸的正高度 viewport 与 scissor，绑定顶点缓冲，再记录 `vkCmdDraw(3, 1, 0, 0)`。三角形仍使用固定裁剪空间坐标，随窗口比例伸缩；尚未接入 CPU 相机或 Scene 世界变换。[动态渲染格式](https://docs.vulkan.org/refpages/latest/refpages/source/VkPipelineRenderingCreateInfo.html)
+[`VulkanTrianglePipeline`](src/RHI/Vulkan/VulkanTrianglePipeline.h) 是当前后端验证场景的专用封装：一个 64 字节 Vertex Push Constant 范围、Triangle List、一个与 Swapchain 格式匹配的颜色附件和匹配实际深度纹理的附件格式、单采样、填充且不剔除，启用 LESS 深度测试／写入，不启用混合。它通过 `VkPipelineRenderingCreateInfo` 接入动态渲染，没有 Descriptor。`ColoredVertex` 固定为 24 字节，binding 0、逐顶点，位置为 location 0／float3／偏移 0，颜色为 location 1／float3／偏移 12。
+
+初始化接收同 Device 的 Vertex／Index 两个 BufferRef，拒绝用途混用、不完整顶点步长、少于三个或超出 uint32 数量的顶点、非三角形索引数及越界索引；失败不创建管线对象。`recordDraw` 绑定管线、正高度 viewport／scissor、顶点及 uint32 索引缓冲，录入有限的 DrawTransform，再记录 `vkCmdDrawIndexed(indexCount, 1, 0, 0, 0)`，索引偏移与 vertexOffset 均为零，primitive restart 关闭。矩阵仍由 Scene／相机提取。[动态渲染格式](https://docs.vulkan.org/refpages/latest/refpages/source/VkPipelineRenderingCreateInfo.html)、[索引绑定](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdBindIndexBuffer.html)、[索引绘制](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdDrawIndexed.html)
 
 管线必须活到引用它的 GPU 提交完成；`Presentation` 按 Swapchain、管线、帧渲染器的顺序声明成员，保证反向释放时先等待 GPU／WSI 并释放命令，再释放管线与交换链。管线创建失败会清理已创建的 Layout；该类型不自行等待整个 Device，也不提供通用材质／Pass 接口。[Pipeline 销毁要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroyPipeline.html)
 
@@ -385,9 +538,9 @@ cmake --build build --config Debug --target MadCatTriangleChecks
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug
 ```
 
-`MadCatTriangleChecks` 复用模拟 Vulkan 测试程序，包含 29 项管线创建、失败清理、格式、顶点布局／绑定、动态尺寸、Draw 和缓冲保活检查，不依赖 GPU 或 Shader 工具。窗口脚本会启动程序、改变窗口状态、采集截图并正常关闭，要求桌面可见且无其他窗口遮挡；当前参考颜色适用于 SDR 的 R8／B8 sRGB 交换链和 Sandbox 的固定三角形数据。它采样六个背景点和四个三角形内部点，按重心坐标与 sRGB 转换检查插值颜色，并检查仅上传一次、重建复用和释放顺序。
+`MadCatTriangleChecks` 复用模拟 Vulkan 测试程序，包含 45 项管线创建、失败清理、颜色／深度格式、深度比较与写入、顶点／索引布局与绑定、Push Constant 范围与字节内容、非有限输入、动态尺寸、不同索引数量、错误用途／越界拒绝及双缓冲保活检查，不依赖 GPU 或 Shader 工具。窗口脚本会启动程序、改变窗口状态、采集截图并正常关闭，要求桌面可见且无其他窗口遮挡；参考颜色适用于 SDR 的 R8／B8 sRGB 交换链和 Sandbox 的固定场景。普通场景检查十个像素样本，双模型场景增加两个有不同深度胜者的重叠样本；同时核对顶点／索引各上传一次、每个上下文的九索引绘制、颜色／深度尺寸和释放顺序。Debug／Release 遮挡、Debug 场景／裁剪、最小化关闭和连续尺寸变化已通过；Debug 同步验证无 warning／error。
 
-脚本支持 `-Configuration Release`、`-BuildDirectory <构建目录>`，以及 `-Scenario modal`（原生缩放循环）、`stress`（连续尺寸变化与快速恢复）、`close-minimized`（最小化关闭）。实际鼠标拖动的人工验收仍需单独进行。日志、模拟检查结果和截图均位于 `<构建目录>/verification/triangle/`。
+脚本支持 `-Configuration Release`、`-BuildDirectory <构建目录>`，以及 `-Scenario depth`（相交遮挡／反向绘制／附件重建）、`scene`（场景姿态／裁剪／重复切换）、`modal`（原生缩放循环）、`stress`（连续尺寸变化与快速恢复）、`close-minimized`（最小化关闭）。实际鼠标拖动的人工验收仍需单独进行。日志、模拟检查结果和截图均位于 `<构建目录>/verification/triangle/`。
 
 ## Vulkan 后端封装
 
@@ -402,7 +555,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.p
 | [`VulkanSwapchain`](src/RHI/Vulkan/VulkanSwapchain.h) | 拥有交换链，创建前刷新 Surface 支持，提供实际格式／颜色空间、尺寸和借用的图像句柄 |
 | [`VulkanShaderModule`](src/RHI/Vulkan/VulkanShaderModule.h) | 加载离线验证的 SPIR-V，拥有 Shader Module，借用 Device；不负责管线创建和 Shader 执行 |
 | [`BufferRef`](src/RHI/Buffer.h)／[Vulkan 创建入口](src/RHI/Vulkan/VulkanBuffer.h) | 不可变顶点数据的强引用，共享记录拥有 Buffer 与专用内存，创建时上传；Device 和 GPU 完成边界由调用路径保证 |
-| [`VulkanTrianglePipeline`](src/RHI/Vulkan/VulkanTrianglePipeline.h) | 拥有最小三角形管线与空 Layout，保留顶点引用，借用 Device，封装管线／顶点绑定、viewport／scissor 与 Draw |
+| [`TextureRef`](src/RHI/Texture.h)／[深度创建入口](src/RHI/Vulkan/VulkanDepthTexture.h) | 深度图像、视图与专用内存的强引用，查询能力后创建；帧上下文按 GPU 完成条件保活 |
+| [`VulkanTrianglePipeline`](src/RHI/Vulkan/VulkanTrianglePipeline.h) | 拥有最小三角形管线及矩阵 Push Constant Layout，保留顶点引用，借用 Device，封装管线／顶点绑定、viewport／scissor、矩阵快照与 Draw |
 | [`VulkanClearRenderer`](src/RHI/Vulkan/VulkanClearRenderer.h) | 借用同一 Device 的 Swapchain 和可选三角形管线，保留固定顶点引用直到 GPU 完成，拥有图像视图、一个命令池／命令缓冲、两个二进制信号量及 acquire／submit／present Fence，记录清屏和可选 Draw 并提交 |
 
 `queryPhysicalDevices(instance, devices)` 不要求先创建 Surface。`querySurfaceSupport(device, surface, support)` 检查两者属于同一个 Instance，然后查询实际窗口支持；`printPhysicalDeviceReport` 仅打印数据，不再查询 Vulkan。两种查询都在成功时整体替换输出，失败时保留原结果；保存的数据不包含指向临时查询结构的 `pNext` 指针。

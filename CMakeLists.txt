@@ -24,6 +24,52 @@ FetchContent_Declare(glm
 )
 FetchContent_MakeAvailable(glm)
 
+FetchContent_Declare(cgltf
+    GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
+    GIT_TAG 360db1a95480fe102ae9c69b27c5d101167ff5ba # cgltf 1.15
+)
+FetchContent_MakeAvailable(cgltf)
+
+# CPU-only geometry conversion; parser implementation and types stay private.
+add_library(MadCatGltfParser STATIC src/Assets/Cgltf.c)
+target_compile_features(MadCatGltfParser PRIVATE c_std_11)
+set_target_properties(MadCatGltfParser PROPERTIES C_EXTENSIONS OFF)
+target_include_directories(MadCatGltfParser SYSTEM PRIVATE "${cgltf_SOURCE_DIR}")
+if(MSVC)
+    target_compile_definitions(MadCatGltfParser PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(MadCatGltfParser PRIVATE /W4)
+endif()
+
+add_library(MadCatAssets STATIC src/Assets/Gltf.cpp)
+target_compile_features(MadCatAssets PUBLIC cxx_std_23)
+set_target_properties(MadCatAssets PROPERTIES CXX_EXTENSIONS OFF)
+target_include_directories(MadCatAssets PUBLIC src)
+target_include_directories(MadCatAssets SYSTEM PRIVATE "${cgltf_SOURCE_DIR}")
+target_link_libraries(MadCatAssets PUBLIC glm::glm PRIVATE MadCatGltfParser)
+if(MSVC)
+    target_compile_options(MadCatAssets PRIVATE /W4 /permissive-)
+endif()
+
+add_executable(MadCatGltfInspect EXCLUDE_FROM_ALL apps/GltfInspect/main.cpp)
+target_link_libraries(MadCatGltfInspect PRIVATE MadCatAssets)
+set_target_properties(MadCatGltfInspect PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+    target_compile_options(MadCatGltfInspect PRIVATE /W4 /permissive- /utf-8)
+endif()
+
+add_executable(GltfChecks EXCLUDE_FROM_ALL tests/GltfChecks.cpp)
+target_link_libraries(GltfChecks PRIVATE MadCatAssets)
+set_target_properties(GltfChecks PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+    target_compile_options(GltfChecks PRIVATE /W4 /permissive- /utf-8)
+endif()
+add_custom_target(MadCatGltfChecks
+    COMMAND "$<TARGET_FILE:GltfChecks>" "${CMAKE_CURRENT_BINARY_DIR}/verification/gltf/fixtures"
+    DEPENDS GltfChecks
+    COMMENT "Checking CPU glTF geometry, buffers and node transforms"
+    VERBATIM
+)
+
 # CPU-only ECS; no Vulkan, GLFW or Shader dependencies.
 add_library(MadCatECS STATIC src/ECS/Registry.cpp)
 target_compile_features(MadCatECS PUBLIC cxx_std_23)
@@ -108,9 +154,33 @@ add_custom_target(MadCatCameraChecks
     VERBATIM
 )
 
+# CPU bridge; core Scene does not depend on model parsing or GPU resources.
+add_library(MadCatSceneModels STATIC src/Scene/Model.cpp)
+target_link_libraries(MadCatSceneModels PUBLIC MadCatScene MadCatAssets)
+set_target_properties(MadCatSceneModels PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+    target_compile_options(MadCatSceneModels PRIVATE /W4 /permissive-)
+endif()
+
+add_executable(ModelSceneChecks EXCLUDE_FROM_ALL tests/ModelSceneChecks.cpp)
+target_link_libraries(ModelSceneChecks PRIVATE MadCatSceneModels)
+set_target_properties(ModelSceneChecks PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+    target_compile_options(ModelSceneChecks PRIVATE /W4 /permissive- /utf-8)
+endif()
+add_custom_target(MadCatModelSceneChecks
+    COMMAND "$<TARGET_FILE:ModelSceneChecks>" "${CMAKE_CURRENT_SOURCE_DIR}/assets/models"
+    DEPENDS ModelSceneChecks
+    COMMENT "Checking model asset sharing, Scene node instances and failure cleanup"
+    VERBATIM
+)
+
 add_executable(MadCat
     apps/Sandbox/main.cpp
+    apps/Sandbox/TriangleScene.cpp
+    apps/Sandbox/StaticModel.cpp
     src/RHI/Vulkan/VulkanBuffer.cpp
+    src/RHI/Vulkan/VulkanDepthTexture.cpp
     src/RHI/Vulkan/VulkanClearRenderer.cpp
     src/RHI/Vulkan/VulkanDevice.cpp
     src/RHI/Vulkan/VulkanInstance.cpp
@@ -128,11 +198,39 @@ target_compile_definitions(MadCat PRIVATE
     VK_NO_PROTOTYPES
     MADCAT_SHADER_DIRECTORY="${CMAKE_CURRENT_BINARY_DIR}/shaders/triangle"
 )
-target_link_libraries(MadCat PRIVATE glfw Vulkan::Headers)
+target_link_libraries(MadCat PRIVATE glfw Vulkan::Headers MadCatScene MadCatAssets)
 
 if(MSVC)
-    target_compile_options(MadCat PRIVATE /W4 /permissive-)
+    target_compile_options(MadCat PRIVATE /W4 /permissive- /utf-8)
 endif()
+
+add_executable(StaticModelChecks EXCLUDE_FROM_ALL tests/StaticModelChecks.cpp apps/Sandbox/StaticModel.cpp)
+target_link_libraries(StaticModelChecks PRIVATE MadCatAssets)
+target_include_directories(StaticModelChecks PRIVATE apps/Sandbox)
+set_target_properties(StaticModelChecks PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+    target_compile_options(StaticModelChecks PRIVATE /W4 /permissive- /utf-8)
+endif()
+add_custom_target(MadCatStaticModelChecks
+    COMMAND "$<TARGET_FILE:StaticModelChecks>" "${CMAKE_CURRENT_SOURCE_DIR}/assets/models/TransformProbe.gltf"
+    DEPENDS StaticModelChecks
+    COMMENT "Checking selected glTF geometry, static transforms and packed 3D upload data"
+    VERBATIM
+)
+
+add_executable(TriangleSceneChecks EXCLUDE_FROM_ALL tests/TriangleSceneChecks.cpp apps/Sandbox/TriangleScene.cpp)
+target_link_libraries(TriangleSceneChecks PRIVATE MadCatScene)
+target_include_directories(TriangleSceneChecks PRIVATE apps/Sandbox)
+set_target_properties(TriangleSceneChecks PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+    target_compile_options(TriangleSceneChecks PRIVATE /W4 /permissive-)
+endif()
+add_custom_target(MadCatSceneDrawChecks
+    COMMAND "$<TARGET_FILE:TriangleSceneChecks>"
+    DEPENDS TriangleSceneChecks
+    COMMENT "Checking Scene-to-Shader matrix packing against analytic projections"
+    VERBATIM
+)
 
 # Shader compilation is explicit and independent of the MadCat C++ target.
 set(MADCAT_SLANG_VERSION "2026.17-25-gc7954ebd1")
@@ -202,6 +300,7 @@ add_custom_target(MadCatRayQueryChecks
 add_executable(ShaderModuleChecks EXCLUDE_FROM_ALL
     tests/ShaderModuleChecks.cpp
     src/RHI/Vulkan/VulkanBuffer.cpp
+    src/RHI/Vulkan/VulkanDepthTexture.cpp
     src/Shader/Spirv.cpp
     src/RHI/Vulkan/VulkanShaderModule.cpp
     src/RHI/Vulkan/VulkanDevice.cpp
@@ -243,5 +342,15 @@ add_custom_target(MadCatBufferChecks
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/RunShaderModuleChecks.cmake"
     DEPENDS ShaderModuleChecks
     COMMENT "Checking immutable buffer upload, shared ownership and failure cleanup"
+    VERBATIM
+)
+add_custom_target(MadCatDepthChecks
+    COMMAND "${CMAKE_COMMAND}"
+        "-DCHECK_PROGRAM=$<TARGET_FILE:ShaderModuleChecks>"
+        "-DOUTPUT_ROOT=${CMAKE_CURRENT_BINARY_DIR}/verification/depth/$<CONFIG>"
+        -DCHECK_MODE=depth
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/RunShaderModuleChecks.cmake"
+    DEPENDS ShaderModuleChecks
+    COMMENT "Checking depth texture capabilities, shared ownership and failure cleanup"
     VERBATIM
 )

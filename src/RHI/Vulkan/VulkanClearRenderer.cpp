@@ -1,6 +1,7 @@
 #include "VulkanClearRenderer.h"
 
 #include "VulkanDevice.h"
+#include "VulkanDepthTexture.h"
 #include "VulkanFunctions.h"
 #include "VulkanSwapchain.h"
 #include "VulkanTrianglePipeline.h"
@@ -29,6 +30,9 @@ struct VulkanClearRenderer::State
     // This fixed geometry is retained for the whole one-frame context. State's
     // destructor waits and releases recorded commands before dropping this copy.
     BufferRef vertexKeepAlive;
+    BufferRef indexKeepAlive;
+    TextureRef depth;
+    bool depthInitialized = false;
     std::vector<Image> images;
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
@@ -136,7 +140,7 @@ struct VulkanClearRenderer::State
         }
     }
 
-    bool record(uint32_t imageIndex, const std::array<float, 4>& color)
+    bool record(uint32_t imageIndex, const std::array<float, 4>& color, std::span<const DrawTransform> transforms)
     {
         if (!detail::checkResult(resetCommandPool(device, commandPool, 0), "vkResetCommandPool")) { return false; }
         VkCommandBufferBeginInfo begin{};
@@ -163,6 +167,24 @@ struct VulkanClearRenderer::State
         dependency.pImageMemoryBarriers = &barrier;
         cmdPipelineBarrier2(commandBuffer, &dependency);
 
+        VkImageMemoryBarrier2 depthBarrier{};
+        depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        constexpr auto depthStages = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+        depthBarrier.srcStageMask = depthInitialized ? depthStages : VK_PIPELINE_STAGE_2_NONE;
+        depthBarrier.srcAccessMask = depthInitialized ? VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : VK_ACCESS_2_NONE;
+        depthBarrier.dstStageMask = depthStages;
+        depthBarrier.dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        depthBarrier.oldLayout = depthInitialized ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+        depthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        depthBarrier.srcQueueFamilyIndex = depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        depthBarrier.image = detail::TextureAccess::image(depth);
+        depthBarrier.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+        VkDependencyInfo depthDependency{};
+        depthDependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        depthDependency.imageMemoryBarrierCount = 1;
+        depthDependency.pImageMemoryBarriers = &depthBarrier;
+        cmdPipelineBarrier2(commandBuffer, &depthDependency);
+
         VkRenderingAttachmentInfo attachment{};
         attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
         attachment.imageView = image.view;
@@ -170,14 +192,28 @@ struct VulkanClearRenderer::State
         attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         std::ranges::copy(color, attachment.clearValue.color.float32);
+        VkRenderingAttachmentInfo depthAttachment{};
+        depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        depthAttachment.imageView = detail::TextureAccess::view(depth);
+        depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depthAttachment.clearValue.depthStencil = {1.0f, 0};
         VkRenderingInfo rendering{};
         rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
         rendering.renderArea.extent = extent;
         rendering.layerCount = 1;
         rendering.colorAttachmentCount = 1;
         rendering.pColorAttachments = &attachment;
+        rendering.pDepthAttachment = &depthAttachment;
         cmdBeginRendering(commandBuffer, &rendering);
-        if (triangle && !triangle->recordDraw(commandBuffer, extent)) { return false; }
+        if (triangle)
+        {
+            for (const auto& transform : transforms)
+            {
+                if (!triangle->recordDraw(commandBuffer, extent, transform)) { return false; }
+            }
+        }
         cmdEndRendering(commandBuffer);
 
         barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
@@ -202,7 +238,7 @@ VulkanClearRenderer::~VulkanClearRenderer()
     }
 }
 
-bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwapchain& swapchain, const VulkanTrianglePipeline* triangle)
+bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwapchain& swapchain, TextureRef depth, const VulkanTrianglePipeline* triangle)
 {
     if (state_)
     {
@@ -219,7 +255,14 @@ bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwa
         std::fprintf(stderr, "Vulkan error: clear renderer requires VK_EXT_swapchain_maintenance1 present fences for safe resource retirement.\n");
         return false;
     }
-    if (triangle && (!triangle->handle() || triangle->deviceHandle() != device.handle() || triangle->colorFormat() != swapchain.surfaceFormat().format))
+    if (!depth || detail::TextureAccess::device(depth) != device.handle() ||
+        depth.width() != swapchain.extent().width || depth.height() != swapchain.extent().height)
+    {
+        std::fprintf(stderr, "Vulkan error: depth texture must match the renderer Device and Swapchain extent.\n");
+        return false;
+    }
+    if (triangle && (!triangle->handle() || triangle->deviceHandle() != device.handle() ||
+        triangle->colorFormat() != swapchain.surfaceFormat().format || triangle->depthFormat() != detail::TextureAccess::format(depth)))
     {
         std::fprintf(stderr, "Vulkan error: triangle pipeline must match the renderer Device and Swapchain color format.\n");
         return false;
@@ -229,8 +272,13 @@ bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwa
     created->queue = device.queue();
     created->swapchain = swapchain.handle();
     created->extent = swapchain.extent();
+    created->depth = std::move(depth);
     created->triangle = triangle;
-    if (triangle) { created->vertexKeepAlive = triangle->vertexBuffer(); }
+    if (triangle)
+    {
+        created->vertexKeepAlive = triangle->vertexBuffer();
+        created->indexKeepAlive = triangle->indexBuffer();
+    }
     if (!created->loadFunctions(device.physicalDeviceInfo().instance)) { return false; }
     created->images.resize(swapchain.images().size());
     for (size_t index = 0; index < created->images.size(); ++index)
@@ -277,7 +325,7 @@ bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwa
     }
     state_ = std::move(created);
     std::fprintf(stderr, "Vulkan: Clear renderer ready; one frame in flight, dynamic rendering, acquire/submit/present fences.\n");
-    if (triangle) { std::fprintf(stderr, "Vulkan: triangle Draw enabled (3 vertices, 1 instance).\n"); }
+    if (triangle) { std::fprintf(stderr, "Vulkan: triangle DrawIndexed enabled (%u uint32 indices, 1 instance).\n", triangle->indexCount()); }
     return true;
 }
 
@@ -286,10 +334,16 @@ bool VulkanClearRenderer::waitIdle()
     return !state_ || state_->wait();
 }
 
-ClearFrameResult VulkanClearRenderer::draw(const std::array<float, 4>& color)
+ClearFrameResult VulkanClearRenderer::draw(const std::array<float, 4>& color, std::span<const DrawTransform> transforms)
 {
     if (!state_) { return ClearFrameResult::Failed; }
     auto& frame = *state_;
+    if (frame.triangle && transforms.empty())
+    {
+        std::fprintf(stderr, "Vulkan error: triangle rendering requires at least one matrix.\n");
+        frame.status = ClearFrameResult::Failed;
+        return frame.status;
+    }
     if (frame.status != ClearFrameResult::Presented) { return frame.status; }
     frame.status = ClearFrameResult::Failed;
     if (!frame.wait()) { return frame.status; }
@@ -320,7 +374,7 @@ ClearFrameResult VulkanClearRenderer::draw(const std::array<float, 4>& color)
         std::fprintf(stderr, "Vulkan error: acquired image index is outside the Swapchain image array.\n");
         return frame.status;
     }
-    if (!frame.record(imageIndex, color) ||
+    if (!frame.record(imageIndex, color, transforms) ||
         !detail::checkResult(frame.resetFences(frame.device, 1, &frame.submitFence), "vkResetFences(submit)")) { return frame.status; }
     VkSemaphoreSubmitInfo wait{};
     wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
@@ -343,6 +397,7 @@ ClearFrameResult VulkanClearRenderer::draw(const std::array<float, 4>& color)
     submit.pSignalSemaphoreInfos = &signal;
     if (!detail::checkResult(frame.queueSubmit2(frame.queue, 1, &submit, frame.submitFence), "vkQueueSubmit2")) { return frame.status; }
     frame.submitPending = true;
+    frame.depthInitialized = true;
     if (!detail::checkResult(frame.resetFences(frame.device, 1, &frame.presentFence), "vkResetFences(present)")) { return frame.status; }
     VkSwapchainPresentFenceInfoEXT retirement{};
     retirement.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT;

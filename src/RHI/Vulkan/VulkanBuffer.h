@@ -12,6 +12,12 @@ namespace madcat::rhi
 // failures may throw. Submit reads after this call returns on the same host thread.
 [[nodiscard]] BufferRef createVertexBuffer(const VulkanDevice& device, std::span<const std::byte> data);
 
+// Tightly packed uint32 indices, immutable after upload. Nonempty count must fit
+// uint32. Values are limited by maxDrawIndexedIndexValue and 0x00ffffff because
+// Device does not enable fullDrawIndexUint32. Topology and vertex bounds are
+// checked when pairing with a pipeline.
+[[nodiscard]] BufferRef createIndexBuffer(const VulkanDevice& device, std::span<const uint32_t> data);
+
 namespace detail
 {
 // Native access stays inside the Vulkan backend; ordinary RHI users keep BufferRef.
@@ -19,6 +25,8 @@ struct BufferAccess
 {
     [[nodiscard]] static VkBuffer handle(const BufferRef& buffer) noexcept;
     [[nodiscard]] static VkDevice device(const BufferRef& buffer) noexcept;
+    [[nodiscard]] static VkBufferUsageFlags usage(const BufferRef& buffer) noexcept;
+    [[nodiscard]] static uint32_t maximumIndex(const BufferRef& buffer) noexcept;
 };
 }
 }

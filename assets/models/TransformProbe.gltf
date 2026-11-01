@@ -1,0 +1,171 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "MadCat self-authored static transform probe"
+  },
+  "buffers": [
+    {
+      "uri": "data:application/octet-stream;base64,MzMzvwAAAL8AAAAAMzMzPwAAAL8AAAAAAAAAADMzMz+amZk+zczMvs3MTL4AAAC/AAAAP83MTL4AAAC/zczMPZqZGT8AAAA/AgAAAAEAAQACAAAA",
+      "byteLength": 84
+    }
+  ],
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteOffset": 0,
+      "byteLength": 72
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 72,
+      "byteLength": 12
+    }
+  ],
+  "accessors": [
+    {
+      "bufferView": 0,
+      "byteOffset": 0,
+      "componentType": 5126,
+      "count": 3,
+      "type": "VEC3",
+      "min": [
+        -0.7,
+        -0.5,
+        0
+      ],
+      "max": [
+        0.7,
+        0.7,
+        0.3
+      ]
+    },
+    {
+      "bufferView": 0,
+      "byteOffset": 36,
+      "componentType": 5126,
+      "count": 3,
+      "type": "VEC3",
+      "min": [
+        -0.4,
+        -0.2,
+        -0.5
+      ],
+      "max": [
+        0.5,
+        0.6,
+        0.5
+      ]
+    },
+    {
+      "bufferView": 1,
+      "byteOffset": 0,
+      "componentType": 5123,
+      "count": 3,
+      "type": "SCALAR"
+    },
+    {
+      "bufferView": 1,
+      "byteOffset": 6,
+      "componentType": 5123,
+      "count": 3,
+      "type": "SCALAR"
+    }
+  ],
+  "meshes": [
+    {
+      "name": "two intersecting triangles",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 0
+          },
+          "indices": 2
+        },
+        {
+          "attributes": {
+            "POSITION": 1
+          },
+          "indices": 3
+        }
+      ]
+    },
+    {
+      "name": "inactive mesh",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 0
+          },
+          "indices": 2
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "name": "translated parent",
+      "translation": [
+        0.2,
+        0.1,
+        0
+      ],
+      "children": [
+        1,
+        2
+      ]
+    },
+    {
+      "name": "rotated mesh",
+      "mesh": 0,
+      "translation": [
+        0.3,
+        0,
+        0.2
+      ],
+      "rotation": [
+        0,
+        0.7071067811865476,
+        0,
+        0.7071067811865476
+      ]
+    },
+    {
+      "name": "shared mesh instance",
+      "mesh": 0,
+      "translation": [
+        -0.4,
+        0,
+        -0.2
+      ],
+      "scale": [
+        0.6,
+        0.8,
+        0.7
+      ]
+    },
+    {
+      "name": "inactive distant node",
+      "mesh": 1,
+      "translation": [
+        50,
+        50,
+        50
+      ]
+    }
+  ],
+  "scenes": [
+    {
+      "name": "active preview",
+      "nodes": [
+        0
+      ]
+    },
+    {
+      "name": "inactive scene",
+      "nodes": [
+        3
+      ]
+    }
+  ],
+  "scene": 0
+}

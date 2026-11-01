@@ -1,10 +1,17 @@
 param(
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug',
     [string]$BuildDirectory = 'build',
-    [ValidateSet('resize', 'close-minimized', 'modal', 'stress')][string]$Scenario = 'resize'
+    [ValidateSet('resize', 'close-minimized', 'modal', 'stress', 'scene', 'depth', 'model')][string]$Scenario = 'resize',
+    [string]$ModelPath = ''
 )
 $ErrorActionPreference = 'Stop'
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$probePath = Join-Path $workspace 'assets/models/TransformProbe.gltf'
+if ($Scenario -eq 'model' -and -not $ModelPath) { $ModelPath = $probePath }
+$hasModel = [bool]$ModelPath
+if ($hasModel) { $ModelPath = (Resolve-Path -LiteralPath $ModelPath).Path }
+$referenceModel = $hasModel -and ((Get-FileHash -LiteralPath $ModelPath).Hash -eq (Get-FileHash -LiteralPath $probePath).Hash)
+if ($hasModel) { . (Join-Path $PSScriptRoot 'ModelPixelReference.ps1') }
 $buildPath = if ([IO.Path]::IsPathRooted($BuildDirectory)) { $BuildDirectory } else { Join-Path $workspace $BuildDirectory }
 $buildPath = (Resolve-Path -LiteralPath $buildPath).Path
 $outputRoot = Join-Path $buildPath 'verification/triangle'
@@ -35,13 +42,17 @@ public static class TriangleWindowCheck {
 }
 '@
 $name = "$($Configuration.ToLower())-$Scenario"
+if ($hasModel) { $name += '-' + [IO.Path]::GetFileNameWithoutExtension($ModelPath) }
 $errorPath = Join-Path $outputRoot "$name.stderr.log"
 $outPath = Join-Path $outputRoot "$name.stdout.log"
 $previousSync = $env:VK_LAYER_VALIDATE_SYNC
 try {
     $env:VK_LAYER_VALIDATE_SYNC = '1'
     # A different working directory checks that Shader lookup is independent of cwd.
-    $appProcess = Start-Process -FilePath (Join-Path $buildPath "$Configuration/MadCat.exe") -WorkingDirectory $outputRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $outPath -RedirectStandardError $errorPath
+    $launch = @{ FilePath = (Join-Path $buildPath "$Configuration/MadCat.exe"); WorkingDirectory = $outputRoot
+        WindowStyle = 'Hidden'; PassThru = $true; RedirectStandardOutput = $outPath; RedirectStandardError = $errorPath }
+    if ($hasModel) { $launch.ArgumentList = @('--gltf', ('"' + $ModelPath + '"')) }
+    $appProcess = Start-Process @launch
     $null = $appProcess.Handle
 } finally { $env:VK_LAYER_VALIDATE_SYNC = $previousSync }
 $windowState = @{ Handle = [IntPtr]::Zero; Thread = [uint32]0 }
@@ -78,6 +89,92 @@ function Convert-Srgb([double]$Value) {
     $encoded = if ($Value -le 0.0031308) { 12.92 * $Value } else { 1.055 * [Math]::Pow($Value, 1.0 / 2.4) - 0.055 }
     return [int][Math]::Round(255 * $encoded)
 }
+$referencePose = 0
+function Rotate-Y([double[]]$Vector, [double]$Degrees) {
+    $angle = $Degrees * [Math]::PI / 180
+    return @(([Math]::Cos($angle) * $Vector[0] + [Math]::Sin($angle) * $Vector[2]), $Vector[1],
+        (-[Math]::Sin($angle) * $Vector[0] + [Math]::Cos($angle) * $Vector[2]))
+}
+function Get-ProjectedVertices([double]$Aspect, [int]$ModelIndex = 0, $Positions = @(@(0, .6, 0), @(.6, -.6, 0), @(-.6, -.6, 0))) {
+    # Independent analytic point transforms; no matrices or values read from MadCat.
+    $modelMoved = $script:referencePose -eq 1
+    $cameraMoved = $script:referencePose -eq 2
+    $rootAngle = $(if ($modelMoved) { 40 } else { 10 }) * [Math]::PI / 180
+    $rig = if ($cameraMoved) { @(.4, .2, .25) } else { @(-.15, .1, 0) }
+    foreach ($local in $Positions) {
+        $p = Rotate-Y @(($local[0] * 1.1), ($local[1] * .9), $local[2]) $(if ($ModelIndex -eq 1) { -35 } else { 25 })
+        $p[0] += $(if ($ModelIndex -eq 1) { .2 } else { -.1 })
+        $p[1] += $(if ($ModelIndex -eq 1) { .05 } else { -.05 })
+        $p[2] += $(if ($ModelIndex -eq 1) { -.1 } else { 0 })
+        $p = @(([Math]::Cos($rootAngle) * $p[0] - [Math]::Sin($rootAngle) * $p[1]),
+            ([Math]::Sin($rootAngle) * $p[0] + [Math]::Cos($rootAngle) * $p[1]), $p[2])
+        $p[0] += $(if ($modelMoved) { .85 } else { .25 })
+        $p[1] += $(if ($modelMoved) { .25 } else { .1 })
+        $p[2] += $(if ($modelMoved) { -.3 } else { 0 })
+        for ($index = 0; $index -lt 3; ++$index) { $p[$index] -= $rig[$index] }
+        $p = Rotate-Y $p $(if ($cameraMoved) { 8 } else { -5 })
+        $p[2] -= 3
+        $w = -$p[2]
+        $near = if ($script:referencePose -eq 3) { 4.0 } else { .1 }
+        $far = if ($script:referencePose -eq 4) { 2.0 } else { 20.0 }
+        [pscustomobject]@{ U = .5 + .5 * [Math]::Sqrt(3) * $p[0] / ($Aspect * $w)
+            V = .5 - .5 * [Math]::Sqrt(3) * $p[1] / $w; W = $w
+            Z = ($far / ($near - $far) * $p[2] + $near * $far / ($near - $far)) / $w }
+    }
+}
+function Get-Barycentric($Vertices, [double]$U, [double]$V) {
+    $a, $b, $c = $Vertices
+    $denominator = ($b.V - $c.V) * ($a.U - $c.U) + ($c.U - $b.U) * ($a.V - $c.V)
+    $red = (($b.V - $c.V) * ($U - $c.U) + ($c.U - $b.U) * ($V - $c.V)) / $denominator
+    $green = (($c.V - $a.V) * ($U - $c.U) + ($a.U - $c.U) * ($V - $c.V)) / $denominator
+    return @($red, $green, (1 - $red - $green))
+}
+function Get-Fragment($Vertices, [double]$U, [double]$V) {
+    $weights = @(Get-Barycentric $Vertices $U $V)
+    $margin = [Math]::Min($weights[0], [Math]::Min($weights[1], $weights[2]))
+    if ($margin -lt 0) { return $null }
+    $depth = 0.0
+    for ($index = 0; $index -lt 3; ++$index) { $depth += $weights[$index] * $Vertices[$index].Z }
+    if ($depth -lt 0 -or $depth -gt 1) { return $null }
+    $weighted = @(($weights[0] / $Vertices[0].W), ($weights[1] / $Vertices[1].W), ($weights[2] / $Vertices[2].W))
+    $total = $weighted[0] + $weighted[1] + $weighted[2]
+    $color = @(($weighted[0] / $total), ($weighted[1] / $total), ($weighted[2] / $total))
+    if ($null -ne $Vertices[0].Color) {
+        $color = @(0.0, 0.0, 0.0)
+        for ($axis = 0; $axis -lt 3; ++$axis) {
+            for ($index = 0; $index -lt 3; ++$index) { $color[$axis] += $weighted[$index] * $Vertices[$index].Color[$axis] / $total }
+        }
+    }
+    return [pscustomobject]@{ Depth = $depth; Margin = $margin; Color = $color }
+}
+function Get-OverlapSamples($First, $Second) {
+    # Find overlap points where each of the intersecting planes is closest.
+    $found = @($false, $false)
+    for ($row = 1; $row -lt 80; ++$row) {
+        for ($column = 1; $column -lt 80; ++$column) {
+            $u = $column / 80.0; $v = $row / 80.0
+            $a = Get-Fragment $First $u $v; $b = Get-Fragment $Second $u $v
+            if ($null -eq $a -or $null -eq $b -or $a.Margin -lt .05 -or $b.Margin -lt .05 -or
+                [Math]::Abs($a.Depth - $b.Depth) -lt .0001) { continue }
+            $winner = if ($a.Depth -lt $b.Depth) { 0 } else { 1 }
+            if (-not $found[$winner]) { $found[$winner] = $true; ,@($u, $v) }
+            if ($found[0] -and $found[1]) { return }
+        }
+    }
+    throw 'Reference scene needs overlap samples with both planes closest'
+}
+function Select-Pose([int]$Pose) {
+    $before = [regex]::Matches((Read-Log), 'Scene pose presented;').Count
+    $key = [IntPtr](0x31 + $Pose)
+    [void][TriangleWindowCheck]::PostMessage($windowState.Handle, 0x100, $key, [IntPtr]1)
+    # GLFW derives release/repeat from LPARAM flags, not just WM_KEYUP itself.
+    [void][TriangleWindowCheck]::PostMessage($windowState.Handle, 0x101, $key, [IntPtr]0xC0000001)
+    Wait-Condition {
+        $entries = [regex]::Matches((Read-Log), 'Scene pose presented; (\d)')
+        return $entries.Count -gt $before -and [int]$entries[$entries.Count - 1].Groups[1].Value -eq ($Pose + 1)
+    } 'Scene pose presentation'
+    $script:referencePose = $Pose
+}
 function Check-Pixels([string]$Label) {
     # Wait for restore/compositor animation before sampling physical screen pixels.
     Start-Sleep -Milliseconds 650
@@ -91,23 +188,39 @@ function Check-Pixels([string]$Label) {
         $bitmap.Save((Join-Path $outputRoot "$name-$Label.png"))
         # Reference values apply to the current Slang triangle and SDR sRGB output.
         if ((Read-Log) -notmatch 'Swapchain created; [^\r\n]*format (43|50),') { throw 'Pixel reference requires an sRGB R8/B8 Swapchain' }
-        foreach ($sample in @(@(.08, .08), @(.92, .08), @(.08, .92), @(.92, .92), @(.5, .9), @(.1, .5), @(.5, .25), @(.35, .7), @(.65, .7), @(.5, .5))) {
+        $aspect = $size[0] / [double]$size[1]
+        if ($hasModel) { Check-ModelPixels $bitmap $aspect $Label; return }
+        $vertices = @(Get-ProjectedVertices $aspect)
+        $second = if ($script:referencePose -ge 5) { @(Get-ProjectedVertices $aspect 1) } else { $null }
+        $samples = @(@(.08, .08), @(.92, .08), @(.08, .92), @(.92, .92), @(.5, .9), @(.1, .5))
+        foreach ($weights in @(@(.7, .15, .15), @(.15, .7, .15), @(.15, .15, .7), @((1.0/3), (1.0/3), (1.0/3)))) {
+            $sampleU = 0.0; $sampleV = 0.0
+            for ($index = 0; $index -lt 3; ++$index) {
+                $sampleU += $weights[$index] * $vertices[$index].U
+                $sampleV += $weights[$index] * $vertices[$index].V
+            }
+            $samples += ,@($sampleU, $sampleV)
+        }
+        if ($null -ne $second) { $samples += @(Get-OverlapSamples $vertices $second) }
+        foreach ($sample in $samples) {
             $x = [int][Math]::Floor($sample[0] * $size[0])
             $y = [int][Math]::Floor($sample[1] * $size[1])
             $u = ($x + .5) / $size[0]
             $v = ($y + .5) / $size[1]
-            $red = (.8 - $v) / .6
-            $green = (1 - $red + ($u - .5) / .3) / 2
-            $blue = 1 - $red - $green
-            $expected = if ($red -ge 0 -and $green -ge 0 -and $blue -ge 0) {
-                @((Convert-Srgb $red), (Convert-Srgb $green), (Convert-Srgb $blue))
+            $fragment = Get-Fragment $vertices $u $v
+            if ($null -ne $second) {
+                $other = Get-Fragment $second $u $v
+                if ($null -ne $other -and ($null -eq $fragment -or $other.Depth -lt $fragment.Depth)) { $fragment = $other }
+            }
+            $expected = if ($null -ne $fragment) {
+                @((Convert-Srgb $fragment.Color[0]), (Convert-Srgb $fragment.Color[1]), (Convert-Srgb $fragment.Color[2]))
             } else { @(56, 80, 111) }
             $pixel = $bitmap.GetPixel($x, $y)
             if ([Math]::Abs($pixel.R - $expected[0]) -gt 3 -or [Math]::Abs($pixel.G - $expected[1]) -gt 3 -or [Math]::Abs($pixel.B - $expected[2]) -gt 3) {
                 throw "$Label pixel ${x},${y}: actual $pixel, expected RGB $expected"
             }
         }
-        Write-Output "$name $Label PASS ($($size[0])x$($size[1]), six background and four interpolated-color samples)"
+        Write-Output "$name $Label PASS ($($size[0])x$($size[1]), analytic projection/depth and $($samples.Count) pixel samples)"
     } finally { $graphics.Dispose(); $bitmap.Dispose() }
 }
 function Resize-To([int]$Width, [int]$Height, [string]$Label) {
@@ -144,6 +257,46 @@ try {
     if ($Scenario -eq 'close-minimized') {
         [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 6)
         Wait-Condition { (Read-Log) -match 'rendering paused;' } 'minimize'
+    } elseif ($Scenario -eq 'model') {
+        Select-Pose 1
+        Check-Pixels 'model-parent'
+        Select-Pose 2
+        Check-Pixels 'camera-parent'
+        Resize-To 800 580 'model-resized'
+        $before = Get-ReadyCount
+        [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 6)
+        Start-Sleep -Milliseconds 250
+        [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 9)
+        Wait-Presentation $before
+        Check-Pixels 'model-restored'
+    } elseif ($Scenario -eq 'depth') {
+        $pipelineCount = [regex]::Matches((Read-Log), 'Triangle pipeline created;').Count
+        Select-Pose 5; Check-Pixels 'forward'
+        Select-Pose 6; Check-Pixels 'reverse'
+        Select-Pose 5; Check-Pixels 'forward-again'
+        Select-Pose 0; Check-Pixels 'single-again'
+        Select-Pose 6; Check-Pixels 'reverse-again'
+        if ([regex]::Matches((Read-Log), 'Triangle pipeline created;').Count -ne $pipelineCount) { throw 'Draw order edit rebuilt pipeline' }
+        Resize-To 800 580 'depth-resized'
+        $before = Get-ReadyCount
+        [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 6)
+        Wait-Condition { (Read-Log) -match 'rendering paused;' } 'depth minimize'
+        [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 9)
+        Wait-Presentation $before
+        Check-Pixels 'depth-restored'
+    } elseif ($Scenario -eq 'scene') {
+        $pipelineCount = [regex]::Matches((Read-Log), 'Triangle pipeline created;').Count
+        for ($pose = 1; $pose -lt 5; ++$pose) { Select-Pose $pose; Check-Pixels "pose-$pose" }
+        Select-Pose 0
+        Check-Pixels 'reset'
+        if ([regex]::Matches((Read-Log), 'Triangle pipeline created;').Count -ne $pipelineCount) {
+            throw 'Scene parameter edit unexpectedly rebuilt the pipeline'
+        }
+        Select-Pose 2
+        Check-Pixels 'camera-again'
+        Resize-To 800 580 'camera-resized'
+        Select-Pose 0
+        Check-Pixels 'reset-resized'
     } elseif ($Scenario -eq 'stress') {
         for ($index = 0; $index -lt 24; ++$index) {
             [void][TriangleWindowCheck]::SetWindowPos($windowState.Handle, [IntPtr](-1), 30, 30, (740 + ($index % 6) * 35), (500 + ($index % 5) * 25), 0x10)
@@ -182,11 +335,38 @@ try {
         $pipelines -ne [regex]::Matches($log, '(?s)Clear renderer destroyed.*?Triangle pipeline destroyed.*?Swapchain destroyed').Count) { throw 'Pipeline/Swapchain lifetime count or order mismatch' }
     if ([regex]::Matches($log, 'Shader Module created;').Count -ne 2 -or [regex]::Matches($log, 'Shader Module destroyed\.').Count -ne 2 -or
         $log -notmatch '(?s)Triangle pipeline destroyed.*Swapchain destroyed.*Shader Module destroyed.*Shader Module destroyed.*Device destroyed.*Surface destroyed.*Instance destroyed') { throw 'Module/Device destruction count or order mismatch' }
-    if ([regex]::Matches($log, 'Vertex buffer uploaded; 60 bytes, coherent memory type').Count -ne 1 -or
+    $vertexBytes = 96; $indexBytes = 36; $indexCount = 9
+    if ($hasModel) {
+        $preview = [regex]::Match($log, 'glTF preview ready; (\d+) node instances, (\d+) primitives, (\d+) vertices, (\d+) indices\.')
+        if (-not $preview.Success) { throw 'Missing model preparation statistics' }
+        if ($referenceModel -and $preview.Value -ne 'glTF preview ready; 2 node instances, 4 primitives, 12 vertices, 12 indices.') { throw 'Active glTF geometry count mismatch' }
+        $vertexBytes = 24 * [int]$preview.Groups[3].Value
+        $indexCount = [int]$preview.Groups[4].Value
+        $indexBytes = 4 * $indexCount
+    }
+    if ([regex]::Matches($log, "Vertex buffer uploaded; $vertexBytes bytes, coherent memory type").Count -ne 1 -or
         [regex]::Matches($log, 'Vertex buffer destroyed\.').Count -ne 1 -or
         $log -notmatch '(?s)Vertex buffer uploaded.*Triangle pipeline created' -or
         $log -notmatch '(?s)Clear renderer destroyed.*Triangle pipeline destroyed.*Swapchain destroyed.*Vertex buffer destroyed.*Shader Module destroyed.*Device destroyed') {
         throw 'Vertex upload, rebuild reuse or GPU completion lifetime mismatch'
+    }
+    if ([regex]::Matches($log, "Index buffer uploaded; $indexBytes bytes, coherent memory type").Count -ne 1 -or
+        [regex]::Matches($log, 'Index buffer destroyed\.').Count -ne 1 -or
+        [regex]::Matches($log, "triangle DrawIndexed enabled \($indexCount uint32 indices, 1 instance\)").Count -ne $pipelines -or
+        $log -notmatch '(?s)Index buffer uploaded.*Triangle pipeline created' -or
+        $log -notmatch '(?s)Clear renderer destroyed.*Triangle pipeline destroyed.*Swapchain destroyed.*Index buffer destroyed.*Shader Module destroyed.*Device destroyed') {
+        throw 'Index upload, DrawIndexed count, rebuild reuse or GPU completion lifetime mismatch'
+    }
+    $depths = [regex]::Matches($log, 'Depth texture created; (\d+) x (\d+),')
+    $swaps = [regex]::Matches($log, 'Swapchain created; (\d+) x (\d+),')
+    if ($depths.Count -ne $pipelines -or $depths.Count -ne [regex]::Matches($log, 'Depth texture destroyed\.').Count -or
+        $depths.Count -ne [regex]::Matches($log, '(?s)Clear renderer destroyed.*?Triangle pipeline destroyed.*?Depth texture destroyed.*?Swapchain destroyed').Count) {
+        throw 'Depth attachment lifetime count/order mismatch'
+    }
+    for ($index = 0; $index -lt $depths.Count; ++$index) {
+        if ($depths[$index].Groups[1].Value -ne $swaps[$index].Groups[1].Value -or $depths[$index].Groups[2].Value -ne $swaps[$index].Groups[2].Value) {
+            throw 'Depth attachment extent did not follow Swapchain'
+        }
     }
     Write-Output "$name PASS (exit 0, $pipelines pipelines safely retired, clean validation)"
 } finally {

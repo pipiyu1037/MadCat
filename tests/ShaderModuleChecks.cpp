@@ -4,6 +4,7 @@
 
 #include "RHI/Vulkan/VulkanDevice.h"
 #include "RHI/Vulkan/VulkanBuffer.h"
+#include "RHI/Vulkan/VulkanDepthTexture.h"
 #include "RHI/Vulkan/VulkanShaderModule.h"
 #include "RHI/Vulkan/VulkanTrianglePipeline.h"
 #include "Shader/Spirv.h"
@@ -15,6 +16,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -46,12 +48,18 @@ std::set<VkPipeline> livePipelines;
 std::string_view failingPipelineOperation;
 std::string recorded;
 VkExtent2D expectedExtent{};
+madcat::rhi::DrawTransform expectedTransform;
+madcat::rhi::DrawTransform recordedTransform;
 VkFormat expectedFormat = VK_FORMAT_B8G8R8A8_SRGB;
+VkFormat expectedDepthFormat = VK_FORMAT_D32_SFLOAT;
 VkShaderModule expectedVertex = VK_NULL_HANDLE;
 VkShaderModule expectedFragment = VK_NULL_HANDLE;
 int layoutCreates = 0, pipelineCreates = 0;
 const auto commandToken = reinterpret_cast<VkCommandBuffer>(6);
 std::set<VkBuffer> liveBuffers;
+std::map<VkBuffer, VkBufferUsageFlags> bufferUsages;
+VkBuffer expectedVertices = VK_NULL_HANDLE, expectedIndices = VK_NULL_HANDLE;
+uint32_t expectedIndexCount = 6;
 std::map<VkDeviceMemory, std::vector<std::byte>> liveMemory;
 std::map<VkBuffer, VkDeviceMemory> boundMemory;
 std::set<VkDeviceMemory> mappedMemory;
@@ -59,9 +67,19 @@ std::string_view failingBufferOperation;
 uint32_t memoryTypeBits = 2;
 bool noCoherentMemory = false;
 int bufferCreates = 0;
-constexpr madcat::rhi::TriangleVertex geometry[] = {
-    {{0, -0.6f}, {1, 0, 0}}, {{0.6f, 0.6f}, {0, 1, 0}}, {{-0.6f, 0.6f}, {0, 0, 1}}
+std::map<VkImage, VkFormat> liveImages;
+std::map<VkImageView, VkImage> liveViews;
+std::map<VkImage, VkDeviceMemory> boundImages;
+std::string_view failingDepthOperation;
+bool noD32 = false, noD16 = false, rejectD32Image = false;
+VkExtent3D maxDepthExtent{4096, 4096, 1};
+VkSampleCountFlags depthSamples = VK_SAMPLE_COUNT_1_BIT;
+uint32_t depthMemoryTypeBits = 4;
+int imageCreates = 0;
+constexpr madcat::rhi::ColoredVertex geometry[] = {
+    {{0, -0.6f, 0}, {1, 0, 0}}, {{0.6f, 0.6f, 0}, {0, 1, 0}}, {{-0.6f, 0.6f, 0}, {0, 0, 1}}
 };
+constexpr uint32_t geometryIndices[] = {2, 0, 1, 2, 1, 0};
 
 void writeWords(const std::filesystem::path& file, const std::vector<uint32_t>& words)
 {
@@ -80,6 +98,7 @@ VKAPI_ATTR void VKAPI_CALL destroyDevice(VkDevice, const VkAllocationCallbacks*)
     check(liveModules.empty(), "Device destroyed before its modules");
     check(liveLayouts.empty() && livePipelines.empty(), "Device destroyed before pipeline/layout");
     check(liveBuffers.empty() && liveMemory.empty(), "Device destroyed before buffer/memory");
+    check(liveImages.empty() && liveViews.empty(), "Device destroyed before image/view");
 }
 VKAPI_ATTR VkResult VKAPI_CALL waitIdle(VkDevice) { return VK_SUCCESS; }
 VKAPI_ATTR void VKAPI_CALL getQueue(VkDevice, uint32_t, uint32_t, VkQueue* queue) { *queue = reinterpret_cast<VkQueue>(3); }
@@ -94,24 +113,27 @@ VKAPI_ATTR void VKAPI_CALL memoryProperties(VkPhysicalDevice physical, VkPhysica
         (noCoherentMemory ? 0 : VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     properties->memoryTypes[2].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
     properties->memoryHeapCount = 1;
-    properties->memoryHeaps[0].size = 4096;
+    properties->memoryHeaps[0].size = 1024 * 1024;
 }
 VKAPI_ATTR VkResult VKAPI_CALL createBuffer(VkDevice device, const VkBufferCreateInfo* info,
     const VkAllocationCallbacks* allocator, VkBuffer* buffer)
 {
     ++bufferCreates;
     check(device == deviceToken && !allocator && info->sType == VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO && !info->pNext &&
-        info->size > 0 && info->size <= 256 && info->flags == 0 && info->usage == VK_BUFFER_USAGE_VERTEX_BUFFER_BIT &&
+        info->size > 0 && info->size <= 256 && info->flags == 0 &&
+        (info->usage == VK_BUFFER_USAGE_VERTEX_BUFFER_BIT || info->usage == VK_BUFFER_USAGE_INDEX_BUFFER_BIT) &&
         info->sharingMode == VK_SHARING_MODE_EXCLUSIVE && info->queueFamilyIndexCount == 0, "Wrong buffer creation parameters");
     *buffer = reinterpret_cast<VkBuffer>(9999);
     if (failingBufferOperation == "create") { return VK_ERROR_OUT_OF_DEVICE_MEMORY; }
     *buffer = reinterpret_cast<VkBuffer>(++serial);
     liveBuffers.insert(*buffer);
+    bufferUsages.emplace(*buffer, info->usage);
     return VK_SUCCESS;
 }
 VKAPI_ATTR void VKAPI_CALL destroyBuffer(VkDevice device, VkBuffer buffer, const VkAllocationCallbacks* allocator)
 {
     check(device == deviceToken && !allocator && liveBuffers.erase(buffer) == 1, "Invalid or repeated buffer destruction");
+    check(bufferUsages.erase(buffer) == 1, "Buffer usage metadata missing");
     const auto found = boundMemory.find(buffer);
     if (found != boundMemory.end())
     {
@@ -129,19 +151,22 @@ VKAPI_ATTR VkResult VKAPI_CALL allocateMemory(VkDevice device, const VkMemoryAll
 {
     const auto* dedicated = static_cast<const VkMemoryDedicatedAllocateInfo*>(info->pNext);
     check(device == deviceToken && !allocator && info->sType == VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO &&
-        info->allocationSize == 256 && info->memoryTypeIndex == 1 && dedicated &&
-        dedicated->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO && !dedicated->pNext &&
-        liveBuffers.contains(dedicated->buffer) && !dedicated->image, "Wrong memory allocation or type selection");
+        dedicated && dedicated->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO && !dedicated->pNext,
+        "Wrong dedicated allocation structure");
+    const bool depth = dedicated->image != VK_NULL_HANDLE;
+    check(depth ? info->allocationSize == 16384 && info->memoryTypeIndex == 2 && liveImages.contains(dedicated->image) && !dedicated->buffer :
+        info->allocationSize == 256 && info->memoryTypeIndex == 1 && liveBuffers.contains(dedicated->buffer), "Wrong memory allocation or type selection");
     *memory = reinterpret_cast<VkDeviceMemory>(9999);
-    if (failingBufferOperation == "allocate") { return VK_ERROR_OUT_OF_DEVICE_MEMORY; }
+    if (failingBufferOperation == "allocate" || failingDepthOperation == "allocate") { return VK_ERROR_OUT_OF_DEVICE_MEMORY; }
     *memory = reinterpret_cast<VkDeviceMemory>(++serial);
-    liveMemory.emplace(*memory, std::vector<std::byte>(256));
+    liveMemory.emplace(*memory, std::vector<std::byte>(static_cast<size_t>(info->allocationSize)));
     return VK_SUCCESS;
 }
 VKAPI_ATTR void VKAPI_CALL freeMemory(VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks* allocator)
 {
     check(device == deviceToken && !allocator && !mappedMemory.contains(memory), "Invalid free or memory still mapped");
     for (const auto& [buffer, bound] : boundMemory) { check(bound != memory, "Memory freed before buffer"); (void)buffer; }
+    for (const auto& [image, bound] : boundImages) { check(bound != memory, "Memory freed before image"); (void)image; }
     check(liveMemory.erase(memory) == 1, "Invalid/repeated memory free");
 }
 VKAPI_ATTR VkResult VKAPI_CALL bindMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize offset)
@@ -165,6 +190,77 @@ VKAPI_ATTR VkResult VKAPI_CALL mapMemory(VkDevice device, VkDeviceMemory memory,
 VKAPI_ATTR void VKAPI_CALL unmapMemory(VkDevice device, VkDeviceMemory memory)
 {
     check(device == deviceToken && mappedMemory.erase(memory) == 1, "Invalid memory unmap");
+}
+
+VKAPI_ATTR void VKAPI_CALL formatProperties(VkPhysicalDevice physical, VkFormat format, VkFormatProperties* properties)
+{
+    check(physical == reinterpret_cast<VkPhysicalDevice>(4) && (format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D16_UNORM), "Wrong depth format query");
+    *properties = {};
+    if (format == VK_FORMAT_D32_SFLOAT ? !noD32 : !noD16) { properties->optimalTilingFeatures = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT; }
+}
+VKAPI_ATTR VkResult VKAPI_CALL imageProperties(VkPhysicalDevice physical, VkFormat format, VkImageType type,
+    VkImageTiling tiling, VkImageUsageFlags usage, VkImageCreateFlags flags, VkImageFormatProperties* properties)
+{
+    check(physical == reinterpret_cast<VkPhysicalDevice>(4) && type == VK_IMAGE_TYPE_2D && tiling == VK_IMAGE_TILING_OPTIMAL &&
+        usage == VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT && flags == 0, "Wrong image capability query");
+    if (failingDepthOperation == "query") { return VK_ERROR_OUT_OF_HOST_MEMORY; }
+    if (rejectD32Image && format == VK_FORMAT_D32_SFLOAT) { return VK_ERROR_FORMAT_NOT_SUPPORTED; }
+    *properties = {maxDepthExtent, 1, 1, depthSamples, 65536};
+    return VK_SUCCESS;
+}
+VKAPI_ATTR VkResult VKAPI_CALL createImage(VkDevice device, const VkImageCreateInfo* info,
+    const VkAllocationCallbacks* allocator, VkImage* image)
+{
+    ++imageCreates;
+    check(device == deviceToken && !allocator && info->sType == VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO && !info->pNext && info->flags == 0 &&
+        info->imageType == VK_IMAGE_TYPE_2D && info->extent.width == 64 && info->extent.height == 48 && info->extent.depth == 1 &&
+        info->mipLevels == 1 && info->arrayLayers == 1 && info->samples == VK_SAMPLE_COUNT_1_BIT && info->tiling == VK_IMAGE_TILING_OPTIMAL &&
+        info->usage == VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT && info->sharingMode == VK_SHARING_MODE_EXCLUSIVE &&
+        info->queueFamilyIndexCount == 0 && info->initialLayout == VK_IMAGE_LAYOUT_UNDEFINED, "Wrong depth image creation");
+    check(info->format == VK_FORMAT_D32_SFLOAT || info->format == VK_FORMAT_D16_UNORM, "Wrong depth image format");
+    *image = reinterpret_cast<VkImage>(9999);
+    if (failingDepthOperation == "image") { return VK_ERROR_OUT_OF_DEVICE_MEMORY; }
+    *image = reinterpret_cast<VkImage>(++serial);
+    liveImages.emplace(*image, info->format);
+    return VK_SUCCESS;
+}
+VKAPI_ATTR void VKAPI_CALL destroyImage(VkDevice device, VkImage image, const VkAllocationCallbacks* allocator)
+{
+    check(device == deviceToken && !allocator, "Wrong image destruction");
+    for (const auto& [view, owner] : liveViews) { check(owner != image, "Image destroyed before view"); (void)view; }
+    check(liveImages.erase(image) == 1, "Invalid/repeated image destruction");
+    const auto memory = boundImages.find(image);
+    if (memory != boundImages.end()) { check(liveMemory.contains(memory->second), "Image memory freed too soon"); boundImages.erase(memory); }
+}
+VKAPI_ATTR void VKAPI_CALL imageRequirements(VkDevice device, VkImage image, VkMemoryRequirements* requirements)
+{
+    check(device == deviceToken && liveImages.contains(image), "Invalid image requirements");
+    *requirements = {16384, 256, depthMemoryTypeBits};
+}
+VKAPI_ATTR VkResult VKAPI_CALL bindImage(VkDevice device, VkImage image, VkDeviceMemory memory, VkDeviceSize offset)
+{
+    check(device == deviceToken && liveImages.contains(image) && liveMemory.contains(memory) && offset == 0, "Wrong image memory bind");
+    if (failingDepthOperation == "bind") { return VK_ERROR_OUT_OF_DEVICE_MEMORY; }
+    check(boundImages.emplace(image, memory).second, "Image bound twice");
+    return VK_SUCCESS;
+}
+VKAPI_ATTR VkResult VKAPI_CALL createImageView(VkDevice device, const VkImageViewCreateInfo* info,
+    const VkAllocationCallbacks* allocator, VkImageView* view)
+{
+    check(device == deviceToken && !allocator && info->sType == VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO && !info->pNext && info->flags == 0 &&
+        boundImages.contains(info->image) && info->format == liveImages.at(info->image) && info->viewType == VK_IMAGE_VIEW_TYPE_2D &&
+        info->subresourceRange.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT && info->subresourceRange.baseMipLevel == 0 &&
+        info->subresourceRange.levelCount == 1 && info->subresourceRange.baseArrayLayer == 0 && info->subresourceRange.layerCount == 1, "Wrong depth view");
+    *view = reinterpret_cast<VkImageView>(9999);
+    if (failingDepthOperation == "view") { return VK_ERROR_OUT_OF_HOST_MEMORY; }
+    *view = reinterpret_cast<VkImageView>(++serial);
+    liveViews.emplace(*view, info->image);
+    return VK_SUCCESS;
+}
+VKAPI_ATTR void VKAPI_CALL destroyImageView(VkDevice device, VkImageView view, const VkAllocationCallbacks* allocator)
+{
+    check(device == deviceToken && !allocator && liveViews.contains(view) && liveImages.contains(liveViews.at(view)), "Invalid view destruction/order");
+    liveViews.erase(view);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL createModule(VkDevice device, const VkShaderModuleCreateInfo* info,
@@ -195,7 +291,9 @@ VKAPI_ATTR VkResult VKAPI_CALL createLayout(VkDevice device, const VkPipelineLay
 {
     ++layoutCreates;
     check(device == deviceToken && allocator == nullptr && info->sType == VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO &&
-        info->pNext == nullptr && info->flags == 0 && info->setLayoutCount == 0 && info->pushConstantRangeCount == 0, "Incorrect empty pipeline layout");
+        info->pNext == nullptr && info->flags == 0 && info->setLayoutCount == 0 && info->pushConstantRangeCount == 1 &&
+        info->pPushConstantRanges[0].offset == 0 && info->pPushConstantRanges[0].size == 64 &&
+        info->pPushConstantRanges[0].stageFlags == VK_SHADER_STAGE_VERTEX_BIT, "Incorrect matrix Push Constant layout");
     *layout = reinterpret_cast<VkPipelineLayout>(9999);
     if (failingPipelineOperation == "layout") { return VK_ERROR_OUT_OF_HOST_MEMORY; }
     *layout = reinterpret_cast<VkPipelineLayout>(++serial);
@@ -220,20 +318,21 @@ VKAPI_ATTR VkResult VKAPI_CALL createPipelines(VkDevice device, VkPipelineCache 
     const auto* rendering = static_cast<const VkPipelineRenderingCreateInfo*>(info->pNext);
     check(rendering && rendering->sType == VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO && rendering->pNext == nullptr &&
         rendering->viewMask == 0 && rendering->colorAttachmentCount == 1 && *rendering->pColorAttachmentFormats == expectedFormat &&
-        rendering->depthAttachmentFormat == VK_FORMAT_UNDEFINED && rendering->stencilAttachmentFormat == VK_FORMAT_UNDEFINED, "Wrong dynamic-rendering formats");
+        rendering->depthAttachmentFormat == expectedDepthFormat && rendering->stencilAttachmentFormat == VK_FORMAT_UNDEFINED, "Wrong dynamic-rendering formats");
     const auto& input = *info->pVertexInputState;
     check(input.vertexBindingDescriptionCount == 1 && input.vertexAttributeDescriptionCount == 2 &&
-        input.pVertexBindingDescriptions[0].binding == 0 && input.pVertexBindingDescriptions[0].stride == 20 &&
+        input.pVertexBindingDescriptions[0].binding == 0 && input.pVertexBindingDescriptions[0].stride == 24 &&
         input.pVertexBindingDescriptions[0].inputRate == VK_VERTEX_INPUT_RATE_VERTEX &&
         input.pVertexAttributeDescriptions[0].location == 0 && input.pVertexAttributeDescriptions[0].binding == 0 &&
-        input.pVertexAttributeDescriptions[0].format == VK_FORMAT_R32G32_SFLOAT && input.pVertexAttributeDescriptions[0].offset == 0 &&
+        input.pVertexAttributeDescriptions[0].format == VK_FORMAT_R32G32B32_SFLOAT && input.pVertexAttributeDescriptions[0].offset == 0 &&
         input.pVertexAttributeDescriptions[1].location == 1 && input.pVertexAttributeDescriptions[1].binding == 0 &&
-        input.pVertexAttributeDescriptions[1].format == VK_FORMAT_R32G32B32_SFLOAT && input.pVertexAttributeDescriptions[1].offset == 8,
+        input.pVertexAttributeDescriptions[1].format == VK_FORMAT_R32G32B32_SFLOAT && input.pVertexAttributeDescriptions[1].offset == 12,
         "Wrong vertex buffer layout");
     check(info->pInputAssemblyState->topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST && info->pInputAssemblyState->primitiveRestartEnable == VK_FALSE &&
         info->pRasterizationState->polygonMode == VK_POLYGON_MODE_FILL && info->pRasterizationState->cullMode == VK_CULL_MODE_NONE &&
         info->pRasterizationState->lineWidth == 1.0f && info->pRasterizationState->rasterizerDiscardEnable == VK_FALSE &&
-        info->pMultisampleState->rasterizationSamples == VK_SAMPLE_COUNT_1_BIT && info->pDepthStencilState->depthTestEnable == VK_FALSE &&
+        info->pMultisampleState->rasterizationSamples == VK_SAMPLE_COUNT_1_BIT && info->pDepthStencilState->depthTestEnable == VK_TRUE &&
+        info->pDepthStencilState->depthWriteEnable == VK_TRUE && info->pDepthStencilState->depthCompareOp == VK_COMPARE_OP_LESS &&
         info->pDepthStencilState->stencilTestEnable == VK_FALSE, "Unexpected triangle fixed-function state");
     check(info->pColorBlendState->attachmentCount == 1 && info->pColorBlendState->pAttachments[0].blendEnable == VK_FALSE &&
         info->pColorBlendState->pAttachments[0].colorWriteMask == 15 && info->pDynamicState->dynamicStateCount == 2 &&
@@ -267,23 +366,49 @@ VKAPI_ATTR void VKAPI_CALL setScissor(VkCommandBuffer command, uint32_t first, u
         scissor->extent.width == expectedExtent.width && scissor->extent.height == expectedExtent.height, "Wrong dynamic scissor/order");
     recorded += 'S';
 }
-VKAPI_ATTR void VKAPI_CALL draw(VkCommandBuffer command, uint32_t vertices, uint32_t instances, uint32_t firstVertex, uint32_t firstInstance)
+VKAPI_ATTR void VKAPI_CALL drawIndexed(VkCommandBuffer command, uint32_t indices, uint32_t instances,
+    uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance)
 {
-    check(command == commandToken && recorded == "BVSG" && vertices == 3 && instances == 1 && firstVertex == 0 && firstInstance == 0, "Wrong Draw arguments/order");
+    check(command == commandToken && recorded == "BVSGIP" && indices == expectedIndexCount && instances == 1 &&
+        firstIndex == 0 && vertexOffset == 0 && firstInstance == 0, "Wrong DrawIndexed arguments/order");
     recorded += 'D';
 }
 VKAPI_ATTR void VKAPI_CALL bindVertices(VkCommandBuffer command, uint32_t first, uint32_t count,
     const VkBuffer* buffers, const VkDeviceSize* offsets)
 {
     check(command == commandToken && recorded == "BVS" && first == 0 && count == 1 && offsets[0] == 0 &&
+        buffers[0] == expectedVertices && bufferUsages.at(buffers[0]) == VK_BUFFER_USAGE_VERTEX_BUFFER_BIT &&
         liveBuffers.contains(buffers[0]) && boundMemory.contains(buffers[0]), "Wrong vertex buffer binding/order");
     recorded += 'G';
+}
+VKAPI_ATTR void VKAPI_CALL bindIndices(VkCommandBuffer command, VkBuffer buffer, VkDeviceSize offset, VkIndexType type)
+{
+    check(command == commandToken && recorded == "BVSG" && buffer == expectedIndices &&
+        bufferUsages.at(buffer) == VK_BUFFER_USAGE_INDEX_BUFFER_BIT && boundMemory.contains(buffer) &&
+        offset == 0 && type == VK_INDEX_TYPE_UINT32, "Wrong index buffer, offset, type or binding order");
+    recorded += 'I';
+}
+VKAPI_ATTR void VKAPI_CALL pushConstants(VkCommandBuffer command, VkPipelineLayout layout,
+    VkShaderStageFlags stages, uint32_t offset, uint32_t size, const void* data)
+{
+    check(command == commandToken && recorded == "BVSGI" && liveLayouts.contains(layout) &&
+        stages == VK_SHADER_STAGE_VERTEX_BIT && offset == 0 && size == 64 &&
+        std::memcmp(data, &expectedTransform, size) == 0, "Wrong matrix bytes, range, stage or recording order");
+    std::memcpy(&recordedTransform, data, size);
+    recorded += 'P';
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL deviceProc(VkDevice device, const char* name)
 {
     check(device == deviceToken, "Function lookup used wrong Device");
     if (name == missingFunction) { return nullptr; }
+    if (std::strcmp(name, "vkCreateImage") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(createImage); }
+    if (std::strcmp(name, "vkDestroyImage") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(destroyImage); }
+    if (std::strcmp(name, "vkGetImageMemoryRequirements") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(imageRequirements); }
+    if (std::strcmp(name, "vkBindImageMemory") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(bindImage); }
+    if (std::strcmp(name, "vkCreateImageView") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(createImageView); }
+    if (std::strcmp(name, "vkDestroyImageView") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(destroyImageView); }
+    if (std::strcmp(name, "vkCmdPushConstants") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(pushConstants); }
     if (std::strcmp(name, "vkCreateBuffer") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(createBuffer); }
     if (std::strcmp(name, "vkDestroyBuffer") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(destroyBuffer); }
     if (std::strcmp(name, "vkGetBufferMemoryRequirements") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(getRequirements); }
@@ -293,6 +418,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL deviceProc(VkDevice device, const char*
     if (std::strcmp(name, "vkMapMemory") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(mapMemory); }
     if (std::strcmp(name, "vkUnmapMemory") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(unmapMemory); }
     if (std::strcmp(name, "vkCmdBindVertexBuffers") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(bindVertices); }
+    if (std::strcmp(name, "vkCmdBindIndexBuffer") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(bindIndices); }
     if (std::strcmp(name, "vkCreateShaderModule") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(createModule); }
     if (std::strcmp(name, "vkDestroyShaderModule") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(destroyModule); }
     if (std::strcmp(name, "vkDeviceWaitIdle") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(waitIdle); }
@@ -304,7 +430,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL deviceProc(VkDevice device, const char*
     if (std::strcmp(name, "vkCmdBindPipeline") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(bindPipeline); }
     if (std::strcmp(name, "vkCmdSetViewport") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(setViewport); }
     if (std::strcmp(name, "vkCmdSetScissor") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(setScissor); }
-    if (std::strcmp(name, "vkCmdDraw") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(draw); }
+    if (std::strcmp(name, "vkCmdDrawIndexed") == 0) { return reinterpret_cast<PFN_vkVoidFunction>(drawIndexed); }
     throw std::runtime_error("Unexpected device function lookup");
 }
 
@@ -315,6 +441,7 @@ madcat::rhi::PhysicalDeviceCandidate candidate()
     device.instance = instanceToken;
     device.handle = reinterpret_cast<VkPhysicalDevice>(4);
     device.properties.apiVersion = VK_API_VERSION_1_3;
+    device.properties.limits.maxDrawIndexedIndexValue = UINT32_MAX;
     device.features.dynamicRendering = device.features.synchronization2 = {true, true};
     device.queueFamilies = {{VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, 1}};
     VkExtensionProperties extension{};
@@ -500,6 +627,147 @@ void bufferChecks()
     ++cases;
 }
 
+void indexBufferChecks()
+{
+    using madcat::rhi::createIndexBuffer;
+    using madcat::rhi::detail::BufferAccess;
+    madcat::rhi::VulkanDevice device;
+    const auto input = candidate();
+    check(!createIndexBuffer(device, geometryIndices), "Index upload accepted an uninitialized Device");
+    ++cases;
+    check(device.initialize({&input, 1}), "Index mock Device failed");
+    const auto beforeEmpty = bufferCreates;
+    check(!createIndexBuffer(device, {}) && bufferCreates == beforeEmpty, "Empty indices reached Vulkan");
+    ++cases;
+    const uint32_t excessive[] = {0, 1, 0x01000000};
+    check(!createIndexBuffer(device, excessive) && bufferCreates == beforeEmpty, "Disabled fullDrawIndexUint32 range accepted");
+    ++cases;
+    {
+        auto limitedInput = candidate();
+        limitedInput.device.properties.limits.maxDrawIndexedIndexValue = 1;
+        madcat::rhi::VulkanDevice limited;
+        check(limited.initialize({&limitedInput, 1}) && !createIndexBuffer(limited, geometryIndices) && bufferCreates == beforeEmpty,
+            "Queried draw index limit ignored");
+        ++cases;
+    }
+    for (const auto* name : {"vkGetPhysicalDeviceMemoryProperties", "vkGetDeviceProcAddr", "vkCreateBuffer", "vkDestroyBuffer",
+        "vkGetBufferMemoryRequirements", "vkAllocateMemory", "vkFreeMemory", "vkBindBufferMemory", "vkMapMemory", "vkUnmapMemory"})
+    {
+        missingFunction = name;
+        const auto before = bufferCreates;
+        check(!createIndexBuffer(device, geometryIndices) && bufferCreates == before && liveBuffers.empty() && liveMemory.empty(),
+            "Missing index upload function acquired resources");
+        ++cases;
+    }
+    missingFunction = {};
+    memoryTypeBits = 4;
+    check(!createIndexBuffer(device, geometryIndices) && liveBuffers.empty() && liveMemory.empty(), "Index upload ignored memoryTypeBits");
+    ++cases;
+    memoryTypeBits = 2;
+    noCoherentMemory = true;
+    check(!createIndexBuffer(device, geometryIndices) && liveBuffers.empty() && liveMemory.empty(), "Index upload accepted noncoherent memory");
+    ++cases;
+    noCoherentMemory = false;
+    for (const auto* operation : {"create", "allocate", "bind", "map"})
+    {
+        failingBufferOperation = operation;
+        check(!createIndexBuffer(device, geometryIndices) && liveBuffers.empty() && liveMemory.empty() && mappedMemory.empty(),
+            "Index upload failure leaked resources");
+        failingBufferOperation = {};
+        auto retry = createIndexBuffer(device, geometryIndices);
+        check(static_cast<bool>(retry), "Index retry failed");
+        ++cases;
+    }
+    auto source = std::to_array(geometryIndices);
+    auto uploaded = createIndexBuffer(device, source);
+    check(uploaded && uploaded.sizeBytes() == sizeof(geometryIndices) && BufferAccess::maximumIndex(uploaded) == 2 &&
+        BufferAccess::usage(uploaded) == VK_BUFFER_USAGE_INDEX_BUFFER_BIT && mappedMemory.empty(), "Index metadata invalid or still mapped");
+    const auto native = BufferAccess::handle(uploaded);
+    source.fill(0);
+    check(std::memcmp(liveMemory.at(boundMemory.at(native)).data(), geometryIndices, sizeof(geometryIndices)) == 0,
+        "Index upload did not copy the source");
+    auto frame = uploaded;
+    auto moved = std::move(uploaded);
+    check(!uploaded && frame && liveBuffers.contains(native), "Index move invalidated shared data");
+    moved = {};
+    check(liveBuffers.contains(native), "Index released before frame reference");
+    frame = {};
+    check(liveBuffers.empty() && liveMemory.empty() && bufferUsages.empty(), "Index last release leaked data");
+    ++cases;
+}
+
+void depthChecks()
+{
+    using madcat::rhi::TextureRef;
+    using madcat::rhi::createDepthTexture;
+    using madcat::rhi::detail::TextureAccess;
+    const auto clean = [] { return liveImages.empty() && liveViews.empty() && boundImages.empty() && liveMemory.empty(); };
+    TextureRef empty;
+    check(!empty && empty.width() == 0 && empty.height() == 0 && !TextureAccess::image(empty) &&
+        !TextureAccess::view(empty) && TextureAccess::format(empty) == VK_FORMAT_UNDEFINED, "Empty texture has data");
+    madcat::rhi::VulkanDevice device;
+    check(!createDepthTexture(device, 64, 48), "Uninitialized Device accepted");
+    ++cases;
+    const auto input = candidate();
+    check(device.initialize({&input, 1}), "Mock setup failed");
+    check(!createDepthTexture(device, 0, 48) && !createDepthTexture(device, 64, 0) && imageCreates == 0, "Zero extent reached Vulkan");
+    ++cases;
+    for (const auto* name : {"vkGetPhysicalDeviceFormatProperties", "vkGetPhysicalDeviceImageFormatProperties", "vkGetPhysicalDeviceMemoryProperties",
+        "vkGetDeviceProcAddr", "vkCreateImage", "vkDestroyImage", "vkGetImageMemoryRequirements", "vkAllocateMemory", "vkFreeMemory",
+        "vkBindImageMemory", "vkCreateImageView", "vkDestroyImageView"})
+    {
+        missingFunction = name;
+        const auto before = imageCreates;
+        check(!createDepthTexture(device, 64, 48) && clean() && imageCreates == before, "Missing function acquired depth objects");
+        ++cases;
+    }
+    missingFunction = {};
+    for (const auto rejectByFeature : {true, false})
+    {
+        noD32 = rejectByFeature;
+        rejectD32Image = !rejectByFeature;
+        auto fallback = createDepthTexture(device, 64, 48);
+        check(fallback && TextureAccess::format(fallback) == VK_FORMAT_D16_UNORM, "D16 fallback failed");
+        ++cases;
+    }
+    noD32 = rejectD32Image = false;
+    noD32 = noD16 = true;
+    check(!createDepthTexture(device, 64, 48) && clean(), "Unsupported formats accepted");
+    ++cases;
+    noD32 = noD16 = false;
+    check(!createDepthTexture(device, 4097, 48) && clean(), "Extent limits ignored");
+    ++cases;
+    depthSamples = VK_SAMPLE_COUNT_4_BIT;
+    check(!createDepthTexture(device, 64, 48) && clean(), "Unsupported sample count accepted");
+    ++cases;
+    depthSamples = VK_SAMPLE_COUNT_1_BIT;
+    depthMemoryTypeBits = 2;
+    check(!createDepthTexture(device, 64, 48) && clean(), "Depth memoryTypeBits ignored");
+    ++cases;
+    depthMemoryTypeBits = 4;
+    for (const auto* operation : {"query", "image", "allocate", "bind", "view"})
+    {
+        failingDepthOperation = operation;
+        check(!createDepthTexture(device, 64, 48) && clean(), "Depth failure leaked partial resources");
+        failingDepthOperation = {};
+        auto retry = createDepthTexture(device, 64, 48);
+        check(retry && retry.width() == 64 && retry.height() == 48 && TextureAccess::format(retry) == VK_FORMAT_D32_SFLOAT,
+            "Depth creation retry failed");
+        ++cases;
+    }
+    check(clean(), "Retry resource leak");
+    auto owner = createDepthTexture(device, 64, 48);
+    const auto image = TextureAccess::image(owner);
+    auto copy = owner;
+    auto moved = std::move(owner);
+    check(!owner && owner.width() == 0 && liveImages.size() == 1, "Texture move copied allocation");
+    moved = {};
+    check(copy && liveImages.contains(image) && liveViews.size() == 1, "Texture reference released too soon");
+    copy = {};
+    check(clean(), "Last reference did not release view/image/memory");
+    ++cases;
+}
+
 void triangleChecks(const std::filesystem::path& root)
 {
     using madcat::rhi::VulkanTrianglePipeline;
@@ -508,33 +776,36 @@ void triangleChecks(const std::filesystem::path& root)
     writeWords(file, fixture);
     madcat::rhi::VulkanDevice device;
     madcat::rhi::VulkanShaderModule vertex, fragment, empty;
-    madcat::rhi::BufferRef vertices;
+    madcat::rhi::BufferRef vertices, indices;
     {
         VulkanTrianglePipeline pipeline;
-        check(!pipeline.initialize(device, expectedFormat, vertex, fragment, vertices), "Uninitialized Device accepted");
-        check(!pipeline.recordDraw(commandToken, {640, 480}), "Uninitialized pipeline recorded Draw");
+        check(!pipeline.initialize(device, expectedFormat, vertex, fragment, vertices, indices, expectedDepthFormat), "Uninitialized Device accepted");
+        check(!pipeline.recordDraw(commandToken, {640, 480}, expectedTransform), "Uninitialized pipeline recorded Draw");
         cases += 2;
     }
     const auto input = candidate();
     check(device.initialize({&input, 1}) && vertex.initialize(device, file) && fragment.initialize(device, file), "Mock setup failed");
     vertices = madcat::rhi::createVertexBuffer(device, std::as_bytes(std::span(geometry)));
-    check(static_cast<bool>(vertices), "Mock upload failed");
+    indices = madcat::rhi::createIndexBuffer(device, geometryIndices);
+    check(vertices && indices, "Mock upload failed");
+    expectedVertices = madcat::rhi::detail::BufferAccess::handle(vertices);
+    expectedIndices = madcat::rhi::detail::BufferAccess::handle(indices);
     expectedVertex = vertex.handle();
     expectedFragment = fragment.handle();
     for (int invalid = 0; invalid < 3; ++invalid)
     {
         VulkanTrianglePipeline pipeline;
         check(!pipeline.initialize(device, invalid == 2 ? VK_FORMAT_UNDEFINED : expectedFormat,
-            invalid == 0 ? empty : vertex, invalid == 1 ? empty : fragment, vertices), "Invalid module/format accepted");
+            invalid == 0 ? empty : vertex, invalid == 1 ? empty : fragment, vertices, indices, expectedDepthFormat), "Invalid module/format accepted");
         check(layoutCreates == 0, "Invalid input reached Vulkan");
         ++cases;
     }
     for (const auto* name : {"vkGetDeviceProcAddr", "vkCreatePipelineLayout", "vkDestroyPipelineLayout", "vkCreateGraphicsPipelines",
-        "vkDestroyPipeline", "vkCmdBindPipeline", "vkCmdSetViewport", "vkCmdSetScissor", "vkCmdDraw", "vkCmdBindVertexBuffers"})
+        "vkDestroyPipeline", "vkCmdBindPipeline", "vkCmdSetViewport", "vkCmdSetScissor", "vkCmdDrawIndexed", "vkCmdBindVertexBuffers", "vkCmdBindIndexBuffer", "vkCmdPushConstants"})
     {
         missingFunction = name;
         VulkanTrianglePipeline pipeline;
-        check(!pipeline.initialize(device, expectedFormat, vertex, fragment, vertices) && pipeline.handle() == VK_NULL_HANDLE &&
+        check(!pipeline.initialize(device, expectedFormat, vertex, fragment, vertices, indices, expectedDepthFormat) && pipeline.handle() == VK_NULL_HANDLE &&
             pipeline.deviceHandle() == VK_NULL_HANDLE && pipeline.colorFormat() == VK_FORMAT_UNDEFINED && layoutCreates == 0, "Missing function acquired pipeline resources");
         ++cases;
     }
@@ -544,34 +815,51 @@ void triangleChecks(const std::filesystem::path& root)
         {
             VulkanTrianglePipeline pipeline;
             failingPipelineOperation = operation;
-            check(!pipeline.initialize(device, expectedFormat, vertex, fragment, vertices) && pipeline.handle() == VK_NULL_HANDLE &&
+            check(!pipeline.initialize(device, expectedFormat, vertex, fragment, vertices, indices, expectedDepthFormat) && pipeline.handle() == VK_NULL_HANDLE &&
                 liveLayouts.empty() && livePipelines.empty(), "Failed creation leaked a pipeline/layout");
             ++cases;
             failingPipelineOperation = {};
-            check(pipeline.initialize(device, expectedFormat, vertex, fragment, vertices), "Pipeline creation retry failed");
+            check(pipeline.initialize(device, expectedFormat, vertex, fragment, vertices, indices, expectedDepthFormat), "Pipeline creation retry failed");
             const auto handle = pipeline.handle();
             const auto before = pipelineCreates;
-            check(pipeline.deviceHandle() == device.handle() && pipeline.colorFormat() == expectedFormat &&
-                !pipeline.initialize(device, expectedFormat, vertex, fragment, vertices) && pipeline.handle() == handle && pipelineCreates == before, "Repeated creation changed live pipeline");
+            check(pipeline.deviceHandle() == device.handle() && pipeline.colorFormat() == expectedFormat && pipeline.depthFormat() == expectedDepthFormat &&
+                !pipeline.initialize(device, expectedFormat, vertex, fragment, vertices, indices, expectedDepthFormat) && pipeline.handle() == handle && pipelineCreates == before, "Repeated creation changed live pipeline");
             ++cases;
             for (VkExtent2D extent : {VkExtent2D{640, 480}, VkExtent2D{937, 611}})
             {
                 recorded.clear();
                 expectedExtent = extent;
-                check(pipeline.recordDraw(commandToken, extent) && recorded == "BVSGD", "Wrong recording sequence");
+                for (size_t index = 0; index < expectedTransform.clipFromLocal.size(); ++index)
+                {
+                    expectedTransform.clipFromLocal[index] = static_cast<float>(index) + static_cast<float>(extent.width) / 1000.0f;
+                }
+                auto inputTransform = expectedTransform;
+                check(pipeline.recordDraw(commandToken, extent, inputTransform) && recorded == "BVSGIPD", "Wrong recording sequence");
+                inputTransform.clipFromLocal.fill(-1);
+                check(recordedTransform.clipFromLocal == expectedTransform.clipFromLocal, "Recorded constants depend on mutable CPU data");
                 ++cases;
             }
             recorded.clear();
-            check(!pipeline.recordDraw(VK_NULL_HANDLE, {640, 480}) && !pipeline.recordDraw(commandToken, {0, 480}) &&
-                !pipeline.recordDraw(commandToken, {640, 0}) && recorded.empty(), "Invalid recording input reached Vulkan");
+            check(!pipeline.recordDraw(VK_NULL_HANDLE, {640, 480}, expectedTransform) &&
+                !pipeline.recordDraw(commandToken, {0, 480}, expectedTransform) &&
+                !pipeline.recordDraw(commandToken, {640, 0}, expectedTransform) && recorded.empty(), "Invalid recording input reached Vulkan");
             ++cases;
+            for (const auto value : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()})
+            {
+                auto invalid = expectedTransform;
+                invalid.clipFromLocal[7] = value;
+                check(!pipeline.recordDraw(commandToken, {640, 480}, invalid) && recorded.empty(), "Nonfinite matrix reached Vulkan");
+                ++cases;
+            }
         }
         check(livePipelines.empty() && liveLayouts.empty(), "Pipeline/layout destruction leaked resources");
     }
     expectedFormat = VK_FORMAT_R8G8B8A8_UNORM;
+    expectedDepthFormat = VK_FORMAT_D16_UNORM;
     {
         VulkanTrianglePipeline pipeline;
-        check(pipeline.initialize(device, expectedFormat, vertex, fragment, vertices) && pipeline.colorFormat() == expectedFormat, "New color format was not used during rebuild");
+        check(pipeline.initialize(device, expectedFormat, vertex, fragment, vertices, indices, expectedDepthFormat) &&
+            pipeline.colorFormat() == expectedFormat && pipeline.depthFormat() == expectedDepthFormat, "New color/depth format was not used during rebuild");
         ++cases;
     }
     check(livePipelines.empty() && liveLayouts.empty(), "Rebuilt format leaked resources");
@@ -579,24 +867,78 @@ void triangleChecks(const std::filesystem::path& root)
     {
         VulkanTrianglePipeline pipeline;
         const auto before = layoutCreates;
-        check(!pipeline.initialize(device, expectedFormat, vertex, fragment, invalid) && layoutCreates == before, "Invalid geometry accepted");
+        check(!pipeline.initialize(device, expectedFormat, vertex, fragment, invalid, indices, expectedDepthFormat) && layoutCreates == before, "Invalid geometry accepted");
         ++cases;
     }
-    madcat::rhi::BufferRef frameReference;
+    // Reject malformed geometry before any pipeline objects or commands exist.
+    const uint32_t outOfRange[] = {0, 1, 3};
+    const uint32_t restart[] = {0, 1, UINT32_MAX};
+    const uint32_t incomplete[] = {0, 1};
+    for (const auto& invalid : {madcat::rhi::BufferRef{}, vertices,
+        madcat::rhi::createIndexBuffer(device, outOfRange), madcat::rhi::createIndexBuffer(device, restart),
+        madcat::rhi::createIndexBuffer(device, incomplete)})
+    {
+        VulkanTrianglePipeline pipeline;
+        const auto before = layoutCreates;
+        check(!pipeline.initialize(device, expectedFormat, vertex, fragment, vertices, invalid, expectedDepthFormat) &&
+            layoutCreates == before && !pipeline.indexBuffer() && pipeline.indexCount() == 0, "Invalid indices acquired a pipeline");
+        ++cases;
+    }
+    for (const auto& invalid : {indices, madcat::rhi::createVertexBuffer(device, std::as_bytes(std::span(geometry)).first(sizeof(geometry) - 1))})
+    {
+        VulkanTrianglePipeline pipeline;
+        const auto before = layoutCreates;
+        check(!pipeline.initialize(device, expectedFormat, vertex, fragment, invalid, indices, expectedDepthFormat) &&
+            layoutCreates == before, "Wrong vertex usage/stride acquired a pipeline");
+        ++cases;
+    }
+    // Accept a different vertex count and index count; DrawIndexed uses the
+    // actual uploaded count rather than the old hard-coded three vertices.
+    {
+        const madcat::rhi::ColoredVertex quad[] = {geometry[0], geometry[1], geometry[2], geometry[0]};
+        const uint32_t otherIndices[] = {3, 2, 1};
+        auto otherVertices = madcat::rhi::createVertexBuffer(device, std::as_bytes(std::span(quad)));
+        auto other = madcat::rhi::createIndexBuffer(device, otherIndices);
+        expectedVertices = madcat::rhi::detail::BufferAccess::handle(otherVertices);
+        expectedIndices = madcat::rhi::detail::BufferAccess::handle(other);
+        expectedIndexCount = 3;
+        VulkanTrianglePipeline pipeline;
+        check(pipeline.initialize(device, expectedFormat, vertex, fragment, otherVertices, other, expectedDepthFormat) &&
+            pipeline.indexCount() == 3, "Variable vertex/index count rejected");
+        recorded.clear();
+        check(pipeline.recordDraw(commandToken, expectedExtent, expectedTransform) && recorded == "BVSGIPD", "Variable count DrawIndexed failed");
+        ++cases;
+    }
+    madcat::rhi::BufferRef frameReference, indexFrameReference;
     VkBuffer retained = VK_NULL_HANDLE;
+    VkBuffer retainedIndices = VK_NULL_HANDLE;
     {
         auto uploaded = madcat::rhi::createVertexBuffer(device, std::as_bytes(std::span(geometry)));
         retained = madcat::rhi::detail::BufferAccess::handle(uploaded);
+        auto indexUpload = madcat::rhi::createIndexBuffer(device, geometryIndices);
+        retainedIndices = madcat::rhi::detail::BufferAccess::handle(indexUpload);
         VulkanTrianglePipeline pipeline;
-        check(pipeline.initialize(device, expectedFormat, vertex, fragment, uploaded), "Retention setup failed");
+        check(pipeline.initialize(device, expectedFormat, vertex, fragment, uploaded, indexUpload, expectedDepthFormat), "Retention setup failed");
         uploaded = {};
-        check(liveBuffers.contains(retained), "Pipeline failed to retain vertices");
+        indexUpload = {};
+        check(liveBuffers.contains(retained) && liveBuffers.contains(retainedIndices), "Pipeline failed to retain geometry");
         frameReference = pipeline.vertexBuffer();
+        indexFrameReference = pipeline.indexBuffer();
     }
-    check(liveBuffers.contains(retained), "Frame reference failed to outlive pipeline");
+    check(liveBuffers.contains(retained) && liveBuffers.contains(retainedIndices), "Frame references failed to outlive pipeline");
     frameReference = {};
-    check(!liveBuffers.contains(retained), "Frame reference leaked buffer");
+    check(liveBuffers.contains(retainedIndices), "Vertex release also released indices");
+    indexFrameReference = {};
+    check(!liveBuffers.contains(retained) && !liveBuffers.contains(retainedIndices), "Frame references leaked geometry");
     ++cases;
+    for (const auto invalidDepth : {VK_FORMAT_UNDEFINED, VK_FORMAT_R8_UNORM})
+    {
+        VulkanTrianglePipeline pipeline;
+        const auto before = layoutCreates;
+        check(!pipeline.initialize(device, expectedFormat, vertex, fragment, vertices, indices, invalidDepth) && layoutCreates == before,
+            "Invalid depth format acquired pipeline objects");
+        ++cases;
+    }
 }
 }
 
@@ -606,6 +948,8 @@ GLFWAPI GLFWvkproc glfwGetInstanceProcAddress(VkInstance instance, const char* n
 {
     if (instance != instanceToken) { std::fprintf(stderr, "Wrong Instance for lookup.\n"); std::abort(); }
     if (name == missingFunction) { return nullptr; }
+    if (std::strcmp(name, "vkGetPhysicalDeviceFormatProperties") == 0) { return reinterpret_cast<GLFWvkproc>(formatProperties); }
+    if (std::strcmp(name, "vkGetPhysicalDeviceImageFormatProperties") == 0) { return reinterpret_cast<GLFWvkproc>(imageProperties); }
     if (std::strcmp(name, "vkGetPhysicalDeviceMemoryProperties") == 0) { return reinterpret_cast<GLFWvkproc>(memoryProperties); }
     if (std::strcmp(name, "vkGetDeviceProcAddr") == 0) { return reinterpret_cast<GLFWvkproc>(deviceProc); }
     if (std::strcmp(name, "vkCreateDevice") == 0) { return reinterpret_cast<GLFWvkproc>(createDevice); }
@@ -618,13 +962,19 @@ int main(int argc, char** argv)
 {
     try
     {
-        check(argc == 2 || (argc == 3 && (std::string_view(argv[2]) == "triangle" || std::string_view(argv[2]) == "buffer")),
-            "Expected output directory and optional triangle/buffer mode");
+        check(argc == 2 || (argc == 3 && (std::string_view(argv[2]) == "triangle" || std::string_view(argv[2]) == "buffer" || std::string_view(argv[2]) == "depth")),
+            "Expected output directory and optional triangle/buffer/depth mode");
         const auto root = std::filesystem::absolute(std::filesystem::path(argv[1]));
         std::filesystem::create_directories(root);
-        if (argc == 3 && std::string_view(argv[2]) == "buffer")
+        if (argc == 3 && std::string_view(argv[2]) == "depth")
+        {
+            depthChecks();
+            std::printf("Depth texture checks: %d cases passed (mocked Vulkan).\n", cases);
+        }
+        else if (argc == 3 && std::string_view(argv[2]) == "buffer")
         {
             bufferChecks();
+            indexBufferChecks();
             std::printf("Buffer checks: %d cases passed (mocked Vulkan).\n", cases);
         }
         else if (argc == 3)

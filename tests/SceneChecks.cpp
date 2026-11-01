@@ -65,6 +65,62 @@ void identityAndHandles()
     check(!scene.setParent(replacement, entity), "Old parent accepted");
 }
 
+void explicitLocalMatrices()
+{
+    Scene scene;
+    const auto parent = scene.create(), child = scene.create();
+    check(scene.setParent(child, parent) && scene.setLocalTransform(parent, translated(10)), "Matrix hierarchy setup failed");
+    glm::mat4 local(1);
+    local[0][0] = -2; local[1][0] = .5f; local[2][2] = 0;
+    local[3] = {1, 2, 3, 1};
+    check(scene.setLocalMatrix(child, local) && !scene.localTransform(child), "Explicit matrix was decomposed to TRS");
+    auto snapshot = scene.localMatrix(child);
+    check(snapshot.has_value() && scene.updateWorldTransforms(), "Explicit matrix update failed");
+    point(scene, child, {1, 2, 4}, {10, 4, 3});
+    const auto other = scene.create();
+    check(scene.setParent(child, other) && scene.updateWorldTransforms(), "Matrix reparent failed");
+    point(scene, child, {1, 2, 4}, {0, 4, 3});
+    check(scene.setLocalTransform(child, translated(4)) && scene.localTransform(child), "TRS replacement failed");
+    near((*snapshot)[1][0], .5f);
+    near((*scene.localMatrix(child))[3][0], 4);
+    check(scene.updateWorldTransforms(), "TRS replacement world failed");
+    point(scene, child, {1, 2, 4}, {5, 2, 4});
+    check(scene.add<Value>(child, 1) != nullptr, "Matrix query component failed");
+    scene.each<Value>([&](Entity entity, Value&)
+    {
+        check(scene.isIterating() && scene.setLocalMatrix(entity, local), "Matrix field edit rejected during query");
+        check(!scene.updateWorldTransforms(), "World update allowed in query");
+    });
+    check(!scene.isIterating() && !scene.worldTransformsCurrent() && scene.updateWorldTransforms(), "Matrix query guard failed");
+    point(scene, child, {1, 2, 4}, {0, 4, 3});
+}
+
+void invalidLocalMatrices()
+{
+    Scene scene;
+    const auto entity = scene.create();
+    check(scene.setLocalTransform(entity, translated(7)) && scene.updateWorldTransforms(), "Invalid matrix setup failed");
+    for (int column = 0; column < 4; ++column)
+    {
+        for (int row = 0; row < 4; ++row)
+        {
+            auto local = glm::mat4(1);
+            local[column][row] = std::numeric_limits<float>::quiet_NaN();
+            check(!scene.setLocalMatrix(entity, local), "Nonfinite matrix accepted");
+        }
+    }
+    for (int column = 0; column < 4; ++column)
+    {
+        auto local = glm::mat4(1);
+        local[column][3] = column == 3 ? 2.0f : .1f;
+        check(!scene.setLocalMatrix(entity, local), "Projective matrix accepted");
+    }
+    check(scene.worldTransformsCurrent() && scene.localTransform(entity), "Rejected matrix changed state");
+    point(scene, entity, {0, 0, 0}, {7, 0, 0});
+    check(!scene.setLocalMatrix({}, glm::mat4(1)) && !scene.localMatrix({}), "Invalid matrix handle accepted");
+    check(scene.destroy(entity) && !scene.setLocalMatrix(entity, glm::mat4(1)) && !scene.localMatrix(entity), "Stale matrix handle accepted");
+}
+
 void localTRS()
 {
     Scene scene;
@@ -329,6 +385,7 @@ int main()
 {
     const struct { const char* name; void (*run)(); } cases[] = {
         {"identity, invalid handles and reuse", identityAndHandles}, {"local TRS conventions", localTRS},
+        {"explicit affine matrices, replacement and query edits", explicitLocalMatrices}, {"invalid local matrices preserve state", invalidLocalMatrices},
         {"parent-first inheritance and edits", inheritedTransforms}, {"nonuniform scale shear", shearPreserved},
         {"cycle and invalid parent rejection", cycleAndInvalidParentRejection}, {"reparent and detach", reparentAndDetach},
         {"leaf/subtree deletion and resources", deletionPolicies}, {"invalid transforms and quaternion normalization", invalidTransformInputs},

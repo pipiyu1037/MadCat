@@ -1,7 +1,11 @@
 #pragma once
 
+#include "RHI/DrawTransform.h"
+#include "RHI/Texture.h"
+
 #include <array>
 #include <memory>
+#include <span>
 
 namespace madcat::rhi
 {
@@ -19,7 +23,8 @@ enum class ClearFrameResult
 
 // Minimal Vulkan backend exercise, to be replaced by Pass/Render Graph execution
 // as those mechanisms arrive. Borrows Device, Swapchain and optional triangle
-// pipeline, which must outlive it. It waits for GPU completion before releasing
+// pipeline, which must outlive it. Retains the matching depth texture and waits
+// for GPU completion before releasing
 // recorded commands, allowing the caller to destroy the pipeline afterwards.
 // Single-threaded use; owns one frame of command and synchronization resources.
 class VulkanClearRenderer
@@ -36,11 +41,11 @@ public:
     // Requires enabled EXT present fences. Failure releases partial resources
     // and permits retry; repeated successful initialization is rejected.
     [[nodiscard]] bool initialize(const VulkanDevice& device, const VulkanSwapchain& swapchain,
-        const VulkanTrianglePipeline* triangle = nullptr);
-    // Linear RGBA background, with the optional triangle drawn over it.
+        TextureRef depth, const VulkanTrianglePipeline* triangle = nullptr);
+    // Clears color and depth (1.0), then draws the supplied matrix snapshots.
     // Retry means no image acquired (finite acquire timeout).
     // Unavailable/Failed are terminal: no further acquire or submit until rebuilt.
-    [[nodiscard]] ClearFrameResult draw(const std::array<float, 4>& color);
+    [[nodiscard]] ClearFrameResult draw(const std::array<float, 4>& color, std::span<const DrawTransform> transforms);
     // Waits for acquisition, command submission and present-resource retirement.
     // Also called on destruction, before releasing views or synchronization.
     [[nodiscard]] bool waitIdle();

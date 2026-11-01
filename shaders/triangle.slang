@@ -1,3 +1,9 @@
+struct DrawTransform
+{
+    column_major float4x4 clipFromLocal;
+};
+[[vk::push_constant]] ConstantBuffer<DrawTransform> drawTransform;
+
 struct VertexOutput
 {
     float4 position : SV_Position;
@@ -5,10 +11,10 @@ struct VertexOutput
 };
 
 [shader("vertex")]
-VertexOutput vertexMain(float2 position : POSITION, float3 color : COLOR0)
+VertexOutput vertexMain(float3 position : POSITION, float3 color : COLOR0)
 {
     VertexOutput output;
-    output.position = float4(position, 0.0, 1.0);
+    output.position = mul(drawTransform.clipFromLocal, float4(position, 1.0));
     output.color = color;
     return output;
 }
