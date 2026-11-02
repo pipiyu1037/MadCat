@@ -90,6 +90,7 @@ function Convert-Srgb([double]$Value) {
     return [int][Math]::Round(255 * $encoded)
 }
 $referencePose = 0
+$script:modelDeleted = @($false, $false)
 function Rotate-Y([double[]]$Vector, [double]$Degrees) {
     $angle = $Degrees * [Math]::PI / 180
     return @(([Math]::Cos($angle) * $Vector[0] + [Math]::Sin($angle) * $Vector[2]), $Vector[1],
@@ -174,6 +175,11 @@ function Select-Pose([int]$Pose) {
         return $entries.Count -gt $before -and [int]$entries[$entries.Count - 1].Groups[1].Value -eq ($Pose + 1)
     } 'Scene pose presentation'
     $script:referencePose = $Pose
+    if ($hasModel) {
+        if ($Pose -eq 3) { $script:modelDeleted[0] = $true }
+        if ($Pose -eq 4) { $script:modelDeleted[1] = $true }
+        if ($Pose -eq 5) { $script:modelDeleted = @($false, $false) }
+    }
 }
 function Check-Pixels([string]$Label) {
     # Wait for restore/compositor animation before sampling physical screen pixels.
@@ -260,8 +266,17 @@ try {
     } elseif ($Scenario -eq 'model') {
         Select-Pose 1
         Check-Pixels 'model-parent'
+        Select-Pose 7
+        Check-Pixels 'second-parent'
         Select-Pose 2
         Check-Pixels 'camera-parent'
+        Select-Pose 0; Check-Pixels 'default-again'
+        Select-Pose 3; Check-Pixels 'delete-first'
+        Select-Pose 4; Check-Pixels 'empty'
+        Select-Pose 5; Check-Pixels 'respawn'
+        Select-Pose 6; Check-Pixels 'reverse'
+        if ((Get-FileHash (Join-Path $outputRoot "$name-respawn.png")).Hash -ne
+            (Get-FileHash (Join-Path $outputRoot "$name-reverse.png")).Hash) { throw 'Reverse draw order changed opaque image' }
         Resize-To 800 580 'model-resized'
         $before = Get-ReadyCount
         [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 6)
@@ -337,12 +352,19 @@ try {
         $log -notmatch '(?s)Triangle pipeline destroyed.*Swapchain destroyed.*Shader Module destroyed.*Shader Module destroyed.*Device destroyed.*Surface destroyed.*Instance destroyed') { throw 'Module/Device destruction count or order mismatch' }
     $vertexBytes = 96; $indexBytes = 36; $indexCount = 9
     if ($hasModel) {
-        $preview = [regex]::Match($log, 'glTF preview ready; (\d+) node instances, (\d+) primitives, (\d+) vertices, (\d+) indices\.')
+        $preview = [regex]::Match($log, 'shared model geometry ready; (\d+) primitives, (\d+) vertices, (\d+) indices; (\d+) initial draws\.')
         if (-not $preview.Success) { throw 'Missing model preparation statistics' }
-        if ($referenceModel -and $preview.Value -ne 'glTF preview ready; 2 node instances, 4 primitives, 12 vertices, 12 indices.') { throw 'Active glTF geometry count mismatch' }
-        $vertexBytes = 24 * [int]$preview.Groups[3].Value
-        $indexCount = [int]$preview.Groups[4].Value
+        if ($referenceModel -and $preview.Value -ne 'shared model geometry ready; 2 primitives, 6 vertices, 6 indices; 8 initial draws.') { throw 'Shared glTF geometry count mismatch' }
+        $vertexBytes = 24 * [int]$preview.Groups[2].Value
+        $indexCount = [int]$preview.Groups[3].Value
         $indexBytes = 4 * $indexCount
+        if ($Scenario -eq 'model') {
+            $initialDraws = [int]$preview.Groups[4].Value
+            $halfDraws = $initialDraws / 2
+            if ($log -notmatch "model instances presented; pose 4, $halfDraws draws" -or
+                $log -notmatch 'model instances presented; pose 5, 0 draws' -or
+                $log -notmatch "model instances presented; pose 6, $initialDraws draws") { throw 'Instance deletion/restoration draw count mismatch' }
+        }
     }
     if ([regex]::Matches($log, "Vertex buffer uploaded; $vertexBytes bytes, coherent memory type").Count -ne 1 -or
         [regex]::Matches($log, 'Vertex buffer destroyed\.').Count -ne 1 -or

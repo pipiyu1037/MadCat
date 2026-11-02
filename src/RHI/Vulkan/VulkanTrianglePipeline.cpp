@@ -201,12 +201,23 @@ uint32_t VulkanTrianglePipeline::indexCount() const { return state_ ? state_->in
 
 bool VulkanTrianglePipeline::recordDraw(VkCommandBuffer commandBuffer, VkExtent2D extent, const DrawTransform& transform) const
 {
+    return recordIndexedDraw(commandBuffer, extent, {transform, 0, indexCount()});
+}
+
+bool VulkanTrianglePipeline::recordIndexedDraw(VkCommandBuffer commandBuffer, VkExtent2D extent, const IndexedDraw& draw) const
+{
     if (!state_ || !commandBuffer || extent.width == 0 || extent.height == 0)
     {
         std::fprintf(stderr, "Vulkan error: triangle Draw requires an initialized pipeline, recording command buffer and nonzero extent.\n");
         return false;
     }
-    for (const auto value : transform.clipFromLocal)
+    if (draw.indexCount == 0 || draw.indexCount % 3 != 0 || draw.firstIndex > state_->indexCount ||
+        draw.indexCount > state_->indexCount - draw.firstIndex)
+    {
+        std::fprintf(stderr, "Vulkan error: indexed Draw range exceeds retained triangle geometry.\n");
+        return false;
+    }
+    for (const auto value : draw.transform.clipFromLocal)
     {
         if (!std::isfinite(value))
         {
@@ -227,8 +238,8 @@ bool VulkanTrianglePipeline::recordDraw(VkCommandBuffer commandBuffer, VkExtent2
     constexpr VkDeviceSize offset = 0;
     state.bindVertices(commandBuffer, 0, 1, &buffer, &offset);
     state.bindIndices(commandBuffer, detail::BufferAccess::handle(state.indices), 0, VK_INDEX_TYPE_UINT32);
-    state.pushConstants(commandBuffer, state.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(DrawTransform), &transform);
-    state.drawIndexed(commandBuffer, state.indexCount, 1, 0, 0, 0);
+    state.pushConstants(commandBuffer, state.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(DrawTransform), &draw.transform);
+    state.drawIndexed(commandBuffer, draw.indexCount, 1, draw.firstIndex, 0, 0);
     return true;
 }
 }

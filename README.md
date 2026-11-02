@@ -1,6 +1,6 @@
 # MadCat
 
-使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前可绘制彩色三角形，并通过 `--gltf` 预览静态 glTF／GLB 几何。支持三维顶点／索引、Scene／相机矩阵、深度遮挡、单帧同步、resize／最小化恢复，以及 Shader 手动编译、SPIR-V 验证和 Vulkan 资源的 RAII 管理。材质与贴图尚未接入。
+使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前可绘制彩色三角形，并通过 `--gltf` 显示共享 GPU 几何的双实例 glTF／GLB 场景。支持三维顶点／索引、Scene／相机矩阵、深度遮挡、单帧同步、resize／最小化恢复，以及 Shader 手动编译、SPIR-V 验证和 Vulkan 资源的 RAII 管理。材质与贴图尚未接入。
 
 文档：[开发范围、进度与验收](docs/project-development.md) · [架构设计](docs/architecture-design.md)。
 
@@ -134,7 +134,7 @@ cmake --build build --config Release --target MadCatComponentChecks MadCatEntity
 
 [组件检查](tests/ComponentChecks.cpp) 的 13 个场景覆盖增删与 const 访问、重复和无效操作、删除搬移、实体复用、资源析构、扩容与稀疏空洞、类型隔离、构造失败恢复、别名参数和混合操作模型。检查不启动窗口或 GPU。
 
-场景对象统一使用 Entity，通过 Scene 管理层级和 Transform，并组合用户组件；后续 RenderScene 从场景提取渲染数据。Mesh／Material 资产组件与自动渲染链路尚未实现。
+场景对象统一使用 Entity，通过 Scene 管理层级和 Transform，并组合用户组件；MeshInstance 引用资产，由 RenderScene 提取并驱动模型绘制。Material 组件与材质链路仍待实现。
 
 ## ECS 组合查询与遍历后修改
 
@@ -231,7 +231,7 @@ cmake --build build --config Debug --target MadCatSceneChecks MadCatQueryChecks 
 cmake --build build --config Release --target MadCatSceneChecks MadCatQueryChecks MadCatComponentChecks MadCatEntityChecks MadCat
 ```
 
-[场景检查](tests/SceneChecks.cpp) 覆盖局部 TRS、显式矩阵与表示切换、父先子后更新、剪切、挂接与环拒绝、叶节点／子树删除、句柄复用、无效输入、溢出恢复、系统查询边界、2048 层深度及 512 步层级参考模型。Scene／相机已接入 Sandbox 的专用三角形场景；glTF 的 CPU 实例化见[模型资产与 Scene 实例化](#模型资产与-scene-实例化)，通用 RenderScene 和场景版本待实现，不提供保持世界位置的重新挂接、dirty 增量更新或自动命令队列。
+[场景检查](tests/SceneChecks.cpp) 覆盖局部 TRS、显式矩阵与表示切换、父先子后更新、剪切、挂接与环拒绝、叶节点／子树删除、句柄复用、无效输入、溢出恢复、系统查询边界、2048 层深度及 512 步层级参考模型。Scene／相机已接入 Sandbox 的专用三角形场景；glTF 的 CPU 实例化见[模型资产与 Scene 实例化](#模型资产与-scene-实例化)，最小 RenderScene 已接通，场景版本待实现，不提供保持世界位置的重新挂接、dirty 增量更新或自动命令队列。
 
 ## 相机与视图投影
 
@@ -342,7 +342,7 @@ cmake --build build --config Release --target MadCatGltfChecks MadCatGltfInspect
 
 当前忽略法线、UV、材质、图片、相机、灯光和 extras；明确拒绝必需扩展、稀疏 accessor、压缩、蒙皮、动画、形变目标与 GPU instancing。[15 组 CPU 检查](tests/GltfChecks.cpp)覆盖三种索引、无索引、交错布局、多个 Primitive、GLB／base64、中文路径、数据所有权、共享 Mesh、场景选择、层级变换、损坏输入与不支持项，以及 2048 层非递归更新；Debug／Release 均已通过，另用固定依赖中的 Box.glb 与 TriangleWithoutIndices.gltf 检查成功。接口边界见[资产导入契约](docs/architecture-design.md#cpu-gltf-几何当前实现)。
 
-CPU 导入结果可通过 Sandbox 的静态预览桥接到 GPU，也可通过下节接口创建保留层级的 CPU Scene 实例；资产模块本身继续只负责 CPU 数据。通用 RenderScene、法线／UV、材质与贴图仍待实现。
+CPU 导入结果通过下节接口创建保留层级的 Scene 实例，再由 RenderScene 提取并共享 GPU 几何；资产模块本身继续只负责 CPU 数据。法线／UV、材质与贴图仍待实现。
 
 ## 模型资产与 Scene 实例化
 
@@ -381,42 +381,51 @@ cmake --build build --config Release --target MadCatModelSceneChecks MadCatScene
 
 [模型实例检查](tests/ModelSceneChecks.cpp) 使用原样下载的 Suzanne 验证两个实例独立变换、删除隔离及几何共享，用 TransformProbe 验证多 Primitive、父子继承与未选中隔离，并覆盖多根、外部父节点、矩阵剪切／零缩放、查询保护、错误恢复及 2048 层遍历。MSVC Debug 运行 8 组行为检查，Release 另运行完整分配失败检查（共 9 组、30 个分配失败位置）；Debug 的 STL `vector` 移动会分配调试代理，故不在该模式注入全局分配失败。既有 Scene／Camera／场景矩阵绘制／glTF 导入和静态转换检查一并回归。
 
-本增量仅接通 CPU 模型实例，窗口 `--gltf` 仍使用下节的静态烘焙路径。自动 RenderScene 提取、共享 GPU 几何绘制、法线／UV 和材质贴图继续分步接入。
+窗口 `--gltf` 已消费这些实例及 MeshInstance，见 [RenderScene 与共享几何](#renderscene-与共享几何)；法线／UV 和材质贴图继续分步接入。
 
 ## glTF 静态模型预览
 
-从项目根目录构建 C++，**关闭旧程序并重新编译 Shader**：本次位置输入由 float2 改为 float3，不能配用旧顶点 SPIR-V。然后运行仓库内的原创验证模型：
+早期 [StaticModel](apps/Sandbox/StaticModel.h) 将节点矩阵烘焙到顶点并复制实例几何；它及独立 CPU 检查保留作历史验证工具，当前窗口已不再调用。原始实现与验收记录见[架构契约](docs/architecture-design.md#gltf-静态预览当前实现)，当前运行方式见下节。
+
+## RenderScene 与共享几何
+
+`--gltf` 加载静态 glTF／GLB，创建两个独立模型实例；每个选中节点都是 Scene Entity，MeshInstance 保存资产引用。无参数仍运行原三角形示例。首次运行先准备匹配三维顶点接口的 Shader；本次未改变 Shader 或绑定布局。
 
 ```powershell
-cmake --build build --config Debug --target MadCat MadCatShaders MadCatStaticModelChecks
-.\build\Debug\MadCat.exe --gltf assets\models\TransformProbe.gltf
-```
-
-`--gltf <路径>` 支持中文、空格路径及 CPU 导入器的静态子集，路径相对于当前工作目录；Shader 仍使用配置记录的构建目录绝对路径。无参数继续显示原三角形，按键 1～7 仍控制模型／相机父节点、近远裁剪及双模型顺序。参数错误、导入失败、空选中场景或转换失败返回 1 并输出诊断，在创建窗口和 Vulkan 资源前终止；当前只支持启动时加载。
-
-[StaticModel](apps/Sandbox/StaticModel.h) 是 Sandbox 的 CPU 预览桥接：只遍历选中场景根可达的节点，烘焙节点世界矩阵，合并多个 Mesh／Primitive 并重新编号索引。多个节点引用同一 Mesh 时复制几何；原始 CPU 资产保持共享与文件坐标不变。桥接在 double 中计算 AABB，再居中并将最大边等比缩放到 1.2 场景单位，使不同大小的模型进入现有相机范围。显示颜色由三轴包围盒坐标生成，零长度轴用中值；不是文件材质、顶点色或光照。
-
-上传使用 [ColoredVertex](src/RHI/ColoredVertex.h) 的显式布局：24 字节，位置 float3／offset 0，颜色 float3／offset 12；uint32 索引保持独立。CPU 数学对象不直接作为 GPU ABI。合并顶点最多 `0x01000000` 个，索引数量须可由 uint32 表示，实际上传仍受设备限制。应用、管线和帧上下文沿用双缓冲保活，resize 复用上传数据，退出先等待 GPU／WSI 完成。
-
-[TransformProbe](assets/models/README.md) 验证父子变换、Y 旋转、非均匀缩放、共享 Mesh、多个 Primitive 与未选中场景隔离，预览统计应为两个节点实例、四个 Primitive、12 顶点／12 索引。两种构建的 8 组 [CPU 转换检查](tests/StaticModelChecks.cpp)已通过；真实 Debug／Release 每帧 22 个独立解析像素检查通过。另已检查中文路径、模型近远裁剪、原三角形遮挡回归及模型连续重建／最小化退出，Debug 同步验证无 warning／error。固定依赖中的 Box.glb 在 Release 成功显示 24 顶点／36 索引；该外部样本是冒烟与截图验证，没有完整材质或逐像素参考。
-
-```powershell
-cmake --build build --config Release --target MadCat MadCatStaticModelChecks
-.\build\Release\MadCat.exe --gltf build\_deps\cgltf-src\fuzz\data\Box.glb
-powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario model
-powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Release -Scenario model
-```
-
-窗口脚本的 `-ModelPath <路径>` 可以覆盖模型，并与 `scene`、`depth`、`stress`、`close-minimized` 场景组合。TransformProbe 及其原样副本使用独立几何／深度／颜色参考；其他资产只做可见性冒烟检查，输出明确区分。
-
-仓库还收录了 Khronos 官方示例库的经典 [Suzanne 模型](assets/models/Suzanne/README.md)（CC0），原样保留 glTF、外部缓冲和贴图，无格式转换。Debug／Release 均已通过 11808 顶点／11808 索引的导入及窗口冒烟检查，覆盖模型／相机变换、resize、最小化恢复与退出，Debug 同步验证无 warning／error。当前显示位置诊断色，材质与贴图尚未参与渲染。
-
-```powershell
+cmake --build build --config Debug --target MadCat MadCatShaders MadCatRenderSceneChecks
 .\build\Debug\MadCat.exe --gltf assets\models\Suzanne\Suzanne.gltf
-powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario model -ModelPath assets/models/Suzanne/Suzanne.gltf
 ```
 
-当前窗口把选中节点烘焙成静态预览几何，由已有模型 Entity 的矩阵驱动，尚未使用上节已实现的逐节点 CPU 实例与 MeshInstance 组件。下一步将这些实例接入 RenderScene 绘制提取和共享 GPU 几何，再推进法线／UV、材质与贴图；模型与贴图阶段仍未完整完成。
+[RenderScene](src/RenderScene/RenderScene.h) 从 MeshInstance 和已更新世界矩阵生成逐 Primitive 的值快照，再按资产／Mesh／Primitive 标识解析共享索引范围。每份 Primitive 只打包一次并保留 Mesh 局部坐标；多个节点和模型实例分别提交矩阵与 DrawIndexed，共享同一 GPU 几何。这是共享几何的多次绘制，尚未合并为硬件实例化 Draw。
+
+[ModelScene](apps/Sandbox/ModelScene.h) 负责示例组装、相机和按键。启动时流式计算选中节点的世界 AABB，居中／最大边缩放到 1.2 的矩阵放在实例根；外层父节点各缩放 0.8 并移到 x = ±0.75，不烘焙或复制顶点。模型模式按键如下：
+
+| 按键 | 行为 |
+|---|---|
+| 1 | 默认父节点／相机姿态；已删除实例保持删除 |
+| 2 | 移动并旋转第一个实例，第二个保持原样 |
+| 3 | 移动相机父节点 |
+| 4 | 删除第一个实例子树 |
+| 5 | 删除第二个实例子树；全删后仅清屏 |
+| 6 | 恢复缺失实例并重置姿态，复用已上传几何 |
+| 7 | 默认姿态，反向提交现存绘制 |
+| 8 | 移动并旋转第二个实例，第一个保持原样 |
+
+上传沿用 24 字节 ColoredVertex 和 uint32 索引。诊断色来自每份 Primitive 的局部 AABB，未使用文件材质、法线、UV 或贴图。唯一几何总顶点数最多 0x01000000，索引数须可由 uint32 表示，上传另受设备限制。TransformProbe 两个模型实例共 8 次绘制，上传仅 6 顶点／6 索引；两个 Suzanne 共 2 次绘制，上传仅 11808 顶点／11808 索引。
+
+CPU 导入、实例化、边界和打包在窗口／Vulkan 创建前检查。每帧先应用编辑、更新世界矩阵，再提取快照；过期矩阵、非法相机／资产、矩阵溢出或未上传几何引用会失败并诊断。当前几何集合在启动时固定；新增几何需显式重建批次和上传，尚无运行期资产卸载／替换。
+
+应用、管线和帧上下文保留不可变缓冲；删除 Entity 只移除后续绘制，已有 GPU 使用保持有效。resize 复用几何；帧上下文等待 acquire／submit／present 完成并释放命令后才放开引用。范围和有限矩阵在获取交换链图像前校验，空绘制列表合法。
+
+```powershell
+cmake --build build --config Release --target MadCat MadCatRenderSceneChecks MadCatTriangleChecks
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario model
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Release -Scenario model -ModelPath assets/models/Suzanne/Suzanne.gltf
+```
+
+[CPU 检查](tests/RenderSceneChecks.cpp) 的 6 组覆盖层级、快照、失效／溢出、几何校验、资产标识隔离，以及真实 Suzanne／TransformProbe 的独立编辑、删除与恢复。管线模拟新增索引子范围与越界检查。两种配置的模型窗口检查覆盖两种资产、独立变换、删除至空场景、恢复、反序、resize、最小化恢复和安全退出；TransformProbe 每帧最多 38 个独立解析像素，Suzanne 为左右实例可见性冒烟。Debug 开启同步验证，无 warning／error；Release 未主动启用验证层。
+
+法线／UV、材质贴图、基础光照、通用 Pass／Render Graph 和运行期 Shader 更新仍待实现，F03 尚未完成。
 
 ## 手动编译 Shader
 

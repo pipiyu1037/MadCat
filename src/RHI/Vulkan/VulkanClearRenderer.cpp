@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <exception>
+#include <cmath>
 #include <type_traits>
 #include <utility>
 
@@ -140,7 +141,7 @@ struct VulkanClearRenderer::State
         }
     }
 
-    bool record(uint32_t imageIndex, const std::array<float, 4>& color, std::span<const DrawTransform> transforms)
+    bool record(uint32_t imageIndex, const std::array<float, 4>& color, std::span<const IndexedDraw> draws)
     {
         if (!detail::checkResult(resetCommandPool(device, commandPool, 0), "vkResetCommandPool")) { return false; }
         VkCommandBufferBeginInfo begin{};
@@ -209,9 +210,9 @@ struct VulkanClearRenderer::State
         cmdBeginRendering(commandBuffer, &rendering);
         if (triangle)
         {
-            for (const auto& transform : transforms)
+            for (const auto& draw : draws)
             {
-                if (!triangle->recordDraw(commandBuffer, extent, transform)) { return false; }
+                if (!triangle->recordIndexedDraw(commandBuffer, extent, draw)) { return false; }
             }
         }
         cmdEndRendering(commandBuffer);
@@ -336,13 +337,31 @@ bool VulkanClearRenderer::waitIdle()
 
 ClearFrameResult VulkanClearRenderer::draw(const std::array<float, 4>& color, std::span<const DrawTransform> transforms)
 {
+    if (state_ && !state_->triangle) { return drawIndexed(color, {}); }
+    if (state_ && state_->triangle && transforms.empty()) { return ClearFrameResult::Failed; }
+    std::vector<IndexedDraw> draws;
+    draws.reserve(transforms.size());
+    for (const auto& transform : transforms)
+    {
+        draws.push_back({transform, 0, state_ && state_->triangle ? state_->triangle->indexCount() : 0});
+    }
+    return drawIndexed(color, draws);
+}
+
+ClearFrameResult VulkanClearRenderer::drawIndexed(const std::array<float, 4>& color, std::span<const IndexedDraw> draws)
+{
     if (!state_) { return ClearFrameResult::Failed; }
     auto& frame = *state_;
-    if (frame.triangle && transforms.empty())
+    if (!frame.triangle && !draws.empty()) { return ClearFrameResult::Failed; }
+    for (const auto& draw : draws)
     {
-        std::fprintf(stderr, "Vulkan error: triangle rendering requires at least one matrix.\n");
-        frame.status = ClearFrameResult::Failed;
-        return frame.status;
+        if (draw.indexCount == 0 || draw.indexCount % 3 != 0 || draw.firstIndex > frame.triangle->indexCount() ||
+            draw.indexCount > frame.triangle->indexCount() - draw.firstIndex ||
+            std::ranges::any_of(draw.transform.clipFromLocal, [](float value) { return !std::isfinite(value); }))
+        {
+            std::fprintf(stderr, "Vulkan error: invalid indexed Draw snapshot before acquisition.\n");
+            return ClearFrameResult::Failed;
+        }
     }
     if (frame.status != ClearFrameResult::Presented) { return frame.status; }
     frame.status = ClearFrameResult::Failed;
@@ -374,7 +393,7 @@ ClearFrameResult VulkanClearRenderer::draw(const std::array<float, 4>& color, st
         std::fprintf(stderr, "Vulkan error: acquired image index is outside the Swapchain image array.\n");
         return frame.status;
     }
-    if (!frame.record(imageIndex, color, transforms) ||
+    if (!frame.record(imageIndex, color, draws) ||
         !detail::checkResult(frame.resetFences(frame.device, 1, &frame.submitFence), "vkResetFences(submit)")) { return frame.status; }
     VkSemaphoreSubmitInfo wait{};
     wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;

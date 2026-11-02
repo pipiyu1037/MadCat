@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RHI/DrawTransform.h"
+#include "RHI/IndexedDraw.h"
 #include "RHI/Texture.h"
 
 #include <array>
@@ -46,6 +47,10 @@ public:
     // Retry means no image acquired (finite acquire timeout).
     // Unavailable/Failed are terminal: no further acquire or submit until rebuilt.
     [[nodiscard]] ClearFrameResult draw(const std::array<float, 4>& color, std::span<const DrawTransform> transforms);
+    // Draw ranges share the retained buffers; empty input clears the Scene.
+    // Range/matrix validation occurs before acquisition. Parameters are copied
+    // into commands; no caller-owned snapshots are borrowed after this call.
+    [[nodiscard]] ClearFrameResult drawIndexed(const std::array<float, 4>& color, std::span<const IndexedDraw> draws);
     // Waits for acquisition, command submission and present-resource retirement.
     // Also called on destruction, before releasing views or synchronization.
     [[nodiscard]] bool waitIdle();

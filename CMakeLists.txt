@@ -175,10 +175,31 @@ add_custom_target(MadCatModelSceneChecks
     VERBATIM
 )
 
+add_library(MadCatRenderScene STATIC src/RenderScene/RenderScene.cpp)
+target_link_libraries(MadCatRenderScene PUBLIC MadCatSceneModels)
+set_target_properties(MadCatRenderScene PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+    target_compile_options(MadCatRenderScene PRIVATE /W4 /permissive-)
+endif()
+
+add_executable(RenderSceneChecks EXCLUDE_FROM_ALL tests/RenderSceneChecks.cpp apps/Sandbox/ModelScene.cpp)
+target_link_libraries(RenderSceneChecks PRIVATE MadCatRenderScene)
+target_include_directories(RenderSceneChecks PRIVATE apps/Sandbox)
+set_target_properties(RenderSceneChecks PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+    target_compile_options(RenderSceneChecks PRIVATE /W4 /permissive- /utf-8)
+endif()
+add_custom_target(MadCatRenderSceneChecks
+    COMMAND "$<TARGET_FILE:RenderSceneChecks>" "${CMAKE_CURRENT_SOURCE_DIR}/assets/models"
+    DEPENDS RenderSceneChecks
+    COMMENT "Checking Scene draw extraction, shared geometry and instance edits"
+    VERBATIM
+)
+
 add_executable(MadCat
     apps/Sandbox/main.cpp
     apps/Sandbox/TriangleScene.cpp
-    apps/Sandbox/StaticModel.cpp
+    apps/Sandbox/ModelScene.cpp
     src/RHI/Vulkan/VulkanBuffer.cpp
     src/RHI/Vulkan/VulkanDepthTexture.cpp
     src/RHI/Vulkan/VulkanClearRenderer.cpp
@@ -198,7 +219,7 @@ target_compile_definitions(MadCat PRIVATE
     VK_NO_PROTOTYPES
     MADCAT_SHADER_DIRECTORY="${CMAKE_CURRENT_BINARY_DIR}/shaders/triangle"
 )
-target_link_libraries(MadCat PRIVATE glfw Vulkan::Headers MadCatScene MadCatAssets)
+target_link_libraries(MadCat PRIVATE glfw Vulkan::Headers MadCatRenderScene)
 
 if(MSVC)
     target_compile_options(MadCat PRIVATE /W4 /permissive- /utf-8)

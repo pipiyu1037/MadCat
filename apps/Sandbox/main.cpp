@@ -12,7 +12,7 @@
 #include "RHI/Vulkan/VulkanSwapchain.h"
 #include "RHI/Vulkan/VulkanTrianglePipeline.h"
 #include "TriangleScene.h"
-#include "StaticModel.h"
+#include "ModelScene.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -64,14 +64,16 @@ class SandboxApplication
 public:
     SandboxApplication(GLFWwindow* window, const madcat::rhi::VulkanDevice& device, const madcat::rhi::VulkanSurface& surface,
         const madcat::rhi::VulkanShaderModule& vertex, const madcat::rhi::VulkanShaderModule& fragment,
-        madcat::rhi::BufferRef vertices, madcat::rhi::BufferRef indices)
+        madcat::rhi::BufferRef vertices, madcat::rhi::BufferRef indices,
+        madcat::sandbox::ModelScene* modelScene, const madcat::render::GeometryBatch* geometry)
         : window_(window), device_(device), surface_(surface), vertex_(vertex), fragment_(fragment),
-          vertices_(std::move(vertices)), indices_(std::move(indices))
+          vertices_(std::move(vertices)), indices_(std::move(indices)), modelScene_(modelScene), geometry_(geometry)
     {
         iconified_ = glfwGetWindowAttrib(window_, GLFW_ICONIFIED) == GLFW_TRUE;
         glfwSetWindowUserPointer(window_, this);
         glfwSetKeyCallback(window_, [](GLFWwindow* target, int key, int, int action, int) {
-            if (action == GLFW_PRESS && key >= GLFW_KEY_1 && key <= GLFW_KEY_7)
+            const auto* app = static_cast<SandboxApplication*>(glfwGetWindowUserPointer(target));
+            if (action == GLFW_PRESS && key >= GLFW_KEY_1 && key <= (app->modelScene_ ? GLFW_KEY_8 : GLFW_KEY_7))
             {
                 static_cast<SandboxApplication*>(glfwGetWindowUserPointer(target))->requestedPose_ = key - GLFW_KEY_1;
             }
@@ -171,21 +173,36 @@ private:
         }
         if (activePose_ != requestedPose_)
         {
-            if (!triangleScene_.selectPose(static_cast<madcat::sandbox::TrianglePose>(requestedPose_))) { return false; }
+            if (modelScene_ ? !modelScene_->selectPose(requestedPose_) :
+                !triangleScene_.selectPose(static_cast<madcat::sandbox::TrianglePose>(requestedPose_))) { return false; }
             activePose_ = requestedPose_;
         }
         const auto extent = presentation_->swapchain.extent();
-        const auto transform = triangleScene_.drawTransforms(static_cast<float>(extent.width) / static_cast<float>(extent.height));
-        if (!transform)
+        madcat::rhi::ClearFrameResult result;
+        const auto aspect = static_cast<float>(extent.width) / static_cast<float>(extent.height);
+        if (modelScene_)
         {
-            std::fprintf(stderr, "MadCat error: Scene camera/model matrix extraction failed.\n");
-            return false;
+            auto snapshot = modelScene_->draws(aspect);
+            if (!snapshot) { throw std::runtime_error(snapshot.error()); }
+            auto draws = madcat::render::resolveDraws(*geometry_, *snapshot);
+            if (!draws) { throw std::runtime_error(draws.error()); }
+            result = presentation_->renderer.drawIndexed({0.04f, 0.08f, 0.16f, 1.0f}, *draws);
+            if (result == madcat::rhi::ClearFrameResult::Presented && loggedPose_ != activePose_)
+            {
+                std::fprintf(stderr, "MadCat: model instances presented; pose %d, %zu draws, %zu shared primitives.\n",
+                    activePose_ + 1, draws->size(), geometry_->ranges.size());
+            }
         }
-        const auto result = presentation_->renderer.draw({0.04f, 0.08f, 0.16f, 1.0f},
-            std::span(transform->transforms.data(), transform->count));
+        else
+        {
+            const auto transform = triangleScene_.drawTransforms(aspect);
+            if (!transform) { throw std::runtime_error("Scene camera/model matrix extraction failed"); }
+            result = presentation_->renderer.draw({0.04f, 0.08f, 0.16f, 1.0f},
+                std::span(transform->transforms.data(), transform->count));
+        }
         if (result == madcat::rhi::ClearFrameResult::Presented && loggedPose_ != activePose_)
         {
-            std::fprintf(stderr, "MadCat: Scene pose presented; %d (keys 1-7).\n", activePose_ + 1);
+            std::fprintf(stderr, "MadCat: Scene pose presented; %d (keys 1-%d).\n", activePose_ + 1, modelScene_ ? 8 : 7);
             loggedPose_ = activePose_;
         }
         if (result == madcat::rhi::ClearFrameResult::Failed) { return false; }
@@ -201,6 +218,8 @@ private:
     madcat::rhi::BufferRef vertices_;
     madcat::rhi::BufferRef indices_;
     madcat::sandbox::TriangleScene triangleScene_;
+    madcat::sandbox::ModelScene* modelScene_;
+    const madcat::render::GeometryBatch* geometry_;
     std::unique_ptr<Presentation> presentation_;
     int framebufferWidth_ = 0;
     int framebufferHeight_ = 0;
@@ -221,7 +240,9 @@ int wmain(int argc, wchar_t** argv)
 int main(int argc, char** argv)
 #endif
 {
-    std::optional<madcat::sandbox::StaticModel> model;
+    madcat::assets::ModelAssets assets;
+    std::unique_ptr<madcat::sandbox::ModelScene> modelScene;
+    std::optional<madcat::render::GeometryBatch> model;
     try
     {
         if (argc != 1)
@@ -232,7 +253,7 @@ int main(int argc, char** argv)
                 return EXIT_FAILURE;
             }
             const std::filesystem::path path(argv[2]);
-            const auto imported = madcat::assets::importGltfGeometry(path);
+            auto imported = madcat::assets::importGltfGeometry(path);
             if (!imported)
             {
                 const auto filename = imported.error().file.u8string();
@@ -240,17 +261,16 @@ int main(int argc, char** argv)
                     reinterpret_cast<const char*>(filename.c_str()), imported.error().message.c_str());
                 return EXIT_FAILURE;
             }
-            auto prepared = madcat::sandbox::prepareStaticModel(*imported);
-            if (!prepared)
-            {
-                std::fprintf(stderr, "MadCat: glTF preview failed: %s\n", prepared.error().c_str());
-                return EXIT_FAILURE;
-            }
-            model = std::move(*prepared);
-            std::fprintf(stderr, "MadCat: glTF preview ready; %zu node instances, %zu primitives, %zu vertices, %zu indices.\n",
-                model->nodeInstances, model->primitives, model->vertices.size(), model->indices.size());
-            std::fprintf(stderr, "MadCat: preview fit; asset center %.9g %.9g %.9g, scale %.9g; diagnostic position colors.\n",
-                model->assetCenter.x, model->assetCenter.y, model->assetCenter.z, model->previewScale);
+            const auto id = assets.add(std::move(*imported));
+            modelScene = std::make_unique<madcat::sandbox::ModelScene>(assets, id);
+            auto draws = modelScene->draws(1280.f / 720.f);
+            if (!draws) { throw std::runtime_error(draws.error()); }
+            auto packed = madcat::render::prepareGeometry(assets, *draws);
+            if (!packed) { throw std::runtime_error(packed.error()); }
+            model = std::move(*packed);
+            std::fprintf(stderr, "MadCat: shared model geometry ready; %zu primitives, %zu vertices, %zu indices; %zu initial draws.\n",
+                model->ranges.size(), model->vertices.size(), model->indices.size(), draws->size());
+            std::fprintf(stderr, "MadCat: model keys 1 default, 2 move first, 3 camera, 4 delete first, 5 delete second, 6 restore, 7 reverse draws, 8 move second.\n");
         }
     }
     catch (const std::exception& error)
@@ -305,7 +325,8 @@ int main(int argc, char** argv)
                 if (!vertices) { throw std::runtime_error("Triangle vertex upload failed"); }
                 auto indices = madcat::rhi::createIndexBuffer(device, indexData);
                 if (!indices) { throw std::runtime_error("Triangle index upload failed"); }
-                SandboxApplication app(window, device, surface, vertexShader, fragmentShader, std::move(vertices), std::move(indices));
+                SandboxApplication app(window, device, surface, vertexShader, fragmentShader, std::move(vertices), std::move(indices),
+                    modelScene.get(), model ? &*model : nullptr);
                 exitCode = EXIT_SUCCESS;
                 while (!glfwWindowShouldClose(window) && !app.failed())
                 {

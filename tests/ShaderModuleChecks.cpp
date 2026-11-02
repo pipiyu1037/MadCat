@@ -60,6 +60,7 @@ std::set<VkBuffer> liveBuffers;
 std::map<VkBuffer, VkBufferUsageFlags> bufferUsages;
 VkBuffer expectedVertices = VK_NULL_HANDLE, expectedIndices = VK_NULL_HANDLE;
 uint32_t expectedIndexCount = 6;
+uint32_t expectedFirstIndex = 0;
 std::map<VkDeviceMemory, std::vector<std::byte>> liveMemory;
 std::map<VkBuffer, VkDeviceMemory> boundMemory;
 std::set<VkDeviceMemory> mappedMemory;
@@ -370,7 +371,7 @@ VKAPI_ATTR void VKAPI_CALL drawIndexed(VkCommandBuffer command, uint32_t indices
     uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance)
 {
     check(command == commandToken && recorded == "BVSGIP" && indices == expectedIndexCount && instances == 1 &&
-        firstIndex == 0 && vertexOffset == 0 && firstInstance == 0, "Wrong DrawIndexed arguments/order");
+        firstIndex == expectedFirstIndex && vertexOffset == 0 && firstInstance == 0, "Wrong DrawIndexed arguments/order");
     recorded += 'D';
 }
 VKAPI_ATTR void VKAPI_CALL bindVertices(VkCommandBuffer command, uint32_t first, uint32_t count,
@@ -840,6 +841,20 @@ void triangleChecks(const std::filesystem::path& root)
                 ++cases;
             }
             recorded.clear();
+            expectedIndexCount = 3;
+            expectedFirstIndex = 3;
+            check(pipeline.recordIndexedDraw(commandToken, expectedExtent, {expectedTransform, 3, 3}) && recorded == "BVSGIPD",
+                "Primitive subrange did not reach DrawIndexed");
+            ++cases;
+            expectedIndexCount = 6;
+            expectedFirstIndex = 0;
+            recorded.clear();
+            for (const auto range : {std::pair{0u, 0u}, {0u, 4u}, {6u, 3u}, {UINT32_MAX, 3u}, {3u, UINT32_MAX}})
+            {
+                check(!pipeline.recordIndexedDraw(commandToken, expectedExtent, {expectedTransform, range.first, range.second}) &&
+                    recorded.empty(), "Invalid Primitive range reached Vulkan");
+                ++cases;
+            }
             check(!pipeline.recordDraw(VK_NULL_HANDLE, {640, 480}, expectedTransform) &&
                 !pipeline.recordDraw(commandToken, {0, 480}, expectedTransform) &&
                 !pipeline.recordDraw(commandToken, {640, 0}, expectedTransform) && recorded.empty(), "Invalid recording input reached Vulkan");

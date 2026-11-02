@@ -1,6 +1,6 @@
 # MadCat 架构设计
 
-更新日期：2026-11-01。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
+更新日期：2026-11-02。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
 
 ## 文档职责与设计状态
 
@@ -68,7 +68,7 @@
 
 ECS 保存场景事实，例如局部 Transform、模型资源标识和灯光参数。世界矩阵由 Scene 计算，GPU 缓冲、材质表和光追实例表由 RenderScene 派生。ECS 不保存 `VkBuffer`、`VkImage`、Descriptor Set 或 Command Buffer。
 
-2026-10-29 用户确认：引擎中所有场景 Object 均以 Entity 表示，包括模型实例、相机、灯光和仅用于组织层级的对象；对象的能力由添加的组件组合决定。渲染用法以类似 Unity 的组合方式为目标：给 Entity 添加 Transform、Mesh、Material 等所需组件并引用有效资产后，RenderScene 自动提取供 Pass 使用的数据，不要求调用方再维护一份独立的场景渲染对象。Mesh、Material 组件保存资产标识与实例参数，Assets 仍拥有可共享的几何与材质数据，GPU 资源由 RenderScene／RHI 管理；销毁 Entity 清理其组件，GPU 数据按完成条件退役。CPU 模型资产、`ModelNode`／`MeshInstance` 组件与节点实例化已落地，见[模型实例契约](#模型资产与-scene-实例化当前实现)；Material、自动 RenderScene 与共享 GPU 实例绘制尚未实现。
+2026-10-29 用户确认：引擎中所有场景 Object 均以 Entity 表示，包括模型实例、相机、灯光和仅用于组织层级的对象；对象的能力由添加的组件组合决定。渲染用法以类似 Unity 的组合方式为目标：给 Entity 添加 Transform、Mesh、Material 等所需组件并引用有效资产后，RenderScene 自动提取供 Pass 使用的数据，不要求调用方再维护一份独立的场景渲染对象。Mesh、Material 组件保存资产标识与实例参数，Assets 仍拥有可共享的几何与材质数据，GPU 资源由 RenderScene／RHI 管理；销毁 Entity 清理其组件，GPU 数据按完成条件退役。CPU 模型资产、`ModelNode`／`MeshInstance` 组件与节点实例化已落地，见[模型实例契约](#模型资产与-scene-实例化当前实现)；最小 RenderScene 与共享 GPU 几何绘制已接通，见下文当前实现契约；Material 尚未实现。
 
 **ECS System 与 Render Pass 是两种职责。** System 查询并更新场景状态；Pass 消费提取后的渲染数据并记录 GPU 工作。一个实体不对应一个 Pass，Render Graph 也不负责调度物理或动画。
 
@@ -671,7 +671,7 @@ Debug／Release 各 4 组解析场景绘制、34 项管线、19 项缓冲、35 �
 
 验证覆盖两个真实 Suzanne 的独立根变换／删除和共享 CPU 几何、TransformProbe 的解析坐标／层级／多个 Primitive、外部父节点／多根／顺序、剪切／零缩放、未选中隔离、查询／失效引用拒绝及 2048 层实例化与删除。Debug 8 组行为检查，Release 9 组（包含 30 个分配失败位置、回滚与重试）；新增矩阵契约随 Scene 14 组检查验证，其他 CPU 回归见开发文档。MSVC Debug 的 STL vector 在 noexcept 移动中分配调试代理，因此该模式明确跳过全局分配失败注入，完整注入在 Release 执行。
 
-当前无资产卸载、GPU Mesh 缓存、自动 RenderScene、共享 GPU 几何绘制、材质组件或贴图。下一增量从 Scene 的 MeshInstance 与世界矩阵提取绘制数据，再由 RenderScene／RHI 持有 GPU 引用，不能将 CPU 几何共享描述为 GPU 实例绘制已完成。
+最小 RenderScene 与共享 GPU 几何已按后文契约接通。资产库仍仅追加，没有运行期卸载／替换、材质组件或贴图。
 
 ## CPU glTF 几何（当前实现）
 
@@ -689,11 +689,11 @@ Debug／Release 各 4 组解析场景绘制、34 项管线、19 项缓冲、35 �
 
 静态节点采用右手系、Y 向上、米和列向量，无坐标轴翻转。TRS 显式将 glTF xyzw 四元数转为 GLM wxyz，要求有限值与单位四元数，在容差内归一化，局部矩阵为 `T * R * S`；允许零／负缩放。显式 matrix 与 TRS 不能并存，要求有限仿射矩阵；当前不校验其 TRS 可分解性。父先子后的非递归遍历计算 `parentWorld * local`，用 double 中间乘法检查 float 可表示性，保留继承剪切。拒绝环及多父节点，失败后调用方可以修正资产并重新导入。
 
-当前只转换 glTF 2.0／GLB 静态 TRIANGLES 的 FLOAT VEC3 POSITION、可选 u8／u16／u32 索引与节点数据。缓冲支持本地外部 URI、GLB BIN 与 base64；不加载远程 URI。法线、UV、材质、图片、相机、灯光和 extras 被忽略，必需扩展、稀疏 accessor、压缩、蒙皮、动画、形变及 GPU instancing 明确拒绝。此接口是几何转换器，不是完整 glTF 合规验证器，资产库本身不承担 GPU 上传。ModelAssets 与 SceneModels 桥接已提供稳定库内 ID 和逐节点 CPU 实例，见[实例契约](#模型资产与-scene-实例化当前实现)；Sandbox 静态预览见下节。自动 RenderScene 与共享 GPU 几何仍待实现；不能直接把 CPU 数学类型作为上传布局。验证与命令见 [README](../README.md#cpu-gltf-几何导入)。
+当前只转换 glTF 2.0／GLB 静态 TRIANGLES 的 FLOAT VEC3 POSITION、可选 u8／u16／u32 索引与节点数据。缓冲支持本地外部 URI、GLB BIN 与 base64；不加载远程 URI。法线、UV、材质、图片、相机、灯光和 extras 被忽略，必需扩展、稀疏 accessor、压缩、蒙皮、动画、形变及 GPU instancing 明确拒绝。此接口是几何转换器，不是完整 glTF 合规验证器，资产库本身不承担 GPU 上传。ModelAssets 与 SceneModels 桥接已提供稳定库内 ID 和逐节点 CPU 实例，见[实例契约](#模型资产与-scene-实例化当前实现)；Sandbox 静态预览见下节。RenderScene 已提取 MeshInstance 并接入共享 GPU 几何；不能直接把 CPU 数学类型作为上传布局。验证与命令见 [README](../README.md#cpu-gltf-几何导入)。
 
 ## glTF 静态预览（当前实现）
 
-2026-11-01 的 [StaticModel](../apps/Sandbox/StaticModel.h) 是 Sandbox 中的 CPU 转换桥接，直接消费 Assets 值数据，独立于 Vulkan 和 Scene；没有将 GPU 对象加入 ECS 或 CPU 资产。它只服务静态预览，尚不是通用 RenderScene 或逐节点 Scene 实例化。
+此节保留 2026-11-01 的历史桥接契约；2026-11-02 起窗口已改用 RenderScene。2026-11-01 的 [StaticModel](../apps/Sandbox/StaticModel.h) 是 Sandbox 中的 CPU 转换桥接，直接消费 Assets 值数据，独立于 Vulkan 和 Scene；没有将 GPU 对象加入 ECS 或 CPU 资产。它只服务静态预览，尚不是通用 RenderScene 或逐节点 Scene 实例化。
 
 | 阶段 | 当前契约与边界 |
 |---|---|
@@ -708,7 +708,25 @@ Sandbox 的 `--gltf <路径>` 在 GLFW／Vulkan 初始化前完成导入和预�
 
 [原创 TransformProbe](../assets/models/README.md) 提供可复现的层级／共享 Mesh／多 Primitive／未选中场景验证；CPU 和 [GPU 像素参考](../tests/ModelPixelReference.ps1)独立使用解析世界坐标、AABB、投影、透视颜色及最小深度，不能从上传值或应用日志生成预期结果。Debug／Release 8 组转换与相关回归、真实两种配置的 22 点参考帧、中文路径、模型裁剪及窗口生命周期检查通过，Debug 同步验证无 warning／error。Box.glb 仅作为 Release 冒烟与截图验证，不声称材质或完整像素验收；命令和证据见 [README](../README.md#gltf-静态模型预览)。
 
-CPU 资产引用、MeshInstance 组件与 Scene 节点实例化已由[实例契约](#模型资产与-scene-实例化当前实现)实现，尚未替换窗口的静态烘焙路径。下一增量需要 RenderScene 提取与共享 GPU 几何绘制，处理动态变换和 GPU 生命周期。法线、UV、材质、图片、光照、运行期替换和通用 Draw／Pass／Render Graph 仍未实现，F03 尚未完成。
+CPU 资产引用、MeshInstance 组件与 Scene 节点实例化已由[实例契约](#模型资产与-scene-实例化当前实现)实现，当前窗口使用下面的 RenderScene 链路。法线、UV、材质、图片、光照、运行期替换和通用 Draw／Pass／Render Graph 仍未实现，F03 尚未完成。
+
+## RenderScene 绘制提取与共享几何（当前实现）
+
+2026-11-02 新增纯 CPU [MadCatRenderScene](../src/RenderScene/RenderScene.h)，依赖 SceneModels 和无 Vulkan 的 RHI 值结构；不依赖 Vulkan／窗口或上传实现。每帧调用方先完成结构性编辑和世界矩阵更新，显式选择相机与宽高比，再调用 extractDraws。
+
+| 接口／数据 | 契约与所有权 |
+|---|---|
+| PrimitiveId | ModelAssetId／Mesh／Primitive 三元标识，限所属资产库；不同资产不因相同 Mesh 索引合并，不进行内容去重 |
+| extractDraws／MeshDraw | 查询 MeshInstance，逐 Primitive 复制 Entity、几何标识和 P×V×World 的 64 字节矩阵；结果按值拥有，不借用组件或世界矩阵；不修改 Scene／自动更新世界矩阵 |
+| 失败与空场景 | 活动查询、过期世界、非法相机／资产／Mesh、空 Mesh 或 float 矩阵溢出返回 expected 错误，无部分结果；分配异常传播；无 MeshInstance 时返回合法空列表 |
+| prepareGeometry／GeometryBatch | 为首次快照引用的每份 Primitive 打包一次局部位置与诊断色，合并索引并重编号，保存 firstIndex／indexCount；校验有限位置、三角形／索引边界和总数上限；返回拥有的 CPU 上传数据，不创建 GPU 对象 |
+| resolveDraws | 将几何标识解析成无 Vulkan 的 IndexedDraw 值列表，未知标识失败；删除、变换或重新实例化相同资产复用同一批次；新几何需显式重建上传 |
+| GPU 所有权 | Sandbox 拥有初次上传的共享缓冲，管线和帧上下文各保留引用。管线绘制子范围与矩阵，renderer 在 acquire 前校验输入，空列表仍清色／深度；一个 Primitive 可多次 DrawIndexed，没有合并为硬件实例化 |
+| 完成边界 | Entity 删除只改变下一快照，不撤销已录制工作。几何在本次启动期间保留，resize 复用；帧上下文等待 acquire／submit／present 完成并释放命令后才放开引用，随后按既有顺序销毁管线 |
+
+[ModelScene](../apps/Sandbox/ModelScene.h) 是示例组装器，创建两个模型分组、逐节点实例和相机。启动时流式计算世界 AABB，适配矩阵放在实例根，Mesh 局部坐标／源节点矩阵不烘焙；每份 Primitive 的局部 AABB 诊断色供共享。父节点支持独立变换、子树删除和恢复，CPU 资产寿命由 main 中的 ModelAssets 覆盖。模型初始化／快照／上传布局检查先于 GLFW／Vulkan，资产失败不创建窗口。
+
+选择启动时唯一几何批次，是为了复用已验证的不可变缓冲和单帧保活，不同时引入卸载、可变上传区或异步回收。当前按线性查找解析标识，未设性能承诺；尚无完整 GPU 资产缓存、通用 Pass、Render Graph 或材质系统。验证与按键见 [README](../README.md#renderscene-与共享几何)。
 
 ## 实现参考建议
 

@@ -3,6 +3,7 @@
 #include "RHI/Buffer.h"
 #include "RHI/ColoredVertex.h"
 #include "RHI/DrawTransform.h"
+#include "RHI/IndexedDraw.h"
 
 #include <vulkan/vulkan.h>
 
@@ -53,6 +54,9 @@ public:
     // Sets viewport/scissor, binds both buffers, copies a finite matrix and records
     // DrawIndexed(indexCount, 1, 0, 0, 0). Invalid input records no Vulkan commands.
     [[nodiscard]] bool recordDraw(VkCommandBuffer commandBuffer, VkExtent2D extent, const DrawTransform& transform) const;
+    // Nonempty triangle range into the retained index buffer. Validated before
+    // recording; instances share buffers and supply their own matrix snapshots.
+    [[nodiscard]] bool recordIndexedDraw(VkCommandBuffer commandBuffer, VkExtent2D extent, const IndexedDraw& draw) const;
 
 private:
     struct State;
