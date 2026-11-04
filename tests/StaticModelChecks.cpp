@@ -65,7 +65,7 @@ void ownedAndPacked()
     near(output->vertices[0].position[0], -.6);
     near(output->vertices[1].position[2], .15);
     near(output->vertices[0].color[0], .2);
-    check(sizeof(madcat::rhi::ColoredVertex) == 24, "Unexpected upload stride");
+    check(sizeof(madcat::rhi::ColoredVertex) == 44, "Unexpected upload stride");
 }
 
 void activeOnly()

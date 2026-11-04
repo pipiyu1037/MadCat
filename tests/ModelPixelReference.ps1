@@ -14,6 +14,9 @@ function Get-PreviewTriangles([double]$Aspect) {
         for ($index = 0; $index -lt $world.Count; ++$index) {
             $p = @(0.0,0.0,0.0)
             for ($axis = 0; $axis -lt 3; ++$axis) { $p[$axis] = .8 * ($world[$index][$axis] - $center[$axis]) * 20 / 27 }
+            if ($script:referencePose -eq 8 -and $modelIndex -eq 0) {
+                $p = Rotate-Y @(($p[0]*1.6), ($p[1]*.6), ($p[2]*1.2)) 35
+            }
             if (($script:referencePose -eq 1 -and $modelIndex -eq 0) -or ($script:referencePose -eq 7 -and $modelIndex -eq 1)) {
                 $p = Rotate-Y $p $(if ($modelIndex -eq 0) { 35 } else { -35 })
                 $p[0] += $(if ($modelIndex -eq 0) { .15 } else { -.15 }); $p[1] += .25; $p[2] -= .25
@@ -24,7 +27,7 @@ function Get-PreviewTriangles([double]$Aspect) {
             $projected += [pscustomobject]@{ U = .5 + .5 * [Math]::Sqrt(3) * $p[0] / ($Aspect * $w)
                 V = .5 - .5 * [Math]::Sqrt(3) * $p[1] / $w; W = $w
                 Z = (1000 / (.1 - 1000) * ($p[2] - 3) + .1 * 1000 / (.1 - 1000)) / $w
-                Color = $colors[$index % 6] }
+                Color = $(if ($script:referenceView -gt 0) { @(1,0,1) } else { $colors[$index % 6] }) }
         }
         foreach ($indices in @(@(2,0,1), @(4,5,3), @(8,6,7), @(10,11,9))) {
             [pscustomobject]@{ Vertices = @($projected[$indices[0]], $projected[$indices[1]], $projected[$indices[2]]) }

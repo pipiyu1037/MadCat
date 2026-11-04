@@ -38,6 +38,7 @@ std::set<VkShaderModule> liveModules;
 std::string_view missingFunction;
 bool failCreation = false;
 int creates = 0;
+bool expectedDemote = true;
 int destroys = 0;
 int cases = 0;
 uintptr_t serial = 100;
@@ -89,8 +90,10 @@ void writeWords(const std::filesystem::path& file, const std::vector<uint32_t>& 
     check(static_cast<bool>(output), "Could not write test fixture");
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL createDevice(VkPhysicalDevice, const VkDeviceCreateInfo*, const VkAllocationCallbacks*, VkDevice* device)
+VKAPI_ATTR VkResult VKAPI_CALL createDevice(VkPhysicalDevice, const VkDeviceCreateInfo* info, const VkAllocationCallbacks*, VkDevice* device)
 {
+    const auto* features = static_cast<const VkPhysicalDeviceVulkan13Features*>(info->pNext);
+    check(features && bool(features->shaderDemoteToHelperInvocation) == expectedDemote, "Demote feature enablement differs from query support");
     *device = deviceToken;
     return VK_SUCCESS;
 }
@@ -293,7 +296,7 @@ VKAPI_ATTR VkResult VKAPI_CALL createLayout(VkDevice device, const VkPipelineLay
     ++layoutCreates;
     check(device == deviceToken && allocator == nullptr && info->sType == VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO &&
         info->pNext == nullptr && info->flags == 0 && info->setLayoutCount == 0 && info->pushConstantRangeCount == 1 &&
-        info->pPushConstantRanges[0].offset == 0 && info->pPushConstantRanges[0].size == 64 &&
+        info->pPushConstantRanges[0].offset == 0 && info->pPushConstantRanges[0].size == 128 &&
         info->pPushConstantRanges[0].stageFlags == VK_SHADER_STAGE_VERTEX_BIT, "Incorrect matrix Push Constant layout");
     *layout = reinterpret_cast<VkPipelineLayout>(9999);
     if (failingPipelineOperation == "layout") { return VK_ERROR_OUT_OF_HOST_MEMORY; }
@@ -321,13 +324,17 @@ VKAPI_ATTR VkResult VKAPI_CALL createPipelines(VkDevice device, VkPipelineCache 
         rendering->viewMask == 0 && rendering->colorAttachmentCount == 1 && *rendering->pColorAttachmentFormats == expectedFormat &&
         rendering->depthAttachmentFormat == expectedDepthFormat && rendering->stencilAttachmentFormat == VK_FORMAT_UNDEFINED, "Wrong dynamic-rendering formats");
     const auto& input = *info->pVertexInputState;
-    check(input.vertexBindingDescriptionCount == 1 && input.vertexAttributeDescriptionCount == 2 &&
-        input.pVertexBindingDescriptions[0].binding == 0 && input.pVertexBindingDescriptions[0].stride == 24 &&
+    check(input.vertexBindingDescriptionCount == 1 && input.vertexAttributeDescriptionCount == 4 &&
+        input.pVertexBindingDescriptions[0].binding == 0 && input.pVertexBindingDescriptions[0].stride == 44 &&
         input.pVertexBindingDescriptions[0].inputRate == VK_VERTEX_INPUT_RATE_VERTEX &&
         input.pVertexAttributeDescriptions[0].location == 0 && input.pVertexAttributeDescriptions[0].binding == 0 &&
         input.pVertexAttributeDescriptions[0].format == VK_FORMAT_R32G32B32_SFLOAT && input.pVertexAttributeDescriptions[0].offset == 0 &&
         input.pVertexAttributeDescriptions[1].location == 1 && input.pVertexAttributeDescriptions[1].binding == 0 &&
-        input.pVertexAttributeDescriptions[1].format == VK_FORMAT_R32G32B32_SFLOAT && input.pVertexAttributeDescriptions[1].offset == 12,
+        input.pVertexAttributeDescriptions[1].format == VK_FORMAT_R32G32B32_SFLOAT && input.pVertexAttributeDescriptions[1].offset == 12 &&
+        input.pVertexAttributeDescriptions[2].location == 2 && input.pVertexAttributeDescriptions[2].binding == 0 &&
+        input.pVertexAttributeDescriptions[2].format == VK_FORMAT_R32G32B32_SFLOAT && input.pVertexAttributeDescriptions[2].offset == 24 &&
+        input.pVertexAttributeDescriptions[3].location == 3 && input.pVertexAttributeDescriptions[3].binding == 0 &&
+        input.pVertexAttributeDescriptions[3].format == VK_FORMAT_R32G32_SFLOAT && input.pVertexAttributeDescriptions[3].offset == 36,
         "Wrong vertex buffer layout");
     check(info->pInputAssemblyState->topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST && info->pInputAssemblyState->primitiveRestartEnable == VK_FALSE &&
         info->pRasterizationState->polygonMode == VK_POLYGON_MODE_FILL && info->pRasterizationState->cullMode == VK_CULL_MODE_NONE &&
@@ -393,7 +400,7 @@ VKAPI_ATTR void VKAPI_CALL pushConstants(VkCommandBuffer command, VkPipelineLayo
     VkShaderStageFlags stages, uint32_t offset, uint32_t size, const void* data)
 {
     check(command == commandToken && recorded == "BVSGI" && liveLayouts.contains(layout) &&
-        stages == VK_SHADER_STAGE_VERTEX_BIT && offset == 0 && size == 64 &&
+        stages == VK_SHADER_STAGE_VERTEX_BIT && offset == 0 && size == 128 &&
         std::memcmp(data, &expectedTransform, size) == 0, "Wrong matrix bytes, range, stage or recording order");
     std::memcpy(&recordedTransform, data, size);
     recorded += 'P';
@@ -444,6 +451,7 @@ madcat::rhi::PhysicalDeviceCandidate candidate()
     device.properties.apiVersion = VK_API_VERSION_1_3;
     device.properties.limits.maxDrawIndexedIndexValue = UINT32_MAX;
     device.features.dynamicRendering = device.features.synchronization2 = {true, true};
+    device.features.shaderDemoteToHelperInvocation = {true, true};
     device.queueFamilies = {{VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, 1}};
     VkExtensionProperties extension{};
     std::snprintf(extension.extensionName, sizeof(extension.extensionName), "%s", VK_KHR_SWAPCHAIN_EXTENSION_NAME);
@@ -772,6 +780,16 @@ void depthChecks()
 void triangleChecks(const std::filesystem::path& root)
 {
     using madcat::rhi::VulkanTrianglePipeline;
+    for (int mode = 0; mode < 3; ++mode)
+    {
+        auto input = candidate();
+        input.device.features.shaderDemoteToHelperInvocation = {mode != 0, mode == 2};
+        expectedDemote = mode == 2;
+        madcat::rhi::VulkanDevice featureDevice;
+        check(featureDevice.initialize({&input,1}), "Optional demote feature selection failed");
+        ++cases;
+    }
+    expectedDemote = true;
     static_assert(!std::is_copy_constructible_v<VulkanTrianglePipeline> && !std::is_move_constructible_v<VulkanTrianglePipeline>);
     const auto file = root / "module.spv";
     writeWords(file, fixture);
@@ -834,10 +852,23 @@ void triangleChecks(const std::filesystem::path& root)
                 {
                     expectedTransform.clipFromLocal[index] = static_cast<float>(index) + static_cast<float>(extent.width) / 1000.0f;
                 }
+                expectedTransform.normalFromLocal[1] = .25f;
+                expectedTransform.view = extent.width == 640 ? madcat::rhi::GeometryView::WorldNormal : madcat::rhi::GeometryView::Texcoord;
+                expectedTransform.attributes = 7;
                 auto inputTransform = expectedTransform;
                 check(pipeline.recordDraw(commandToken, extent, inputTransform) && recorded == "BVSGIPD", "Wrong recording sequence");
                 inputTransform.clipFromLocal.fill(-1);
                 check(recordedTransform.clipFromLocal == expectedTransform.clipFromLocal, "Recorded constants depend on mutable CPU data");
+                ++cases;
+            }
+            for (int mode = 0; mode < 3; ++mode)
+            {
+                auto invalid = expectedTransform;
+                if (mode == 0) { invalid.normalFromLocal[4] = std::numeric_limits<float>::quiet_NaN(); }
+                if (mode == 1) { invalid.view = static_cast<madcat::rhi::GeometryView>(4); }
+                if (mode == 2) { invalid.attributes = 128; }
+                recorded.clear();
+                check(!pipeline.recordDraw(commandToken, expectedExtent, invalid) && recorded.empty(), "Invalid normal/view/flags reached Vulkan");
                 ++cases;
             }
             recorded.clear();

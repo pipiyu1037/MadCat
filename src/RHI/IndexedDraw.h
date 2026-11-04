@@ -12,5 +12,6 @@ struct IndexedDraw
     DrawTransform transform;
     uint32_t firstIndex = 0;
     uint32_t indexCount = 0;
+    uint32_t material = 0;
 };
 }

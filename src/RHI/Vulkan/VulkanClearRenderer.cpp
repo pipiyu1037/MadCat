@@ -32,6 +32,7 @@ struct VulkanClearRenderer::State
     // destructor waits and releases recorded commands before dropping this copy.
     BufferRef vertexKeepAlive;
     BufferRef indexKeepAlive;
+    std::vector<TextureBindingRef> materialKeepAlive;
     TextureRef depth;
     bool depthInitialized = false;
     std::vector<Image> images;
@@ -279,6 +280,8 @@ bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwa
     {
         created->vertexKeepAlive = triangle->vertexBuffer();
         created->indexKeepAlive = triangle->indexBuffer();
+        const auto bindings = triangle->materialBindings();
+        created->materialKeepAlive.assign(bindings.begin(), bindings.end());
     }
     if (!created->loadFunctions(device.physicalDeviceInfo().instance)) { return false; }
     created->images.resize(swapchain.images().size());
@@ -357,7 +360,7 @@ ClearFrameResult VulkanClearRenderer::drawIndexed(const std::array<float, 4>& co
     {
         if (draw.indexCount == 0 || draw.indexCount % 3 != 0 || draw.firstIndex > frame.triangle->indexCount() ||
             draw.indexCount > frame.triangle->indexCount() - draw.firstIndex ||
-            std::ranges::any_of(draw.transform.clipFromLocal, [](float value) { return !std::isfinite(value); }))
+            !draw.transform.valid() || (frame.materialKeepAlive.empty() ? (draw.material != 0 || draw.transform.view == GeometryView::Material) : draw.material >= frame.materialKeepAlive.size()))
         {
             std::fprintf(stderr, "Vulkan error: invalid indexed Draw snapshot before acquisition.\n");
             return ClearFrameResult::Failed;

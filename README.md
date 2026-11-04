@@ -19,7 +19,7 @@ cmake --build build --config Debug --target MadCatShaders
 .\build\Debug\MadCat.exe
 ```
 
-首次配置通过 CMake FetchContent 获取固定提交的 GLFW 3.4、GLM 1.0.1 和 cgltf 1.15，需要访问 GitHub；依赖源码和构建产物位于 `build` 下。GLM 用于 CPU 场景与资产变换，锁定提交 `0af55ccecd98d4e5a8d1fad7de25ba429d60e863`，不启用其测试或编译库。cgltf 使用 MIT 许可，锁定提交 `360db1a95480fe102ae9c69b27c5d101167ff5ba`，仅作为资产模块内部的解析依赖。
+首次配置通过 CMake FetchContent 获取固定提交的 GLFW 3.4、GLM 1.0.1、cgltf 1.15 和 stb_image 2.30，需要访问 GitHub；依赖源码和构建产物位于 `build` 下。GLM 用于 CPU 场景与资产变换，锁定提交 `0af55ccecd98d4e5a8d1fad7de25ba429d60e863`，不启用其测试或编译库。cgltf 使用 MIT 许可，锁定提交 `360db1a95480fe102ae9c69b27c5d101167ff5ba`；stb 锁定提交 `d14d46f6b44456eb88beac58cba833a4135d4c89`，提供 MIT／公有领域双许可。二者只作为资产模块内部的解析与图片解码依赖。[stb 源码与许可](https://github.com/nothings/stb/tree/d14d46f6b44456eb88beac58cba833a4135d4c89)
 
 程序创建一个 1280 × 720、标题为 MadCat 的可调整大小窗口，输出设备和 Surface 能力报告，选择设备、创建一个 Graphics／Compute／Present 队列，加载两个 Shader Module，再创建 Swapchain 和三角形管线。画面为深蓝背景上的插值彩色三角形：上方红色、左下蓝色、右下绿色。背景线性 RGBA 为 `(0.04, 0.08, 0.16, 1.0)`，本机 sRGB 格式下背景像素约为 RGB `(56, 80, 111)`。Debug 启用验证层，Release 不主动启用验证层。关闭前先等待 acquisition、GPU 提交和呈现资源退役，再释放帧渲染器、管线、Swapchain、两个 Shader Module、Device、Surface、Instance 和窗口；初始化或帧执行失败返回非零状态。
 
@@ -291,7 +291,7 @@ cmake --build build --config Release --target MadCatCameraChecks
 
 示例默认相机视野角为 60°、近远裁剪面为 0.1／20。每帧先应用姿态请求并更新过期世界矩阵，再根据实际 Swapchain 宽高比提取相机，计算 `clipFromLocal = projection * view * modelWorld`。模型局部平面 z 为 0，模型的 Y 旋转使各顶点在相机空间具有不同深度。窗口 resize 重新计算投影，不再把裁剪空间三角形按窗口比例拉伸；相机投影负责唯一一次 Y 翻转。
 
-[DrawTransform](src/RHI/DrawTransform.h) 在 offset 0 保存列主序 16 个 float，大小 64、对齐 16；提取逐列逐元素写入，避免依赖 GLM 对象 ABI。管线声明 Vertex 阶段 offset 0／size 64 的 Push Constant，每次录制在 Draw 前复制快照。Shader 使用显式 `column_major` 和 `mul(matrix, position)`；锁定 Slang 的 SPIR-V 为 `RowMajor`／MatrixStride 16 与 `VectorTimesMatrix` 的组合。该组合已通过独立投影与实际像素核对，不能仅凭装饰名称要求主机转置。[Slang 矩阵布局](https://docs.shader-slang.org/en/stable/external/slang/docs/user-guide/a1-01-matrix-layout.html)
+[DrawTransform](src/RHI/DrawTransform.h) 在 offset 0 保存列主序 16 个 float，裁剪矩阵占 64 字节，整个参数块大小 128、对齐 16；提取逐列逐元素写入，避免依赖 GLM 对象 ABI。管线声明 Vertex 阶段 offset 0／size 128 的 Push Constant（附加世界法线列、可视化模式和属性标志，见下文），每次录制在 Draw 前复制快照。Shader 使用显式 `column_major` 和 `mul(matrix, position)`；锁定 Slang 的 SPIR-V 为 `RowMajor`／MatrixStride 16 与 `VectorTimesMatrix` 的组合。该组合已通过独立投影与实际像素核对，不能仅凭装饰名称要求主机转置。[Slang 矩阵布局](https://docs.shader-slang.org/en/stable/external/slang/docs/user-guide/a1-01-matrix-layout.html)
 
 姿态变化只更新命令中的参数，复用顶点缓冲和管线。参数按值录入命令，CPU 临时对象不必存活到 GPU 完成；原有单帧等待继续保护命令资源复用。非法宽高比／提取失败会报告错误，非有限矩阵在调用 Vulkan 录制函数前拒绝；没有可变 GPU 上传内存或 Descriptor。[Push Constants 录制方式](https://docs.vulkan.org/guide/latest/push_constants.html)
 
@@ -326,23 +326,27 @@ cmake --build build --config Debug --target MadCatGltfChecks MadCatGltfInspect
 cmake --build build --config Release --target MadCatGltfChecks MadCatGltfInspect
 .\build\Debug\MadCatGltfInspect.exe build\verification\gltf\fixtures\index-5123\model.gltf
 .\build\Release\MadCatGltfInspect.exe build\_deps\cgltf-src\fuzz\data\Box.glb
+.\build\Debug\MadCatGltfInspect.exe assets\models\Suzanne\Suzanne.gltf
 ```
 
-第一条检查目标生成自己的测试资产。两个命令行示例分别输出 3 个顶点／3 个索引，以及 Box 的 24 个顶点／36 个索引／两个节点。工具接受一个文件路径；成功返回 0，文件、格式或导入失败返回 1 并输出路径及诊断。Windows 入口支持中文路径。CPU 目标不链接 Vulkan、GLFW、ECS 或 Scene，但根项目首次配置仍需要上文列出的 SDK。
+第一条检查目标生成自己的测试资产。前两个命令行示例分别输出 3 个顶点／3 个索引，以及 Box 的 24 个顶点／36 个索引／两个节点。工具另行输出法线和 TEXCOORD_0 的值数量：Box 为 24／0，Suzanne 为 11808／11808。工具接受一个文件路径；成功返回 0，文件、格式或导入失败返回 1 并输出路径及诊断。Windows 入口支持中文路径。CPU 目标不链接 Vulkan、GLFW、ECS 或 Scene，但根项目首次配置仍需要上文列出的 SDK。
 
 | 数据 | 当前支持与行为 |
 |---|---|
 | 文件与缓冲 | `.gltf`、GLB BIN、本地相对外部缓冲、base64 data URI；支持交错顶点、中文路径与 URI 百分号解码；不加载远程 URI |
 | 几何 | 静态 TRIANGLES，FLOAT VEC3 POSITION；可选 u8／u16／u32 索引，统一复制成 uint32；无索引时顺序生成；保留多个 Mesh 和 Primitive |
+| 法线 | 可选非 normalized FLOAT VEC3 NORMAL，复制至 `MeshPrimitive::normals`；要求有限值且长度与 1 的差小于 `1e-4`，保留源值及 Mesh 局部空间，不自动归一化或应用节点矩阵 |
+| UV | 可选 VEC2 TEXCOORD_0，支持非 normalized FLOAT 或 normalized u8／u16，统一复制至 `MeshPrimitive::texcoords0` 的 float2；保留方向及范围，不翻转或裁剪 |
+| 可选属性 | 缺失法线／UV 时相应向量为空，不自动生成；存在时数量须与 POSITION 一致；拒绝重复属性、错误格式、非有限值和不满足四字节顶点对齐的布局 |
 | 节点 | 名称、父子索引、共享 Mesh 索引、局部及世界矩阵；右手／Y 向上／米／列向量，`world = parent * local`，TRS 为 `T * R * S`，显式转换 glTF 四元数 xyzw 顺序 |
 | 场景 | 导入全部 Mesh／节点并保留原顺序；`sceneRoots` 选默认场景，否则首个场景，没有场景时取所有无父节点 |
 | 错误 | `std::expected<GltfGeometry, GltfError>`，失败不返回部分模型；诊断包含文件与失败上下文；CPU 内存分配失败可能抛异常 |
 
 返回的向量与矩阵在解析器释放、输入文件关闭后仍然有效，不含 cgltf 或 Vulkan 对象。位置保留在 Mesh 局部空间，多节点引用同一 Mesh，不复制实例顶点。TRS 要求有限值与单位四元数，允许零／负缩放；显式矩阵要求有限仿射矩阵，保留完整世界矩阵及继承剪切，不做 TRS 分解或完整 glTF 合规验证。
 
-当前忽略法线、UV、材质、图片、相机、灯光和 extras；明确拒绝必需扩展、稀疏 accessor、压缩、蒙皮、动画、形变目标与 GPU instancing。[15 组 CPU 检查](tests/GltfChecks.cpp)覆盖三种索引、无索引、交错布局、多个 Primitive、GLB／base64、中文路径、数据所有权、共享 Mesh、场景选择、层级变换、损坏输入与不支持项，以及 2048 层非递归更新；Debug／Release 均已通过，另用固定依赖中的 Box.glb 与 TriangleWithoutIndices.gltf 检查成功。接口边界见[资产导入契约](docs/architecture-design.md#cpu-gltf-几何当前实现)。
+属性格式依据 [glTF 2.0 网格规范](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#meshes)。当前忽略其他顶点属性（含额外 UV 集）、相机、灯光和 extras；基础材质、PNG／JPEG 与采样器支持见下文；明确拒绝必需扩展、稀疏 accessor、压缩、蒙皮、动画、形变目标与 GPU instancing。[19 组 CPU 检查](tests/GltfChecks.cpp)覆盖三种索引、无索引、法线／三种 UV 编码、分离／交错布局、缺失属性、GLB／base64、所有权与重试、属性格式／数量／有限值／法线长度／对齐错误，以及既有节点、层级和不支持项；Debug／Release 均已通过。真实 Suzanne、Box.glb 和不含可选属性的 TransformProbe 导入通过。接口边界见[资产导入契约](docs/architecture-design.md#cpu-gltf-几何当前实现)。
 
-CPU 导入结果通过下节接口创建保留层级的 Scene 实例，再由 RenderScene 提取并共享 GPU 几何；资产模块本身继续只负责 CPU 数据。法线／UV、材质与贴图仍待实现。
+CPU 导入结果通过下节接口创建保留层级的 Scene 实例，再由 RenderScene 提取并共享 GPU 几何；资产模块本身继续只负责 CPU 数据。法线／UV 已保存到 CPU 模型，GPU 法线／UV 可视化及基础色纹理采样见下文。
 
 ## 模型资产与 Scene 实例化
 
@@ -381,7 +385,7 @@ cmake --build build --config Release --target MadCatModelSceneChecks MadCatScene
 
 [模型实例检查](tests/ModelSceneChecks.cpp) 使用原样下载的 Suzanne 验证两个实例独立变换、删除隔离及几何共享，用 TransformProbe 验证多 Primitive、父子继承与未选中隔离，并覆盖多根、外部父节点、矩阵剪切／零缩放、查询保护、错误恢复及 2048 层遍历。MSVC Debug 运行 8 组行为检查，Release 另运行完整分配失败检查（共 9 组、30 个分配失败位置）；Debug 的 STL `vector` 移动会分配调试代理，故不在该模式注入全局分配失败。既有 Scene／Camera／场景矩阵绘制／glTF 导入和静态转换检查一并回归。
 
-窗口 `--gltf` 已消费这些实例及 MeshInstance，见 [RenderScene 与共享几何](#renderscene-与共享几何)；法线／UV 和材质贴图继续分步接入。
+窗口 `--gltf` 已消费这些实例及 MeshInstance，见 [RenderScene 与共享几何](#renderscene-与共享几何)；法线／UV 和基础色材质贴图已接入 GPU，光照继续分步接入。
 
 ## glTF 静态模型预览
 
@@ -389,7 +393,7 @@ cmake --build build --config Release --target MadCatModelSceneChecks MadCatScene
 
 ## RenderScene 与共享几何
 
-`--gltf` 加载静态 glTF／GLB，创建两个独立模型实例；每个选中节点都是 Scene Entity，MeshInstance 保存资产引用。无参数仍运行原三角形示例。首次运行先准备匹配三维顶点接口的 Shader；本次未改变 Shader 或绑定布局。
+`--gltf` 加载静态 glTF／GLB，创建两个独立模型实例；每个选中节点都是 Scene Entity，MeshInstance 保存资产引用。无参数仍运行原三角形示例。首次运行先准备匹配当前顶点／常量布局的 Shader；从旧版本更新后应先关闭程序并手动重新编译。
 
 ```powershell
 cmake --build build --config Debug --target MadCat MadCatShaders MadCatRenderSceneChecks
@@ -410,8 +414,9 @@ cmake --build build --config Debug --target MadCat MadCatShaders MadCatRenderSce
 | 6 | 恢复缺失实例并重置姿态，复用已上传几何 |
 | 7 | 默认姿态，反向提交现存绘制 |
 | 8 | 移动并旋转第二个实例，第一个保持原样 |
+| 9 | 第一个实例旋转 35°，相对默认缩放为 `(1.6, .6, 1.2)`，第二个保持原样 |
 
-上传沿用 24 字节 ColoredVertex 和 uint32 索引。诊断色来自每份 Primitive 的局部 AABB，未使用文件材质、法线、UV 或贴图。唯一几何总顶点数最多 0x01000000，索引数须可由 uint32 表示，上传另受设备限制。TransformProbe 两个模型实例共 8 次绘制，上传仅 6 顶点／6 索引；两个 Suzanne 共 2 次绘制，上传仅 11808 顶点／11808 索引。
+上传使用 44 字节 ColoredVertex 和 uint32 索引，位置／诊断色／局部法线／UV 的 offset 为 0／12／24／36。诊断色来自每份 Primitive 的局部 AABB；模型默认显示基础色材质与贴图，C 切诊断色，N／U 使用真实法线／UV。唯一几何总顶点数最多 0x01000000，索引数须可由 uint32 表示，上传另受设备限制。TransformProbe 两个模型实例共 8 次绘制，上传仅 6 顶点／6 索引；两个 Suzanne 共 2 次绘制，上传仅 11808 顶点／11808 索引。
 
 CPU 导入、实例化、边界和打包在窗口／Vulkan 创建前检查。每帧先应用编辑、更新世界矩阵，再提取快照；过期矩阵、非法相机／资产、矩阵溢出或未上传几何引用会失败并诊断。当前几何集合在启动时固定；新增几何需显式重建批次和上传，尚无运行期资产卸载／替换。
 
@@ -423,9 +428,61 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.p
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Release -Scenario model -ModelPath assets/models/Suzanne/Suzanne.gltf
 ```
 
-[CPU 检查](tests/RenderSceneChecks.cpp) 的 6 组覆盖层级、快照、失效／溢出、几何校验、资产标识隔离，以及真实 Suzanne／TransformProbe 的独立编辑、删除与恢复。管线模拟新增索引子范围与越界检查。两种配置的模型窗口检查覆盖两种资产、独立变换、删除至空场景、恢复、反序、resize、最小化恢复和安全退出；TransformProbe 每帧最多 38 个独立解析像素，Suzanne 为左右实例可见性冒烟。Debug 开启同步验证，无 warning／error；Release 未主动启用验证层。
+[CPU 检查](tests/RenderSceneChecks.cpp) 的 8 组覆盖层级、快照、失效／溢出、几何校验、资产标识隔离，以及真实 Suzanne／TransformProbe 的独立编辑、删除与恢复。管线模拟新增索引子范围与越界检查。两种配置的模型窗口检查覆盖两种资产、独立变换、删除至空场景、恢复、反序、resize、最小化恢复和安全退出；TransformProbe 每帧最多 38 个独立解析像素，Suzanne 为左右实例可见性冒烟。Debug 开启同步验证，无 warning／error；Release 未主动启用验证层。
 
-法线／UV、材质贴图、基础光照、通用 Pass／Render Graph 和运行期 Shader 更新仍待实现，F03 尚未完成。
+基础色材质与贴图已实现；基础光照、通用 Pass／Render Graph 和运行期 Shader 更新仍待实现，F03 尚未整体验收。
+
+## 法线与 UV 可视化
+
+在模型窗口按 `M` 显示基础色材质（模型默认）、`C` 显示位置诊断色、`N` 显示世界法线、`U` 显示 UV；按 `9` 检查第一个实例的非均匀缩放与旋转。按键只更改后续 Draw 常量，不重建管线或重传几何。
+
+世界法线使用 `transpose(inverse(mat3(world)))`，在片元透视插值后归一化并以 `normal * .5 + .5` 映射到 RGB，结果不依赖相机方向。UV 使用 `RG = frac(uv)`、B = 0；负值与大于 1 的坐标在显示时重复，CPU／GPU 原始 UV 不裁剪或翻转。缺失所选属性、奇异世界变换导致法线不可用，或片元法线长度为零时显示洋红色；诊断色与 UV 模式仍可绘制奇异变换下的有效几何。N／U 是诊断显示；M 模式的纹理采样见下一节，当前仍无自动法线生成。
+
+[DrawTransform](src/RHI/DrawTransform.h) 是 128 字节值快照：裁剪矩阵占 offset 0～63，三个法线列按 float4 放在 64／80／96，模式与标志在 112／116，三个法线列的 w 分量存储基础色 RGB，基础色 alpha／裁剪阈值在 120／124。法线矩阵统一除以一个正的最大绝对分量，避免直接上传极大逆缩放；这一公共比例在片元归一化后消失。RenderScene 按 Primitive 传递法线／UV 存在标志；renderer 在 acquire 前检查全部浮点常量、模式及标志。[Vulkan Push Constant 范围](https://docs.vulkan.org/refpages/latest/refpages/source/VkPushConstantRange.html)
+
+```powershell
+cmake --build build --config Debug --target MadCatShaders MadCat MadCatRenderSceneChecks MadCatTriangleChecks
+.\build\Debug\MadCat.exe --gltf assets/models/AttributeProbe.gltf
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario attributes
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Release -Scenario attributes
+```
+
+[AttributeProbe](assets/models/README.md#法线与-uv-参考资产) 是原创内嵌资产，一个 Primitive 有法线／UV，另一个两者均缺失。[像素参考](tests/AttributePixelReference.ps1) 独立计算投影、透视插值、逆缩放／旋转、片元归一化与 sRGB；每帧 22 点同时覆盖有效属性和缺失提示。Debug／Release 检查均通过，包括模式切换、旋转／非均匀缩放、相机变化、反序、resize／最小化恢复、单次上传与安全退出；Debug 同步验证无 warning／error。另通过 Debug Suzanne 可视化冒烟、原深度场景和 Release TransformProbe 生命周期回归。Suzanne 只做可见性冒烟并查看截图，不是独立逐像素材质验收。
+
+CPU 检查另覆盖剪切、反射、奇异与极小缩放、相机独立性、属性打包和坏数据；GPU 精确像素范围限上述参考资产，不承诺完整 glTF、照明或材质支持。
+
+## 基础材质、图片与纹理采样
+
+`--gltf` 模型默认显示 `M` 基础色材质：线性 `baseColorFactor × baseColorTexture`，暂不计算光照。`C`／`N`／`U` 保留诊断视图；`0` 将第一个实例的 X 缩放取负，检查绕序与单面材质。无参数仍默认彩色三角形。更新后先关闭旧程序并重新构建 Shader。
+
+```powershell
+cmake --build build --config Debug --target MadCatShaders MadCat MadCatMaterialChecks
+.\build\Debug\MadCat.exe --gltf assets/models/Suzanne/Suzanne.gltf
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario materials
+cmake --build build --config Release --target MadCat MadCatMaterialChecks MadCatGltfChecks
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Release -Scenario materials
+```
+
+| 能力 | 当前行为 |
+|---|---|
+| 材质 | Primitive 保存可选材质索引；缺省为白色。导入基础色 RGBA、基础色纹理、金属度／粗糙度标量、alphaMode／alphaCutoff 和 doubleSided；金属度／粗糙度尚不参与着色 |
+| 图片 | stb_image 解码 PNG／JPEG，支持外部相对 URI（含中文及百分号解码）、base64 data URI 和 glTF／GLB bufferView；CPU 拥有顶行优先、非预乘 RGBA8，不做方向或 ICC 色彩变换 |
+| 图片边界 | 每边最多 16384，编码／解码存储各不超过 256 MiB；拒绝不匹配 MIME、坏数据、远程 URI 和其他格式，失败无部分模型 |
+| 采样 | 基础色使用 TEXCOORD_0，无 UV 的有贴图 Primitive 在窗口创建前拒绝。支持 nearest／linear、四种 mip 过滤、repeat／clamp／mirrored repeat；缺省放大 linear、缩小 trilinear、repeat |
+| 色彩 | RGBA8 sRGB 图像硬件解码 RGB 后过滤，再乘线性因子；alpha 保持线性，交换链负责显示编码。缺省材质或无贴图材质绑定共享白色纹理 |
+| 覆盖与面向 | OPAQUE 忽略 alpha；MASK 在相乘后按阈值裁剪。遵守 doubleSided，负世界行列式修正面向；BLEND 可保存为 CPU 数据，但当前不透明预览明确拒绝 |
+
+资产导入分为 [图片来源读取](src/Assets/GltfImages.cpp)、[stb_image 解码适配](src/Assets/Image.cpp)和[材质／采样器转换](src/Assets/GltfMaterials.cpp)。URI 百分号与 base64 处理复用 cgltf，PNG／JPEG 解码交给开源 [stb_image 2.30](https://github.com/nothings/stb/blob/d14d46f6b44456eb88beac58cba833a4135d4c89/stb_image.h)，其实现仅在一个私有 C 翻译单元编译，并关闭其他格式及文件 I/O。完整 glTF、额外 UV 集、纹理变换、压缩纹理、法线／金属粗糙度贴图着色、透明混合及 PBR 待后续实现。[glTF 材质规范](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#materials)
+
+[采样纹理上传](src/RHI/Vulkan/VulkanSampledTexture.h)使用 coherent staging、专用 device-local 图像和完整 mip 链；单次启动提交完成后才释放上传内存。返回时处于同一队列的 `SHADER_READ_ONLY_OPTIMAL`／Fragment sampled-read 状态，未来 Render Graph 导入必须显式交接。set 0 的 binding 0 是图像、binding 1 是采样器；具名 C++ 槽位与 Shader 对齐。`TextureBindingRef` 拥有只读 Descriptor、采样器并保留纹理；应用、管线和帧上下文保活，resize 不重传，GPU 完成后释放。
+
+Draw 常量仍为 128 字节：三个法线列的 xyz 不变，其 w 保存基础色 RGB；offset 120／124 保存 alpha／alphaCutoff。Shader 裁剪使用 `DemoteToHelperInvocation`，Sandbox 会查询并选择支持该 Vulkan 1.3 feature 的设备，Device 仅在查询支持时启用，不凭显卡型号假定可用。
+
+[3 组 CPU 材质检查](tests/MaterialChecks.cpp)保留 PNG／JPEG、三类图片来源、所有权／重试、材质／采样器、默认白色与实例共享，以及截断图片、BLEND 渲染和缺失 UV 拒绝。Debug／Release 均通过，原有 glTF 19 组检查也通过。删去逐字段坏值组合和重复资产导入，避免为上游解码器重复维护测试。
+
+原创 [MaterialProbe](assets/models/README.md#材质与采样参考资产)有四种材质，[独立像素参考](tests/MaterialPixelReference.ps1)每帧 54 点覆盖 sRGB 后过滤、因子、MASK、寻址及 mip。材质窗口检查保留默认、镜像、反序、resize 和最小化恢复五次采样；stb_image 替换后的 Debug 参考场景与 Suzanne 外部贴图冒烟均通过，同步验证无 warning／error，上传共享与退出释放通过。未重跑 Release GPU 场景。Suzanne 无独立逐像素参考，不据此宣称完整外观或 PBR 验收。
+
+当前 GPU 材质／几何在启动时固定；没有运行期图片替换、资产卸载、通用绑定系统或 Render Graph。这里只实现基础色贴图预览，F03 尚未整体验收。下一步为基础光照，再推进通用 Pass／图与阴影。
 
 ## 手动编译 Shader
 
@@ -438,7 +495,7 @@ cmake --build build --config Debug --target MadCatShaders
 cmake --build build --config Debug --target MadCatShaderChecks
 ```
 
-`MadCatShaders` 每次手动调用都会编译两个阶段，Debug／Release 使用同一套参数和产物目录。源码为 [triangle.slang](shaders/triangle.slang)，顶点入口为 `vertexMain`，片元入口为 `fragmentMain`；保留入口名称，直接生成 SPIR-V 1.6，使用 `-O0`，将警告视为错误，再执行 `spirv-val --target-env vulkan1.3`。当前顶点输入为 location 0 的 float3 位置和 location 1 的 float3 颜色，来自 CPU 上传的顶点缓冲；实测两个模块只声明 `Shader` capability，阶段间颜色接口仍位于 location 0，无 Descriptor。[Slang 命令行参考](https://docs.shader-slang.org/en/stable/external/slang/docs/command-line-slangc-reference.html)
+`MadCatShaders` 每次手动调用都会编译两个阶段，Debug／Release 使用同一套参数和产物目录。源码为 [triangle.slang](shaders/triangle.slang)，顶点入口为 `vertexMain`，片元入口为 `fragmentMain`；保留入口名称，直接生成 SPIR-V 1.6，使用 `-O0`，将警告视为错误，再执行 `spirv-val --target-env vulkan1.3`。当前顶点输入为 location 0／1／2 的 float3 位置／颜色／法线及 location 3 的 float2 UV；片元使用 set 0 的基础色图像／采样器，并声明 `Shader` 和 `DemoteToHelperInvocation` capability。布局与设备要求见前述材质工作流。[Slang 命令行参考](https://docs.shader-slang.org/en/stable/external/slang/docs/command-line-slangc-reference.html)
 
 成功产物位于 `build/shaders/triangle/`：
 
@@ -536,7 +593,7 @@ cmake --build build --config Release --target MadCatBufferChecks MadCatTriangleC
 
 ## 三角形绘制与检查
 
-[`VulkanTrianglePipeline`](src/RHI/Vulkan/VulkanTrianglePipeline.h) 是当前后端验证场景的专用封装：一个 64 字节 Vertex Push Constant 范围、Triangle List、一个与 Swapchain 格式匹配的颜色附件和匹配实际深度纹理的附件格式、单采样、填充且不剔除，启用 LESS 深度测试／写入，不启用混合。它通过 `VkPipelineRenderingCreateInfo` 接入动态渲染，没有 Descriptor。`ColoredVertex` 固定为 24 字节，binding 0、逐顶点，位置为 location 0／float3／偏移 0，颜色为 location 1／float3／偏移 12。
+[`VulkanTrianglePipeline`](src/RHI/Vulkan/VulkanTrianglePipeline.h) 是当前后端验证场景的专用封装：一个 128 字节 Vertex Push Constant 范围、Triangle List、一个与 Swapchain 格式匹配的颜色附件和匹配实际深度纹理的附件格式、单采样、填充且不剔除，启用 LESS 深度测试／写入，不启用混合。它通过 `VkPipelineRenderingCreateInfo` 接入动态渲染，采用 set 0 的基础色图像／采样器绑定。`ColoredVertex` 固定为 44 字节，binding 0、逐顶点，位置 location 0／float3／offset 0，颜色 location 1／float3／offset 12，法线 location 2／float3／offset 24，UV location 3／float2／offset 36。
 
 初始化接收同 Device 的 Vertex／Index 两个 BufferRef，拒绝用途混用、不完整顶点步长、少于三个或超出 uint32 数量的顶点、非三角形索引数及越界索引；失败不创建管线对象。`recordDraw` 绑定管线、正高度 viewport／scissor、顶点及 uint32 索引缓冲，录入有限的 DrawTransform，再记录 `vkCmdDrawIndexed(indexCount, 1, 0, 0, 0)`，索引偏移与 vertexOffset 均为零，primitive restart 关闭。矩阵仍由 Scene／相机提取。[动态渲染格式](https://docs.vulkan.org/refpages/latest/refpages/source/VkPipelineRenderingCreateInfo.html)、[索引绑定](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdBindIndexBuffer.html)、[索引绘制](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdDrawIndexed.html)
 
@@ -547,7 +604,7 @@ cmake --build build --config Debug --target MadCatTriangleChecks
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug
 ```
 
-`MadCatTriangleChecks` 复用模拟 Vulkan 测试程序，包含 45 项管线创建、失败清理、颜色／深度格式、深度比较与写入、顶点／索引布局与绑定、Push Constant 范围与字节内容、非有限输入、动态尺寸、不同索引数量、错误用途／越界拒绝及双缓冲保活检查，不依赖 GPU 或 Shader 工具。窗口脚本会启动程序、改变窗口状态、采集截图并正常关闭，要求桌面可见且无其他窗口遮挡；参考颜色适用于 SDR 的 R8／B8 sRGB 交换链和 Sandbox 的固定场景。普通场景检查十个像素样本，双模型场景增加两个有不同深度胜者的重叠样本；同时核对顶点／索引各上传一次、每个上下文的九索引绘制、颜色／深度尺寸和释放顺序。Debug／Release 遮挡、Debug 场景／裁剪、最小化关闭和连续尺寸变化已通过；Debug 同步验证无 warning／error。
+`MadCatTriangleChecks` 复用模拟 Vulkan 测试程序，包含 66 项管线创建、失败清理、颜色／深度格式、深度比较与写入、顶点／索引布局与绑定、Push Constant 范围与字节内容、非有限输入、动态尺寸、不同索引数量、错误用途／越界拒绝及双缓冲保活检查，不依赖 GPU 或 Shader 工具。窗口脚本会启动程序、改变窗口状态、采集截图并正常关闭，要求桌面可见且无其他窗口遮挡；参考颜色适用于 SDR 的 R8／B8 sRGB 交换链和 Sandbox 的固定场景。普通场景检查十个像素样本，双模型场景增加两个有不同深度胜者的重叠样本；同时核对顶点／索引各上传一次、每个上下文的九索引绘制、颜色／深度尺寸和释放顺序。Debug／Release 遮挡、Debug 场景／裁剪、最小化关闭和连续尺寸变化已通过；Debug 同步验证无 warning／error。
 
 脚本支持 `-Configuration Release`、`-BuildDirectory <构建目录>`，以及 `-Scenario depth`（相交遮挡／反向绘制／附件重建）、`scene`（场景姿态／裁剪／重复切换）、`modal`（原生缩放循环）、`stress`（连续尺寸变化与快速恢复）、`close-minimized`（最小化关闭）。实际鼠标拖动的人工验收仍需单独进行。日志、模拟检查结果和截图均位于 `<构建目录>/verification/triangle/`。
 

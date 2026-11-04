@@ -1,17 +1,25 @@
 param(
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug',
     [string]$BuildDirectory = 'build',
-    [ValidateSet('resize', 'close-minimized', 'modal', 'stress', 'scene', 'depth', 'model')][string]$Scenario = 'resize',
+    [ValidateSet('resize', 'close-minimized', 'modal', 'stress', 'scene', 'depth', 'model', 'attributes', 'materials')][string]$Scenario = 'resize',
     [string]$ModelPath = ''
 )
 $ErrorActionPreference = 'Stop'
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $probePath = Join-Path $workspace 'assets/models/TransformProbe.gltf'
 if ($Scenario -eq 'model' -and -not $ModelPath) { $ModelPath = $probePath }
+if ($Scenario -eq 'attributes' -and -not $ModelPath) { $ModelPath = Join-Path $workspace 'assets/models/AttributeProbe.gltf' }
+if ($Scenario -eq 'materials' -and -not $ModelPath) { $ModelPath = Join-Path $workspace 'assets/models/MaterialProbe.gltf' }
 $hasModel = [bool]$ModelPath
 if ($hasModel) { $ModelPath = (Resolve-Path -LiteralPath $ModelPath).Path }
 $referenceModel = $hasModel -and ((Get-FileHash -LiteralPath $ModelPath).Hash -eq (Get-FileHash -LiteralPath $probePath).Hash)
 if ($hasModel) { . (Join-Path $PSScriptRoot 'ModelPixelReference.ps1') }
+$attributeProbe = Join-Path $workspace 'assets/models/AttributeProbe.gltf'
+$referenceAttributes = $hasModel -and ((Get-FileHash -LiteralPath $ModelPath).Hash -eq (Get-FileHash -LiteralPath $attributeProbe).Hash)
+if ($referenceAttributes) { . (Join-Path $PSScriptRoot 'AttributePixelReference.ps1') }
+$materialProbe = Join-Path $workspace 'assets/models/MaterialProbe.gltf'
+$referenceMaterials = $hasModel -and ((Get-FileHash -LiteralPath $ModelPath).Hash -eq (Get-FileHash -LiteralPath $materialProbe).Hash)
+if ($referenceMaterials) { . (Join-Path $PSScriptRoot 'MaterialPixelReference.ps1') }
 $buildPath = if ([IO.Path]::IsPathRooted($BuildDirectory)) { $BuildDirectory } else { Join-Path $workspace $BuildDirectory }
 $buildPath = (Resolve-Path -LiteralPath $buildPath).Path
 $outputRoot = Join-Path $buildPath 'verification/triangle'
@@ -90,6 +98,7 @@ function Convert-Srgb([double]$Value) {
     return [int][Math]::Round(255 * $encoded)
 }
 $referencePose = 0
+$referenceView = $(if ($Scenario -eq 'materials') { 3 } else { 0 })
 $script:modelDeleted = @($false, $false)
 function Rotate-Y([double[]]$Vector, [double]$Degrees) {
     $angle = $Degrees * [Math]::PI / 180
@@ -166,12 +175,12 @@ function Get-OverlapSamples($First, $Second) {
 }
 function Select-Pose([int]$Pose) {
     $before = [regex]::Matches((Read-Log), 'Scene pose presented;').Count
-    $key = [IntPtr](0x31 + $Pose)
+    $key = [IntPtr]($(if ($Pose -eq 9) { 0x30 } else { 0x31 + $Pose }))
     [void][TriangleWindowCheck]::PostMessage($windowState.Handle, 0x100, $key, [IntPtr]1)
     # GLFW derives release/repeat from LPARAM flags, not just WM_KEYUP itself.
     [void][TriangleWindowCheck]::PostMessage($windowState.Handle, 0x101, $key, [IntPtr]0xC0000001)
     Wait-Condition {
-        $entries = [regex]::Matches((Read-Log), 'Scene pose presented; (\d)')
+        $entries = [regex]::Matches((Read-Log), 'Scene pose presented; (\d+)')
         return $entries.Count -gt $before -and [int]$entries[$entries.Count - 1].Groups[1].Value -eq ($Pose + 1)
     } 'Scene pose presentation'
     $script:referencePose = $Pose
@@ -180,6 +189,17 @@ function Select-Pose([int]$Pose) {
         if ($Pose -eq 4) { $script:modelDeleted[1] = $true }
         if ($Pose -eq 5) { $script:modelDeleted = @($false, $false) }
     }
+}
+function Select-View([int]$View) {
+    $before = [regex]::Matches((Read-Log), 'geometry view presented;').Count
+    $key = [IntPtr](@(0x43,0x4E,0x55,0x4D)[$View])
+    [void][TriangleWindowCheck]::PostMessage($windowState.Handle, 0x100, $key, [IntPtr]1)
+    [void][TriangleWindowCheck]::PostMessage($windowState.Handle, 0x101, $key, [IntPtr]0xC0000001)
+    Wait-Condition {
+        $entries = [regex]::Matches((Read-Log), 'geometry view presented; (\d)')
+        return $entries.Count -gt $before -and [int]$entries[$entries.Count - 1].Groups[1].Value -eq $View
+    } 'geometry view presentation'
+    $script:referenceView = $View
 }
 function Check-Pixels([string]$Label) {
     # Wait for restore/compositor animation before sampling physical screen pixels.
@@ -195,6 +215,8 @@ function Check-Pixels([string]$Label) {
         # Reference values apply to the current Slang triangle and SDR sRGB output.
         if ((Read-Log) -notmatch 'Swapchain created; [^\r\n]*format (43|50),') { throw 'Pixel reference requires an sRGB R8/B8 Swapchain' }
         $aspect = $size[0] / [double]$size[1]
+        if ($referenceMaterials) { Check-MaterialPixels $bitmap $aspect $Label; return }
+        if ($referenceAttributes) { Check-AttributePixels $bitmap $aspect $Label; return }
         if ($hasModel) { Check-ModelPixels $bitmap $aspect $Label; return }
         $vertices = @(Get-ProjectedVertices $aspect)
         $second = if ($script:referencePose -ge 5) { @(Get-ProjectedVertices $aspect 1) } else { $null }
@@ -259,10 +281,44 @@ try {
     [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 9)
     [void][TriangleWindowCheck]::SetWindowPos($windowState.Handle, [IntPtr](-1), 30, 30, 1100, 760, 0x10)
     Wait-Presentation 0
+    if ($hasModel -and $Scenario -ne 'materials') { Select-View 0 }
     Check-Pixels 'initial'
     if ($Scenario -eq 'close-minimized') {
         [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 6)
         Wait-Condition { (Read-Log) -match 'rendering paused;' } 'minimize'
+    } elseif ($Scenario -eq 'materials') {
+        $pipelineCount = [regex]::Matches((Read-Log), 'Triangle pipeline created;').Count
+        Select-Pose 9; Check-Pixels 'material-mirrored'
+        Select-Pose 6; Check-Pixels 'material-reverse'
+        if ([regex]::Matches((Read-Log), 'Triangle pipeline created;').Count -ne $pipelineCount) { throw 'Material/instance edits rebuilt pipeline' }
+        Resize-To 800 580 'material-resized'
+        $before = Get-ReadyCount
+        [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 6)
+        Wait-Condition { (Read-Log) -match 'rendering paused;' } 'material minimize'
+        [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 9)
+        Wait-Presentation $before
+        Check-Pixels 'material-restored'
+    } elseif ($Scenario -eq 'attributes') {
+        $pipelineCount = [regex]::Matches((Read-Log), 'Triangle pipeline created;').Count
+        Select-View 1; Check-Pixels 'normal'
+        Select-Pose 1; Check-Pixels 'normal-rotated'
+        Select-Pose 8; Check-Pixels 'normal-nonuniform'
+        Select-View 2; Check-Pixels 'uv-nonuniform'
+        Select-Pose 2; Check-Pixels 'uv-camera'
+        Select-Pose 0; Check-Pixels 'uv-default'
+        Select-Pose 6; Check-Pixels 'uv-reverse'
+        if ((Get-FileHash (Join-Path $outputRoot "$name-uv-default.png")).Hash -ne
+            (Get-FileHash (Join-Path $outputRoot "$name-uv-reverse.png")).Hash) { throw 'Reverse order changed UV image' }
+        Select-View 0; Check-Pixels 'color-reset'
+        if ([regex]::Matches((Read-Log), 'Triangle pipeline created;').Count -ne $pipelineCount) { throw 'View/pose edits rebuilt pipeline' }
+        Select-View 1
+        Resize-To 800 580 'normal-resized'
+        $before = Get-ReadyCount
+        [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 6)
+        Wait-Condition { (Read-Log) -match 'rendering paused;' } 'attribute minimize'
+        [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 9)
+        Wait-Presentation $before
+        Check-Pixels 'normal-restored'
     } elseif ($Scenario -eq 'model') {
         Select-Pose 1
         Check-Pixels 'model-parent'
@@ -345,17 +401,22 @@ try {
     $log = Read-Log
     if ($appProcess.ExitCode -ne 0 -or $log -match 'Vulkan \[(error|warning)\]|Vulkan error:|GLFW error|MadCat error:|MadCat rendering failed:') { throw "Application failed (see $errorPath)" }
     $pipelines = [regex]::Matches($log, 'Triangle pipeline created;').Count
+    $sampled = [regex]::Matches($log, 'Sampled texture uploaded;').Count
+    if ($sampled -lt 1 -or $sampled -ne [regex]::Matches($log, 'Sampled texture destroyed\.').Count -or
+        [regex]::Matches($log,'Texture binding created\.').Count -ne [regex]::Matches($log,'Texture binding destroyed\.').Count -or
+        $log -notmatch '(?s)Clear renderer destroyed.*Triangle pipeline destroyed.*Swapchain destroyed.*Texture binding destroyed.*Sampled texture destroyed.*Device destroyed') { throw 'Sampled image/descriptor lifetime mismatch' }
+    if ($referenceMaterials -and ($sampled -ne 3 -or [regex]::Matches($log,'Texture binding created\.').Count -ne 4)) { throw 'Shared image/texture upload was duplicated' }
     if ($pipelines -lt 1 -or $pipelines -ne [regex]::Matches($log, 'Triangle pipeline destroyed\.').Count -or
         $pipelines -ne [regex]::Matches($log, 'Swapchain created;').Count -or $pipelines -ne [regex]::Matches($log, 'Swapchain destroyed\.').Count -or
         $pipelines -ne [regex]::Matches($log, '(?s)Clear renderer destroyed.*?Triangle pipeline destroyed.*?Swapchain destroyed').Count) { throw 'Pipeline/Swapchain lifetime count or order mismatch' }
     if ([regex]::Matches($log, 'Shader Module created;').Count -ne 2 -or [regex]::Matches($log, 'Shader Module destroyed\.').Count -ne 2 -or
         $log -notmatch '(?s)Triangle pipeline destroyed.*Swapchain destroyed.*Shader Module destroyed.*Shader Module destroyed.*Device destroyed.*Surface destroyed.*Instance destroyed') { throw 'Module/Device destruction count or order mismatch' }
-    $vertexBytes = 96; $indexBytes = 36; $indexCount = 9
+    $vertexBytes = 176; $indexBytes = 36; $indexCount = 9
     if ($hasModel) {
         $preview = [regex]::Match($log, 'shared model geometry ready; (\d+) primitives, (\d+) vertices, (\d+) indices; (\d+) initial draws\.')
         if (-not $preview.Success) { throw 'Missing model preparation statistics' }
         if ($referenceModel -and $preview.Value -ne 'shared model geometry ready; 2 primitives, 6 vertices, 6 indices; 8 initial draws.') { throw 'Shared glTF geometry count mismatch' }
-        $vertexBytes = 24 * [int]$preview.Groups[2].Value
+        $vertexBytes = 44 * [int]$preview.Groups[2].Value
         $indexCount = [int]$preview.Groups[3].Value
         $indexBytes = 4 * $indexCount
         if ($Scenario -eq 'model') {

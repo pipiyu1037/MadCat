@@ -66,7 +66,7 @@ void ModelScene::spawn(size_t index)
 
 bool ModelScene::selectPose(int pose)
 {
-    if (pose < 0 || pose > 7) { return false; }
+    if (pose < 0 || pose > 9) { return false; }
     if (pose == 5)
     {
         for (size_t index = 0; index < roots_.size(); ++index)
@@ -81,6 +81,12 @@ bool ModelScene::selectPose(int pose)
         scene::LocalTransform parent;
         parent.translation.x = index == 0 ? -.75f : .75f;
         parent.scale = glm::vec3(.8f);
+        if (pose == 9 && index == 0) { parent.scale.x = -parent.scale.x; }
+        if (pose == 8 && index == 0)
+        {
+            parent.scale *= glm::vec3(1.6f, .6f, 1.2f);
+            parent.rotation = glm::angleAxis(glm::radians(35.f), glm::vec3(0, 1, 0));
+        }
         if ((pose == 1 && index == 0) || (pose == 7 && index == 1))
         {
             parent.translation += glm::vec3(index == 0 ? .15f : -.15f, .25f, -.25f);

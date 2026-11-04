@@ -1,0 +1,109 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "MadCat authored attribute reference"
+  },
+  "buffers": [
+    {
+      "uri": "data:application/octet-stream;base64,AACAvwAAgL8AAAAAAAAAAAAAgL8AAAA/AAAAvwAAgD8AAAAAAAAAAAAAgL8AAAAAAACAPwAAgL8AAAA/AAAAPwAAgD8AAAAAmpkZP83MTD8AAAAAAAAAAJqZGT/NzEw/zcxMPwAAAACamRk/AAAAAAAAAAAAAKA/AACAvgAAgD4AAIA/",
+      "byteLength": 132
+    }
+  ],
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteOffset": 0,
+      "byteLength": 72
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 72,
+      "byteLength": 36
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 108,
+      "byteLength": 24
+    }
+  ],
+  "accessors": [
+    {
+      "bufferView": 0,
+      "byteOffset": 0,
+      "componentType": 5126,
+      "count": 3,
+      "type": "VEC3",
+      "min": [
+        -1,
+        -1,
+        0
+      ],
+      "max": [
+        0,
+        1,
+        0.5
+      ]
+    },
+    {
+      "bufferView": 0,
+      "byteOffset": 36,
+      "componentType": 5126,
+      "count": 3,
+      "type": "VEC3",
+      "min": [
+        0,
+        -1,
+        0
+      ],
+      "max": [
+        1,
+        1,
+        0.5
+      ]
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 3,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 2,
+      "componentType": 5126,
+      "count": 3,
+      "type": "VEC2"
+    }
+  ],
+  "meshes": [
+    {
+      "name": "attributes and missing attributes",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 0,
+            "NORMAL": 2,
+            "TEXCOORD_0": 3
+          }
+        },
+        {
+          "attributes": {
+            "POSITION": 1
+          }
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "mesh": 0
+    }
+  ],
+  "scenes": [
+    {
+      "nodes": [
+        0
+      ]
+    }
+  ],
+  "scene": 0
+}

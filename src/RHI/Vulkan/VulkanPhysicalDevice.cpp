@@ -228,6 +228,8 @@ bool queryPhysicalDevices(const VulkanInstance& instance, std::vector<PhysicalDe
         dynamicRendering.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
         VkPhysicalDeviceSynchronization2Features synchronization2{};
         synchronization2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+        VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures demote{};
+        demote.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES;
         VkPhysicalDeviceBufferDeviceAddressFeatures address{};
         address.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
         VkPhysicalDeviceAccelerationStructureFeaturesKHR acceleration{};
@@ -243,6 +245,7 @@ bool queryPhysicalDevices(const VulkanInstance& instance, std::vector<PhysicalDe
         };
         if (canQueryDynamicRendering) { appendFeature(dynamicRendering); }
         if (canQuerySynchronization2) { appendFeature(synchronization2); }
+        if (core13) { appendFeature(demote); }
         if (canQueryAddress) { appendFeature(address); }
         if (canQueryAcceleration) { appendFeature(acceleration); }
         if (canQueryRay) { appendFeature(ray); }
@@ -254,7 +257,8 @@ bool queryPhysicalDevices(const VulkanInstance& instance, std::vector<PhysicalDe
             {canQueryAddress, address.bufferDeviceAddress == VK_TRUE},
             {canQueryAcceleration, acceleration.accelerationStructure == VK_TRUE},
             {canQueryRay, ray.rayQuery == VK_TRUE},
-            {canQueryMaintenance, maintenance.swapchainMaintenance1 == VK_TRUE}
+            {canQueryMaintenance, maintenance.swapchainMaintenance1 == VK_TRUE},
+            {core13, demote.shaderDemoteToHelperInvocation == VK_TRUE}
         };
         if (canQueryAcceleration)
         {
@@ -373,6 +377,7 @@ void printPhysicalDeviceReport(const PhysicalDeviceInfo& device, const SurfaceSu
     };
     reportFeature("dynamicRendering", device.features.dynamicRendering);
     reportFeature("synchronization2", device.features.synchronization2);
+    reportFeature("shaderDemoteToHelperInvocation", device.features.shaderDemoteToHelperInvocation);
     reportFeature("bufferDeviceAddress", device.features.bufferDeviceAddress);
     reportFeature("accelerationStructure", device.features.accelerationStructure);
     reportFeature("rayQuery", device.features.rayQuery);

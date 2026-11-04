@@ -13,6 +13,7 @@
 #include "RHI/Vulkan/VulkanTrianglePipeline.h"
 #include "TriangleScene.h"
 #include "ModelScene.h"
+#include "ModelMaterials.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -43,6 +44,11 @@ bool initializeDevice(const madcat::rhi::VulkanInstance& instance, const madcat:
             return false;
         }
         madcat::rhi::printPhysicalDeviceReport(devices[deviceIndex], support, deviceIndex);
+        if (!devices[deviceIndex].features.shaderDemoteToHelperInvocation.supported)
+        {
+            std::fprintf(stderr,"MadCat: device excluded; material Shader requires shaderDemoteToHelperInvocation.\n");
+            continue;
+        }
         candidates.push_back({std::move(devices[deviceIndex]), std::move(support)});
     }
     std::fprintf(stderr, "Vulkan: physical device capability report complete.\n");
@@ -65,18 +71,25 @@ public:
     SandboxApplication(GLFWwindow* window, const madcat::rhi::VulkanDevice& device, const madcat::rhi::VulkanSurface& surface,
         const madcat::rhi::VulkanShaderModule& vertex, const madcat::rhi::VulkanShaderModule& fragment,
         madcat::rhi::BufferRef vertices, madcat::rhi::BufferRef indices,
-        madcat::sandbox::ModelScene* modelScene, const madcat::render::GeometryBatch* geometry)
+        madcat::sandbox::ModelScene* modelScene, const madcat::render::GeometryBatch* geometry,
+        std::vector<madcat::rhi::TextureBindingRef> materials)
         : window_(window), device_(device), surface_(surface), vertex_(vertex), fragment_(fragment),
-          vertices_(std::move(vertices)), indices_(std::move(indices)), modelScene_(modelScene), geometry_(geometry)
+          vertices_(std::move(vertices)), indices_(std::move(indices)), modelScene_(modelScene), geometry_(geometry),
+          materials_(std::move(materials)), requestedView_(modelScene ? madcat::rhi::GeometryView::Material : madcat::rhi::GeometryView::Color)
     {
         iconified_ = glfwGetWindowAttrib(window_, GLFW_ICONIFIED) == GLFW_TRUE;
         glfwSetWindowUserPointer(window_, this);
         glfwSetKeyCallback(window_, [](GLFWwindow* target, int key, int, int action, int) {
-            const auto* app = static_cast<SandboxApplication*>(glfwGetWindowUserPointer(target));
-            if (action == GLFW_PRESS && key >= GLFW_KEY_1 && key <= (app->modelScene_ ? GLFW_KEY_8 : GLFW_KEY_7))
+            auto* app = static_cast<SandboxApplication*>(glfwGetWindowUserPointer(target));
+            if (action == GLFW_PRESS && key >= GLFW_KEY_1 && key <= (app->modelScene_ ? GLFW_KEY_9 : GLFW_KEY_7))
             {
-                static_cast<SandboxApplication*>(glfwGetWindowUserPointer(target))->requestedPose_ = key - GLFW_KEY_1;
+                app->requestedPose_ = key - GLFW_KEY_1;
             }
+            if (action == GLFW_PRESS && key == GLFW_KEY_C) { app->requestedView_ = madcat::rhi::GeometryView::Color; }
+            if (action == GLFW_PRESS && key == GLFW_KEY_N) { app->requestedView_ = madcat::rhi::GeometryView::WorldNormal; }
+            if (action == GLFW_PRESS && key == GLFW_KEY_U) { app->requestedView_ = madcat::rhi::GeometryView::Texcoord; }
+            if (action == GLFW_PRESS && key == GLFW_KEY_M) { app->requestedView_ = madcat::rhi::GeometryView::Material; }
+            if (action == GLFW_PRESS && key == GLFW_KEY_0 && app->modelScene_) { app->requestedPose_ = 9; }
         });
         glfwSetFramebufferSizeCallback(window_, [](GLFWwindow* target, int, int) {
             static_cast<SandboxApplication*>(glfwGetWindowUserPointer(target))->rebuildPending_ = true;
@@ -157,7 +170,7 @@ private:
             auto candidate = std::make_unique<Presentation>();
             if (!candidate->swapchain.initialize(device_, surface_, {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}) ||
                 !(candidate->depth = madcat::rhi::createDepthTexture(device_, candidate->swapchain.extent().width, candidate->swapchain.extent().height)) ||
-                !candidate->triangle.initialize(device_, candidate->swapchain.surfaceFormat().format, vertex_, fragment_, vertices_, indices_, madcat::rhi::detail::TextureAccess::format(candidate->depth)) ||
+                !candidate->triangle.initialize(device_, candidate->swapchain.surfaceFormat().format, vertex_, fragment_, vertices_, indices_, madcat::rhi::detail::TextureAccess::format(candidate->depth), materials_) ||
                 !candidate->renderer.initialize(device_, candidate->swapchain, candidate->depth, &candidate->triangle))
             {
                 std::fprintf(stderr, "MadCat error: presentation creation/rebuild failed; stopping rendering.\n");
@@ -186,6 +199,7 @@ private:
             if (!snapshot) { throw std::runtime_error(snapshot.error()); }
             auto draws = madcat::render::resolveDraws(*geometry_, *snapshot);
             if (!draws) { throw std::runtime_error(draws.error()); }
+            for (auto& draw : *draws) { draw.transform.view = requestedView_; }
             result = presentation_->renderer.drawIndexed({0.04f, 0.08f, 0.16f, 1.0f}, *draws);
             if (result == madcat::rhi::ClearFrameResult::Presented && loggedPose_ != activePose_)
             {
@@ -195,15 +209,21 @@ private:
         }
         else
         {
-            const auto transform = triangleScene_.drawTransforms(aspect);
+            auto transform = triangleScene_.drawTransforms(aspect);
             if (!transform) { throw std::runtime_error("Scene camera/model matrix extraction failed"); }
+            for (auto& draw : transform->transforms) { draw.view = requestedView_; }
             result = presentation_->renderer.draw({0.04f, 0.08f, 0.16f, 1.0f},
                 std::span(transform->transforms.data(), transform->count));
         }
         if (result == madcat::rhi::ClearFrameResult::Presented && loggedPose_ != activePose_)
         {
-            std::fprintf(stderr, "MadCat: Scene pose presented; %d (keys 1-%d).\n", activePose_ + 1, modelScene_ ? 8 : 7);
+            std::fprintf(stderr, "MadCat: Scene pose presented; %d (keys 1-%d).\n", activePose_ + 1, modelScene_ ? 9 : 7);
             loggedPose_ = activePose_;
+        }
+        if (result == madcat::rhi::ClearFrameResult::Presented && loggedView_ != static_cast<int>(requestedView_))
+        {
+            loggedView_ = static_cast<int>(requestedView_);
+            std::fprintf(stderr, "MadCat: geometry view presented; %d (M=material, C=color, N=world normal, U=UV; magenta=unavailable).\n", loggedView_);
         }
         if (result == madcat::rhi::ClearFrameResult::Failed) { return false; }
         rebuildPending_ |= result == madcat::rhi::ClearFrameResult::SwapchainUnavailable;
@@ -220,6 +240,9 @@ private:
     madcat::sandbox::TriangleScene triangleScene_;
     madcat::sandbox::ModelScene* modelScene_;
     const madcat::render::GeometryBatch* geometry_;
+    std::vector<madcat::rhi::TextureBindingRef> materials_;
+    madcat::rhi::GeometryView requestedView_ = madcat::rhi::GeometryView::Color;
+    int loggedView_ = -1;
     std::unique_ptr<Presentation> presentation_;
     int framebufferWidth_ = 0;
     int framebufferHeight_ = 0;
@@ -325,8 +348,10 @@ int main(int argc, char** argv)
                 if (!vertices) { throw std::runtime_error("Triangle vertex upload failed"); }
                 auto indices = madcat::rhi::createIndexBuffer(device, indexData);
                 if (!indices) { throw std::runtime_error("Triangle index upload failed"); }
+                auto materials = madcat::sandbox::prepareMaterialBindings(device, assets, model ? std::span<const madcat::render::MaterialData>(model->materials) : std::span<const madcat::render::MaterialData>{});
+                if (!materials) { throw std::runtime_error(materials.error()); }
                 SandboxApplication app(window, device, surface, vertexShader, fragmentShader, std::move(vertices), std::move(indices),
-                    modelScene.get(), model ? &*model : nullptr);
+                    modelScene.get(), model ? &*model : nullptr, std::move(*materials));
                 exitCode = EXIT_SUCCESS;
                 while (!glfwWindowShouldClose(window) && !app.failed())
                 {

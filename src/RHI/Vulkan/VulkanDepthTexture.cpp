@@ -1,4 +1,5 @@
 #include "VulkanDepthTexture.h"
+#include "VulkanTextureState.h"
 
 #include "VulkanDevice.h"
 #include "VulkanFunctions.h"
@@ -8,27 +9,6 @@
 
 namespace madcat::rhi
 {
-struct detail::TextureState
-{
-    VkDevice device = VK_NULL_HANDLE;
-    VkImage image = VK_NULL_HANDLE;
-    VkImageView view = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
-    VkFormat format = VK_FORMAT_UNDEFINED;
-    uint32_t width = 0, height = 0;
-    PFN_vkDestroyImage destroyImage = nullptr;
-    PFN_vkDestroyImageView destroyView = nullptr;
-    PFN_vkFreeMemory freeMemory = nullptr;
-
-    ~TextureState()
-    {
-        if (view) { destroyView(device, view, nullptr); }
-        if (image) { destroyImage(device, image, nullptr); }
-        if (memory) { freeMemory(device, memory, nullptr); }
-        if (image) { std::fprintf(stderr, "Vulkan: Depth texture destroyed.\n"); }
-    }
-};
-
 uint32_t TextureRef::width() const noexcept { return state_ ? state_->width : 0; }
 uint32_t TextureRef::height() const noexcept { return state_ ? state_->height : 0; }
 VkDevice detail::TextureAccess::device(const TextureRef& texture) noexcept { return texture.state_ ? texture.state_->device : VK_NULL_HANDLE; }

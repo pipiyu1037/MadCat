@@ -30,7 +30,19 @@ FetchContent_Declare(cgltf
 )
 FetchContent_MakeAvailable(cgltf)
 
-# CPU-only geometry conversion; parser implementation and types stay private.
+FetchContent_Declare(stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG d14d46f6b44456eb88beac58cba833a4135d4c89 # stb_image 2.30
+)
+FetchContent_MakeAvailable(stb)
+
+# Compile the upstream implementation once; its types stay private to Assets.
+add_library(MadCatStbImage STATIC src/Assets/StbImage.c)
+target_compile_features(MadCatStbImage PRIVATE c_std_11)
+set_target_properties(MadCatStbImage PROPERTIES C_EXTENSIONS OFF)
+target_include_directories(MadCatStbImage SYSTEM PRIVATE "${stb_SOURCE_DIR}")
+
+# CPU-only asset conversion; parser implementation and types stay private.
 add_library(MadCatGltfParser STATIC src/Assets/Cgltf.c)
 target_compile_features(MadCatGltfParser PRIVATE c_std_11)
 set_target_properties(MadCatGltfParser PROPERTIES C_EXTENSIONS OFF)
@@ -40,12 +52,12 @@ if(MSVC)
     target_compile_options(MadCatGltfParser PRIVATE /W4)
 endif()
 
-add_library(MadCatAssets STATIC src/Assets/Gltf.cpp)
+add_library(MadCatAssets STATIC src/Assets/Gltf.cpp src/Assets/GltfImages.cpp src/Assets/GltfMaterials.cpp src/Assets/Image.cpp)
 target_compile_features(MadCatAssets PUBLIC cxx_std_23)
 set_target_properties(MadCatAssets PROPERTIES CXX_EXTENSIONS OFF)
 target_include_directories(MadCatAssets PUBLIC src)
-target_include_directories(MadCatAssets SYSTEM PRIVATE "${cgltf_SOURCE_DIR}")
-target_link_libraries(MadCatAssets PUBLIC glm::glm PRIVATE MadCatGltfParser)
+target_include_directories(MadCatAssets SYSTEM PRIVATE "${cgltf_SOURCE_DIR}" "${stb_SOURCE_DIR}")
+target_link_libraries(MadCatAssets PUBLIC glm::glm PRIVATE MadCatGltfParser MadCatStbImage)
 if(MSVC)
     target_compile_options(MadCatAssets PRIVATE /W4 /permissive-)
 endif()
@@ -196,12 +208,26 @@ add_custom_target(MadCatRenderSceneChecks
     VERBATIM
 )
 
+add_executable(MaterialChecks EXCLUDE_FROM_ALL tests/MaterialChecks.cpp)
+target_link_libraries(MaterialChecks PRIVATE MadCatRenderScene)
+if(MSVC)
+    target_compile_options(MaterialChecks PRIVATE /W4 /permissive- /utf-8)
+endif()
+add_custom_target(MadCatMaterialChecks
+    COMMAND "$<TARGET_FILE:MaterialChecks>" "${CMAKE_CURRENT_BINARY_DIR}/verification/materials/fixtures" "${CMAKE_CURRENT_SOURCE_DIR}/assets/models"
+    DEPENDS MaterialChecks
+    COMMENT "Checking material/image import, ownership and draw data"
+    VERBATIM
+)
+
 add_executable(MadCat
     apps/Sandbox/main.cpp
     apps/Sandbox/TriangleScene.cpp
     apps/Sandbox/ModelScene.cpp
+    apps/Sandbox/ModelMaterials.cpp
     src/RHI/Vulkan/VulkanBuffer.cpp
     src/RHI/Vulkan/VulkanDepthTexture.cpp
+    src/RHI/Vulkan/VulkanSampledTexture.cpp
     src/RHI/Vulkan/VulkanClearRenderer.cpp
     src/RHI/Vulkan/VulkanDevice.cpp
     src/RHI/Vulkan/VulkanInstance.cpp
@@ -322,6 +348,7 @@ add_executable(ShaderModuleChecks EXCLUDE_FROM_ALL
     tests/ShaderModuleChecks.cpp
     src/RHI/Vulkan/VulkanBuffer.cpp
     src/RHI/Vulkan/VulkanDepthTexture.cpp
+    src/RHI/Vulkan/VulkanSampledTexture.cpp
     src/Shader/Spirv.cpp
     src/RHI/Vulkan/VulkanShaderModule.cpp
     src/RHI/Vulkan/VulkanDevice.cpp

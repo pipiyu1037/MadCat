@@ -41,3 +41,5 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.p
 2026-11-01 实测 Debug／Release 构建、导入与窗口检查通过：初始绘制、模型父节点变换、相机父节点变换、resize、最小化恢复及正常退出；每次启动只上传一次顶点和索引，重建后复用。Debug 开启同步验证，无 warning／error。窗口截图与日志在 `build/verification/triangle/*-model-Suzanne-*`，构建与检查汇总在 `build/verification/external-gltf/`，均不纳入 Git。
 
 此模型的窗口验证使用可见性冒烟检查并检查截图，没有独立逐像素参考。颜色仍来自位置包围盒，预览沿用 Sandbox 的模型与相机姿态，未应用源文件的法线、UV、材质或贴图；这次验证不表示材质、完整模型外观或 F03 已验收。后续 CPU [模型实例检查](../../../tests/ModelSceneChecks.cpp) 已用此文件验证双实例 Entity、独立变换／删除与共享几何；2026-11-02 已接通 [RenderScene 与共享几何](../../../README.md#renderscene-与共享几何)：两个实例共用一次 11808 顶点／11808 索引上传，支持独立变换、删除至空场景、恢复和反序。Debug／Release 模型窗口检查、resize／最小化恢复与退出均通过，Debug 同步验证无 warning／error；仍是诊断色和可见性冒烟，不代表材质或完整外观验收。
+
+2026-11-05 已读取其 1 材质／2 图片／2 纹理，两张 PNG 均由 stb_image 解码为 1024×1024 RGBA8；当前只将基础色图片上传并参与 M 模式采样，金属粗糙度图片尚不参与着色。替换解码器后，Debug 的 `-Scenario materials -ModelPath assets/models/Suzanne/Suzanne.gltf` 通过默认基础色、负缩放、反序、resize 与最小化恢复五次采样，退出释放通过；已检查默认截图，同步验证无 warning／error。此次未重跑 Release GPU。此验证仍是可见性冒烟与截图检查，独立像素证据来自原创 MaterialProbe，不能将猴头可见性视为完整材质或 PBR 验收。

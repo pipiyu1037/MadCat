@@ -26,6 +26,7 @@ struct PhysicalDeviceFeatures
     FeatureSupport rayQuery;
     // Queryable only when the EXT extension and its instance dependencies exist.
     FeatureSupport swapchainMaintenance1;
+    FeatureSupport shaderDemoteToHelperInvocation;
 };
 
 // Owns query data, but borrows handles from the Instance. No device destruction.

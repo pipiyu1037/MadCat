@@ -1,4 +1,5 @@
 #include "Gltf.h"
+#include "GltfImport.h"
 
 #include <cgltf.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -129,6 +130,57 @@ glm::mat4 localMatrix(const cgltf_node& node)
     return storeMatrix(matrix);
 }
 
+struct PrimitiveAttributes
+{
+    const cgltf_accessor* positions = nullptr;
+    const cgltf_accessor* normals = nullptr;
+    const cgltf_accessor* texcoords0 = nullptr;
+};
+
+PrimitiveAttributes primitiveAttributes(const cgltf_primitive& primitive)
+{
+    PrimitiveAttributes result;
+    for (const auto& attribute : std::span(primitive.attributes, primitive.attributes_count))
+    {
+        if (attribute.type == cgltf_attribute_type_position)
+        {
+            require(attribute.index == 0 && !result.positions, "duplicate or invalid POSITION attribute");
+            result.positions = attribute.data;
+        }
+        else if (attribute.type == cgltf_attribute_type_normal)
+        {
+            require(attribute.index == 0 && !result.normals, "duplicate or invalid NORMAL attribute");
+            result.normals = attribute.data;
+        }
+        else if (attribute.type == cgltf_attribute_type_texcoord && attribute.index == 0)
+        {
+            require(!result.texcoords0, "duplicate TEXCOORD_0 attribute");
+            result.texcoords0 = attribute.data;
+        }
+    }
+    const auto* positions = result.positions;
+    require(positions && positions->component_type == cgltf_component_type_r_32f && positions->type == cgltf_type_vec3 &&
+        !positions->normalized && positions->count <= UINT32_MAX, "POSITION must be non-normalized FLOAT VEC3 with uint32-sized count");
+    if (const auto* normals = result.normals)
+    {
+        require(normals->component_type == cgltf_component_type_r_32f && normals->type == cgltf_type_vec3 && !normals->normalized,
+            "NORMAL must be non-normalized FLOAT VEC3");
+        require(normals->count == positions->count, "NORMAL count must match POSITION");
+    }
+    if (const auto* uv = result.texcoords0)
+    {
+        const bool floatUv = uv->component_type == cgltf_component_type_r_32f && !uv->normalized;
+        const bool integerUv = (uv->component_type == cgltf_component_type_r_8u || uv->component_type == cgltf_component_type_r_16u) && uv->normalized;
+        require(uv->type == cgltf_type_vec2 && (floatUv || integerUv), "TEXCOORD_0 must be FLOAT or normalized unsigned byte/short VEC2");
+        require(uv->count == positions->count, "TEXCOORD_0 count must match POSITION");
+    }
+    for (const auto* accessor : {result.positions, result.normals, result.texcoords0})
+    {
+        if (accessor) { require(accessor->offset % 4 == 0 && accessor->stride % 4 == 0, "vertex attribute requires 4-byte offset and stride alignment"); }
+    }
+    return result;
+}
+
 void preflight(const cgltf_data& data, std::string& context)
 {
     require(data.asset.version && std::strcmp(data.asset.version, "2.0") == 0, "only glTF 2.0 is supported");
@@ -162,12 +214,18 @@ void preflight(const cgltf_data& data, std::string& context)
             "misaligned accessor");
     }
     for (const auto& node : std::span(data.nodes, data.nodes_count)) { require(!node.has_mesh_gpu_instancing, "GPU instancing is unsupported"); }
-    for (const auto& mesh : std::span(data.meshes, data.meshes_count))
+    for (size_t meshIndex = 0; meshIndex < data.meshes_count; ++meshIndex)
     {
+        const auto& mesh = data.meshes[meshIndex];
         require(mesh.weights_count == 0, "morph weights are unsupported");
-        for (const auto& primitive : std::span(mesh.primitives, mesh.primitives_count))
+        for (size_t primitiveIndex = 0; primitiveIndex < mesh.primitives_count; ++primitiveIndex)
         {
+            context = "mesh " + std::to_string(meshIndex) + " primitive " + std::to_string(primitiveIndex);
+            const auto& primitive = mesh.primitives[primitiveIndex];
             require(!primitive.has_draco_mesh_compression && primitive.targets_count == 0, "compression and morph targets are unsupported");
+            // Validate semantics before cgltf_validate's generic count check so
+            // diagnostics identify the Primitive and supported attribute.
+            (void)primitiveAttributes(primitive);
         }
     }
 }
@@ -201,6 +259,12 @@ std::expected<GltfGeometry, GltfError> importGltfGeometry(const std::filesystem:
         context = "glTF validation";
         checkResult(cgltf_validate(data.get()));
         GltfGeometry result;
+        context = "images";
+        const auto importedImages = detail::importImages(*data, file, result);
+        if (!importedImages) { throw Failure{importedImages.error()}; }
+        context = "materials";
+        const auto importedMaterials = detail::importMaterials(*data, result);
+        if (!importedMaterials) { throw Failure{importedMaterials.error()}; }
         result.meshes.resize(data->meshes_count);
         for (size_t meshIndex = 0; meshIndex < data->meshes_count; ++meshIndex)
         {
@@ -213,18 +277,10 @@ std::expected<GltfGeometry, GltfError> importGltfGeometry(const std::filesystem:
                 context = "mesh " + std::to_string(meshIndex) + " primitive " + std::to_string(primitiveIndex);
                 const auto& primitive = mesh.primitives[primitiveIndex];
                 require(primitive.type == cgltf_primitive_type_triangles, "only TRIANGLES primitives are supported");
-                const cgltf_accessor* positions = nullptr;
-                for (const auto& attribute : std::span(primitive.attributes, primitive.attributes_count))
-                {
-                    if (attribute.type == cgltf_attribute_type_position)
-                    {
-                        require(attribute.index == 0 && !positions, "duplicate or invalid POSITION attribute");
-                        positions = attribute.data;
-                    }
-                }
-                require(positions && positions->component_type == cgltf_component_type_r_32f && positions->type == cgltf_type_vec3 &&
-                    !positions->normalized && positions->count <= UINT32_MAX, "POSITION must be non-normalized FLOAT VEC3 with uint32-sized count");
+                const auto attributes = primitiveAttributes(primitive);
+                const auto* positions = attributes.positions;
                 MeshPrimitive converted;
+                if (primitive.material) { converted.material = cgltf_material_index(data.get(), primitive.material); }
                 converted.positions.resize(positions->count);
                 for (size_t index = 0; index < positions->count; ++index)
                 {
@@ -232,6 +288,30 @@ std::expected<GltfGeometry, GltfError> importGltfGeometry(const std::filesystem:
                     require(cgltf_accessor_read_float(positions, index, value, 3) != 0, "cannot read POSITION");
                     require(std::isfinite(value[0]) && std::isfinite(value[1]) && std::isfinite(value[2]), "nonfinite POSITION");
                     converted.positions[index] = {value[0], value[1], value[2]};
+                }
+                if (const auto* normals = attributes.normals)
+                {
+                    converted.normals.resize(normals->count);
+                    for (size_t index = 0; index < normals->count; ++index)
+                    {
+                        float value[3]{};
+                        require(cgltf_accessor_read_float(normals, index, value, 3) != 0, "cannot read NORMAL");
+                        require(std::isfinite(value[0]) && std::isfinite(value[1]) && std::isfinite(value[2]), "nonfinite NORMAL");
+                        const auto length = glm::length(glm::dvec3(value[0], value[1], value[2]));
+                        require(std::abs(length - 1.0) < 0.0001, "NORMAL must have unit length within 1e-4");
+                        converted.normals[index] = {value[0], value[1], value[2]};
+                    }
+                }
+                if (const auto* uv = attributes.texcoords0)
+                {
+                    converted.texcoords0.resize(uv->count);
+                    for (size_t index = 0; index < uv->count; ++index)
+                    {
+                        float value[2]{};
+                        require(cgltf_accessor_read_float(uv, index, value, 2) != 0, "cannot read TEXCOORD_0");
+                        require(std::isfinite(value[0]) && std::isfinite(value[1]), "nonfinite TEXCOORD_0");
+                        converted.texcoords0[index] = {value[0], value[1]};
+                    }
                 }
                 const auto* indices = primitive.indices;
                 const auto count = indices ? indices->count : positions->count;

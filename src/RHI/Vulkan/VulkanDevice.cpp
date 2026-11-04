@@ -146,6 +146,8 @@ bool VulkanDevice::initialize(std::span<const PhysicalDeviceCandidate> candidate
     features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     features.dynamicRendering = VK_TRUE;
     features.synchronization2 = VK_TRUE;
+    features.shaderDemoteToHelperInvocation = selected->features.shaderDemoteToHelperInvocation.queryable &&
+        selected->features.shaderDemoteToHelperInvocation.supported ? VK_TRUE : VK_FALSE;
     const bool enablePresentFences = selected->hasExtension(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME) &&
         selected->features.swapchainMaintenance1.queryable && selected->features.swapchainMaintenance1.supported;
     VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT maintenance{};

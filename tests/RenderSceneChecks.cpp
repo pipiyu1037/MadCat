@@ -127,6 +127,78 @@ void assetIdentity()
     check(batch && batch->ranges.size() == 4 && batch->vertices.size() == 12, "Different assets collided in geometry keys");
 }
 
+void attributesAndNormalTransforms()
+{
+    auto model = source();
+    auto& primitive = model.meshes[0].primitives[0];
+    primitive.normals.assign(3, glm::normalize(glm::vec3(1)));
+    primitive.texcoords0 = {{0,1}, {-.25f,1.5f}, {1,0}};
+    assets::ModelAssets assets;
+    const auto id = assets.add(std::move(model));
+    scene::Scene scene;
+    auto instance = scene::instantiateModel(scene, assets, id);
+    const auto camera = scene.create();
+    check(instance && scene.add<scene::PerspectiveCamera>(camera), "Attribute setup failed");
+    scene::LocalTransform cameraPose; cameraPose.translation.z = 3;
+    check(scene.setLocalTransform(camera, cameraPose) && scene.updateWorldTransforms(), "Camera setup failed");
+    auto draws = render::extractDraws(scene, assets, camera, 2);
+    auto batch = render::prepareGeometry(assets, *draws);
+    check(batch && batch->vertices.size() == 6 && batch->ranges[0].attributes == 3 && batch->ranges[1].attributes == 0, "Optional attribute flags/sharing lost");
+    near(batch->vertices[0].normal[0], 1 / std::sqrt(3.f));
+    near(batch->vertices[1].texcoord[0], -.25f); near(batch->vertices[1].texcoord[1], 1.5f);
+    check(batch->vertices[3].normal[0] == 0 && batch->vertices[3].texcoord[0] == 0, "Missing attributes were fabricated");
+    auto resolved = render::resolveDraws(*batch, *draws);
+    check(resolved && (*resolved)[0].transform.attributes == 7 && (*resolved)[1].transform.attributes == 4, "Per-Primitive flags were not resolved");
+    for (float xScale : {2.f, -2.f})
+    {
+        // A(x,y,z) = (xScale*x+y, 3*y, 4*z). Analytic inverse-transpose
+        // of (1,1,1) is (1/xScale, (1-1/xScale)/3, 1/4).
+        glm::mat4 local(1); local[0][0] = xScale; local[1][0] = 1; local[1][1] = 3; local[2][2] = 4;
+        check(scene.setLocalMatrix(instance->root, local) && scene.updateWorldTransforms(), "Shear/reflection setup failed");
+        draws = render::extractDraws(scene, assets, camera, 2);
+        const auto& packed = draws->front().transform.normalFromLocal;
+        glm::vec3 actual{};
+        for (int row = 0; row < 3; ++row) { actual[row] = packed[row] + packed[4 + row] + packed[8 + row]; }
+        const auto expected = glm::normalize(glm::vec3(1 / xScale, (1 - 1 / xScale) / 3, .25f));
+        actual = glm::normalize(actual);
+        for (int axis = 0; axis < 3; ++axis) { near(actual[axis], expected[axis]); }
+        near(glm::dot(actual, glm::vec3(xScale - 1, -3, 0)), 0);
+        near(glm::dot(actual, glm::vec3(xScale, 0, -4)), 0);
+        const auto saved = packed;
+        cameraPose.rotation = glm::angleAxis(.15f, glm::vec3(0,1,0));
+        check(scene.setLocalTransform(camera, cameraPose) && scene.updateWorldTransforms(), "Camera edit failed");
+        check(render::extractDraws(scene, assets, camera, 2)->front().transform.normalFromLocal == saved, "World normals depend on camera");
+    }
+    glm::mat4 singular(1); singular[2][2] = 0;
+    check(scene.setLocalMatrix(instance->root, singular) && scene.updateWorldTransforms(), "Singular setup failed");
+    draws = render::extractDraws(scene, assets, camera, 2);
+    resolved = render::resolveDraws(*batch, *draws);
+    check(resolved && (*resolved)[0].transform.attributes == 3 && (*resolved)[0].transform.valid(), "Singular normal transform was used or blocked UV/color");
+    scene::LocalTransform tiny; tiny.scale = glm::vec3(1e-30f);
+    check(scene.setLocalTransform(instance->root, tiny) && scene.updateWorldTransforms(), "Tiny scale setup failed");
+    draws = render::extractDraws(scene, assets, camera, 2);
+    check(draws && (draws->front().transform.attributes & rhi::NormalTransformValid), "Invertible tiny scale lost normals");
+    near(draws->front().transform.normalFromLocal[0], 1);
+}
+
+void invalidAttributes()
+{
+    for (int mode = 0; mode < 5; ++mode)
+    {
+        auto model = source();
+        auto& primitive = model.meshes[0].primitives[0];
+        if (mode == 0) { primitive.normals = {{1,0,0}}; }
+        if (mode == 1) { primitive.texcoords0 = {{0,0}}; }
+        if (mode == 2) { primitive.normals.assign(3, glm::vec3(0)); }
+        if (mode == 3) { primitive.normals.assign(3, glm::vec3(std::numeric_limits<float>::infinity())); }
+        if (mode == 4) { primitive.texcoords0.assign(3, glm::vec2(std::numeric_limits<float>::quiet_NaN())); }
+        assets::ModelAssets assets;
+        const auto id = assets.add(std::move(model));
+        const render::MeshDraw draw{{}, {id,0,0}, {}};
+        check(!render::prepareGeometry(assets, std::span(&draw, 1)), "Invalid asset attributes reached upload data");
+    }
+}
+
 void realModels()
 {
     for (const auto* file : {"Suzanne/Suzanne.gltf", "TransformProbe.gltf"})
@@ -167,7 +239,8 @@ int main(int argc, char** argv)
         if (argc != 2) { throw std::runtime_error("Expected model directory"); }
         directory = argv[1];
         extractionAndSharing(); editsAndSnapshots(); invalidInputs(); invalidGeometry(); assetIdentity(); realModels();
-        std::printf("RenderScene checks: 6 groups passed.\n"); return 0;
+        attributesAndNormalTransforms(); invalidAttributes();
+        std::printf("RenderScene checks: 8 groups passed.\n"); return 0;
     }
     catch (const std::exception& error) { std::fprintf(stderr, "RenderScene checks failed: %s\n", error.what()); return 1; }
 }

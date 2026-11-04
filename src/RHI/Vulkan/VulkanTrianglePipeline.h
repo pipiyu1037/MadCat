@@ -4,6 +4,8 @@
 #include "RHI/ColoredVertex.h"
 #include "RHI/DrawTransform.h"
 #include "RHI/IndexedDraw.h"
+#include "RHI/Texture.h"
+#include <span>
 
 #include <vulkan/vulkan.h>
 
@@ -15,7 +17,7 @@ class VulkanDevice;
 class VulkanShaderModule;
 
 // Backend exercise for triangle.slang: indexed triangles, matrix and depth.
-// Owns a pipeline and 64-byte vertex Push Constant layout, retains both buffers,
+// Owns a pipeline and 128-byte vertex Push Constant layout, retains both buffers,
 // and borrows the Device.
 // Single-threaded use.
 // Finish submitted commands using this pipeline before destroying this owner;
@@ -36,9 +38,14 @@ public:
     // colorFormat must be the rendering attachment's supported color format.
     // Fixed ColoredVertex stride; vertex count fits uint32 and is at least 3.
     // Indices must be same-Device uint32 triangles, nonempty and in vertex bounds.
+    // triangle.slang requires material bindings, including a white fallback.
+    // An empty span is reserved for descriptor-free shader exercises; it cannot
+    // record Material view. Nonempty entries share the fixed set-0 image/sampler
+    // layout and are retained together with geometry until GPU completion.
     // Failure releases partial resources; repeated initialization preserves state.
     [[nodiscard]] bool initialize(const VulkanDevice& device, VkFormat colorFormat,
-        const VulkanShaderModule& vertex, const VulkanShaderModule& fragment, BufferRef vertices, BufferRef indices, VkFormat depthFormat);
+        const VulkanShaderModule& vertex, const VulkanShaderModule& fragment, BufferRef vertices, BufferRef indices, VkFormat depthFormat,
+        std::span<const TextureBindingRef> materials = {});
 
     [[nodiscard]] VkPipeline handle() const;
     [[nodiscard]] VkDevice deviceHandle() const;
@@ -48,10 +55,11 @@ public:
     [[nodiscard]] BufferRef vertexBuffer() const;
     [[nodiscard]] BufferRef indexBuffer() const;
     [[nodiscard]] uint32_t indexCount() const;
+    [[nodiscard]] std::span<const TextureBindingRef> materialBindings() const;
 
     // Caller provides a recording primary graphics command buffer from the same
     // Device, inside compatible dynamic rendering. Extent must fit Device limits.
-    // Sets viewport/scissor, binds both buffers, copies a finite matrix and records
+    // Sets viewport/scissor, binds both buffers, copies valid draw constants and records
     // DrawIndexed(indexCount, 1, 0, 0, 0). Invalid input records no Vulkan commands.
     [[nodiscard]] bool recordDraw(VkCommandBuffer commandBuffer, VkExtent2D extent, const DrawTransform& transform) const;
     // Nonempty triangle range into the retained index buffer. Validated before

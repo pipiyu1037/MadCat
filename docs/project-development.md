@@ -2,9 +2,17 @@
 
 MadCat 是一个使用自研 ECS 和 Vulkan 的渲染引擎。前期服务渲染算法研究和图形效果实验，长期考虑游戏与仿真用途。开发者应能加载模型、用 C++ 编写渲染 Pass、连接多个 Pass，并在运行时调整参数、查看中间结果。
 
-本文维护开发范围、实现进度、半年计划和验收方法；架构方案独立维护于[架构设计文档](architecture-design.md)。两份文档供项目开发者及协作编码助手使用。文档更新日期为 2026 年 11 月 2 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
+本文维护开发范围、实现进度、半年计划和验收方法；架构方案独立维护于[架构设计文档](architecture-design.md)。两份文档供项目开发者及协作编码助手使用。文档更新日期为 2026 年 11 月 5 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
 
 ## 当前实现进度
+
+2026 年 11 月 5 日完成基础材质／图片导入与真实纹理采样，并按用户要求使用开源 stb_image 重整资产导入：模型保存 Primitive 材质索引、基础色因子与纹理、金属度／粗糙度标量、alpha／双面及采样器；图片来源读取、stb_image 2.30 PNG／JPEG 解码、材质／采样器转换分离，支持外部相对 URI、base64 和 GLB bufferView，得到拥有的 RGBA8。URI／base64 复用 cgltf；stb 通过 FetchContent 固定提交，不依赖 WIC／COM。RHI 新增 sRGB 图像、staging 上传／完整 mip 链、不可变图像／采样器 Descriptor 与帧保活；默认 M 显示基础色，OPAQUE／MASK、双面／负缩放处理已实现，BLEND 渲染明确拒绝。SPIR-V 裁剪需要的 shaderDemoteToHelperInvocation 已查询并按支持启用。
+
+替换解码器后，Debug／Release 主程序与检查工具构建、材质／图片 3 组和原有 glTF 19 组检查通过，无编译警告；材质 CPU 检查从 5 组减至 3 组，去掉重复解码检查与逐字段坏值组合；窗口场景从 13 次采样减至默认／镜像／反序／resize／最小化恢复 5 次，保留资源共享与退出检查。Debug MaterialProbe 每帧 54 个独立解析像素及 Suzanne 外部贴图冒烟通过，同步验证无 warning／error；此次未重跑 Release GPU、无关历史检查或 Shader 编译（Shader 未改，沿用本次材质实现先前已编译验证的产物）。用法及范围见 [README](../README.md#基础材质图片与纹理采样)，契约见[架构设计](architecture-design.md#基础材质图片与不可变采样绑定)。尚无光照／PBR、实例材质覆盖、运行期图片替换或通用 Pass／图，F03 尚未整体验收。下文保留历史增量。
+
+2026 年 11 月 4 日继续完成 [GPU 法线／UV 传输与可视化](../README.md#法线与-uv-可视化)：显式顶点布局扩为 44 字节，Draw 参数扩为 128 字节，逐 Primitive 传递属性存在标志。RenderScene 提取世界逆转置法线矩阵，片元插值后归一化；N／U／C 切换世界法线、UV frac 和诊断色，模型按键 9 检查非均匀缩放与旋转。缺失属性或不可用法线显示洋红色，奇异变换仍允许颜色／UV。Debug／Release 主程序与 RenderScene 8 组、管线 63 项、缓冲 40 项、深度 26 项、StaticModel 8 组、SceneDraw 5 组通过，无编译警告；Slang 编译与 SPIR-V 验证、12 项编译失败恢复通过。原创 AttributeProbe 两种配置每帧 22 个独立解析像素及窗口生命周期通过；Debug Suzanne 为可视化冒烟与截图检查，另通过 Debug 原深度和 Release TransformProbe 实例／生命周期回归。Debug 同步验证无 warning／error，Release 未主动启用验证层。仍无材质图片采样、自动法线生成、通用 Pass／Render Graph 或路径追踪，F03 未完成。旧布局的程序／Shader 必须一起更新，运行前先关闭旧程序并手动编译 Shader。下文保留各增量的历史状态。
+
+2026 年 11 月 4 日完成 [glTF 法线与 UV 的 CPU 导入](../src/Assets/Gltf.h)：每个 Primitive 可保存 Mesh 局部法线与第一组 UV，支持 FLOAT NORMAL、FLOAT／normalized u8／u16 TEXCOORD_0、分离／交错布局，缺失时保留空向量。校验属性格式、数量、对齐、有限值与单位法线（长度容差 `1e-4`），UV 不翻转或裁剪；失败保留文件及 Mesh／Primitive 或 accessor／bufferView 诊断，无部分模型。[检查工具](../apps/GltfInspect/main.cpp)增加属性数量输出。Debug／Release 的 glTF 19 组、StaticModel 8 组、模型实例 Debug 8／Release 9 组及 RenderScene 6 组通过，主程序和工具构建通过，无编译警告；Suzanne 导入 11808 组法线／UV，Box.glb 有 24 个法线且无 UV，TransformProbe 两者均无。此次仅 CPU 数据链路，未运行 GPU 场景或 Shader 检查；窗口仍为位置诊断色，法线／UV 的 GPU 使用、材质和贴图待实现，F03 未完成。支持清单与命令见 [README](../README.md#cpu-gltf-几何导入)，接口见[架构契约](architecture-design.md#cpu-gltf-几何当前实现)。下文保留各次迭代当时的事实与验证。
 
 2026 年 11 月 2 日完成 [RenderScene 绘制提取与共享几何](../src/RenderScene/RenderScene.h)：从 MeshInstance 与已更新世界矩阵生成逐 Primitive 值快照，按资产／Mesh／Primitive 打包唯一局部几何，以矩阵和索引子范围接入真实 DrawIndexed。窗口创建双实例，支持独立移动／旋转、相机变化、子树删除至空场景、恢复和反序；不再调用静态烘焙桥接。TransformProbe 共 8 次绘制，仅上传 6 顶点／6 索引；Suzanne 共 2 次绘制，仅上传 11808 顶点／11808 索引。应用／管线／单帧上下文保留共享缓冲，resize 复用，GPU／WSI 完成后释放命令与引用。两种配置的 RenderScene 6 组、管线 57 项、缓冲 40 项、深度 26 项、模型实例 Debug 8／Release 9 组和 SceneDraw 5 组及主程序构建通过，无编译警告；配置只有既有 GLM 弃用提示。Debug／Release 两种模型的窗口检查通过，覆盖实例编辑／删除／空帧／恢复、反序图像一致、resize／最小化恢复、单次上传与退出；TransformProbe 每帧最多 38 个独立解析像素，Suzanne 为左右实例可见性冒烟。Debug 同步验证无 warning／error，Release 未主动启用验证层。Shader 未改动／重编；未测性能。当前几何集合启动时固定，无运行期卸载／替换；法线／UV、材质贴图、通用 Pass／Render Graph 尚未实现，F03 未完成。命令与限制见 [README](../README.md#renderscene-与共享几何)，契约见[架构文档](architecture-design.md#renderscene-绘制提取与共享几何当前实现)。以下条目保留各迭代当时的事实与验证。
 
@@ -197,7 +205,7 @@ F09 的具体算法与实现路径仍需按架构文档中的建议验证，验�
 
 当前使用固定版本的 `slangc`，通过独立手动目标生成 SPIR-V；具体版本、产物和已验证行为如下。运行期更新与后续界面触发流程独立维护于[架构设计文档](architecture-design.md#shader-布局与运行期更新设计)。
 
-当前已实现第一段离线编译流程：`MadCatShaders` 为独立手动目标，不随普通 C++ 构建执行。Slang 固定版本为 `2026.17-25-gc7954ebd1`，程序路径由 CMake 查找或 `MADCAT_SLANGC` 指定，完整版本不符则拒绝编译。`shaders/triangle.slang` 包含 `vertexMain`、`fragmentMain`，直接生成 SPIR-V 1.6、保留入口名、使用 `-O0` 并将警告视为错误；`spirv-val --target-env vulkan1.3` 验证每个模块。初版顶点采用 `SV_VulkanVertexID`；2026-10-31 的缓冲增量改为 location 0 的 float2 位置与 location 1 的 float3 颜色输入；2026-11-01 模型预览增量升级为 float3 位置，匹配 24 字节 ColoredVertex。反汇编、CPU 布局与实际绘制通过。仍只需 `Shader` capability，两个阶段之间的颜色接口在 location 0。
+当前已实现第一段离线编译流程：`MadCatShaders` 为独立手动目标，不随普通 C++ 构建执行。Slang 固定版本为 `2026.17-25-gc7954ebd1`，程序路径由 CMake 查找或 `MADCAT_SLANGC` 指定，完整版本不符则拒绝编译。`shaders/triangle.slang` 包含 `vertexMain`、`fragmentMain`，直接生成 SPIR-V 1.6、保留入口名、使用 `-O0` 并将警告视为错误；`spirv-val --target-env vulkan1.3` 验证每个模块。初版顶点采用 `SV_VulkanVertexID`；2026-10-31 的缓冲增量改为 location 0 的 float2 位置与 location 1 的 float3 颜色输入；2026-11-01 模型预览增量升级为 float3 位置，匹配 24 字节 ColoredVertex。反汇编、CPU 布局与实际绘制通过。仍只需 `Shader` capability，两个阶段之间的颜色接口在 location 0。2026-11-04 再扩为 44 字节顶点与 128 字节 Draw 常量；新增法线／UV 输入及 flat 模式／标志，布局与真实像素已核对。
 
 两个阶段读取同一份源文件快照，全部通过验证后才发布至 `build/shaders/triangle/`，包含两个 `.spv`、源码快照及记录工具／参数／SHA256 的 `manifest.txt`。编译或验证失败时上一组四个文件保持不变；进程锁串行化同目录发布，中断后可恢复备份。当前只是离线产物发布，不代表运行期管线更新或 Shader 热更新已实现；include／import 依赖记录和反射待后续增量。使用方式见 [README](../README.md#手动编译-shader)。
 
@@ -244,7 +252,7 @@ Shader 布局和运行期更新的目标设计见[架构设计文档](architectu
 
 建议先支持 glTF 2.0 的静态三角网格、索引、位置、法线、UV、节点层级、基础材质、PNG／JPEG 贴图和采样器。`.gltf` 与 `.glb` 的具体覆盖范围随导入阶段逐项验证，并记录支持清单；法线缺失、稀疏 accessor、压缩和扩展不默认视为已支持。
 
-当前已实现其中的 CPU 静态三角形位置、索引与节点矩阵子集，支持 `.gltf`／`.glb`。CPU 模型资产引用、逐节点 Scene 实例化和最小 RenderScene 已接通窗口，多个实例共享 GPU 几何并独立变换／删除。法线、UV、材质与图片仍待实现；稀疏、压缩、必需扩展、蒙皮、动画与形变明确拒绝，具体清单见 [README](../README.md#cpu-gltf-几何导入)。
+当前已实现其中的 CPU 静态三角形位置、索引、可选法线／第一组 UV 与节点矩阵子集，支持 `.gltf`／`.glb`。CPU 模型资产引用、逐节点 Scene 实例化和最小 RenderScene 已接通窗口，多个实例共享 GPU 几何并独立变换／删除。法线／UV 已接入 GPU 可视化；基础色材质、PNG／JPEG 与采样器也已接通，GPU 支持基础色纹理和 OPAQUE／MASK；缺失法线／UV 仅保留为空，尚无自动生成；稀疏、压缩、必需扩展、蒙皮、动画与形变明确拒绝，具体清单见 [README](../README.md#cpu-gltf-几何导入)。
 
 资产转换和坐标约定的实现参考建议见[架构设计文档](architecture-design.md#资产转换与数学约定)。
 
@@ -307,12 +315,12 @@ PBR 的第一份验收场景应能比较不同粗糙度、金属度和基础色�
 | Vulkan 开发环境 | [LunarG Vulkan SDK](https://vulkan.lunarg.com/) 已使用 | 当前要求头文件至少 1.3.239；本机验证 SDK 1.4.363.0，运行时版本和验证层另行查询 |
 | 调试界面 | [Dear ImGui](https://github.com/ocornut/imgui) | 提供参数面板及官方 Vulkan 适配，当前不建设完整编辑器 |
 | 数学 | [GLM 1.0.1](https://github.com/g-truc/glm/tree/1.0.1) 已使用 | Scene 与 Assets 的向量、矩阵及四元数；CPU 变换与相机检查、固定矩阵 GPU 传输和专用场景渲染已验证 |
-| glTF 解析 | [cgltf 1.15](https://github.com/jkuhlmann/cgltf/tree/v1.15) 已使用，MIT 许可 | 私有 C 解析器；引擎复制和校验 CPU 几何／节点，已接通 Scene 实例与共享 GPU 几何绘制；图片解码与材质仍待实现 |
+| glTF 解析 | [cgltf 1.15](https://github.com/jkuhlmann/cgltf/tree/v1.15) 已使用，MIT 许可 | 私有 C 解析器；引擎复制和校验 CPU 几何／节点，已接通 Scene 实例与共享 GPU 几何绘制；基础材质／PNG／JPEG／采样器与 GPU 基础色已接通 |
 | GPU 内存分配 | [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) | 在 Vulkan 后端使用，资源所有权与 GPU 使用寿命仍由引擎管理 |
 | Shader | Slang | 已接入手动编译；固定 `2026.17-25-gc7954ebd1`，产物在 `build/shaders/triangle/`，运行期更新待实现 |
-| 图片解码与测试 | 待实现该功能时选择 | 必须补齐纹理解码；测试框架保持简单，不提前扩大依赖 |
+| 图片解码与测试 | [stb_image 2.30](https://github.com/nothings/stb/blob/d14d46f6b44456eb88beac58cba833a4135d4c89/stb_image.h) 已使用；独立检查目标 | MIT／公有领域双许可，私有 C 实现仅启用 PNG／JPEG；RGBA8 导入与材质采样已验证，尚无完整 glTF／PBR |
 
-当前已采用 CMake、固定提交的 GLFW 3.4／GLM 1.0.1／cgltf 1.15 和本机 Vulkan SDK。三个库均通过 FetchContent 管理，GLM 锁定 `0af55ccecd98d4e5a8d1fad7de25ba429d60e863`，关闭其测试与编译库；cgltf 锁定 `360db1a95480fe102ae9c69b27c5d101167ff5ba`，在单独私有 C 翻译单元编译实现。Vulkan 开发环境通过 `find_package(Vulkan 1.3.239 REQUIRED)` 查找。沿用既有依赖方式，无需为当前资产导入迁移包管理器；其余工具库组合仍属于建议。cgltf 不默认把外部图片解码为像素，需要额外的文件处理和图片解码步骤。[cgltf 使用说明](https://github.com/jkuhlmann/cgltf)
+当前已采用 CMake、固定提交的 GLFW 3.4／GLM 1.0.1／cgltf 1.15／stb_image 2.30 和本机 Vulkan SDK。四个库均通过 FetchContent 管理，GLM 锁定 `0af55ccecd98d4e5a8d1fad7de25ba429d60e863`，关闭其测试与编译库；cgltf 锁定 `360db1a95480fe102ae9c69b27c5d101167ff5ba`，stb 锁定 `d14d46f6b44456eb88beac58cba833a4135d4c89`，各在单独私有 C 翻译单元编译实现。Vulkan 开发环境通过 `find_package(Vulkan 1.3.239 REQUIRED)` 查找。沿用既有依赖方式，无需为当前资产导入迁移包管理器；其余工具库组合仍属于建议。cgltf 负责解析及 URI／base64，图片内存交给 stb_image 解码。[cgltf 使用说明](https://github.com/jkuhlmann/cgltf)、[stb 源码与许可](https://github.com/nothings/stb/tree/d14d46f6b44456eb88beac58cba833a4135d4c89)
 
 源码目录组织建议见[架构设计文档](architecture-design.md#源码组织)，实际目录与支持范围以当前源码为准。
 
@@ -365,7 +373,7 @@ Shader 编译与资源状态模型先做最小验证，再逐步完善；不等�
 13. 添加层级和世界 Transform 更新，再单独覆盖重新挂接与删除行为。
 14. 按几何、索引、法线、UV、贴图分别增加模型导入能力。
 
-当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、单帧同步、交换链与管线重建、Slang 到 SPIR-V 的手动编译与验证、启动时的 Shader Module 加载、最小图形管线和三角形 Draw、不可变顶点缓冲、纯深度纹理引用与遮挡、Scene／相机矩阵到 Shader 的固定 Push Constant 路径、Ray Query 离线编译探针，以及 CPU Entity 生命周期、组件增删／组合查询、Scene 层级和局部／世界 Transform、相机组件及视图／透视投影矩阵、glTF 静态几何与节点导入。遍历期间结构性修改会被拒绝，调用方可在遍历后处理。架构设计已收敛为首版实施基线，常规接口和内部存储在实现时确定，停止逐项扩展架构讨论；这不表示目标能力全部实现。索引缓冲、DrawIndexed、glTF 静态 GPU 预览与 CPU 模型资产引用／Scene 节点实例化已接通；最小 RenderScene 绘制提取与共享 GPU 几何也已接通；下一候选增量是法线／UV，再推进材质与贴图；所有场景对象继续使用 Entity，未来渲染通过 Mesh、Material 等组件组合提取。Ray Query GPU 求交仍需 Storage／设备地址缓冲、设备能力启用、绑定、加速结构和计算提交，不能把当前顶点缓冲视为这些能力已经具备。运行期 Shader 更新仍需安全替换和失败恢复验证。
+当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、单帧同步、交换链与管线重建、Slang 到 SPIR-V 的手动编译与验证、启动时的 Shader Module 加载、最小图形管线和三角形 Draw、不可变顶点缓冲、纯深度纹理引用与遮挡、Scene／相机矩阵到 Shader 的固定 Push Constant 路径、Ray Query 离线编译探针，以及 CPU Entity 生命周期、组件增删／组合查询、Scene 层级和局部／世界 Transform、相机组件及视图／透视投影矩阵、glTF 静态几何与节点导入。遍历期间结构性修改会被拒绝，调用方可在遍历后处理。架构设计已收敛为首版实施基线，常规接口和内部存储在实现时确定，停止逐项扩展架构讨论；这不表示目标能力全部实现。索引缓冲、DrawIndexed、glTF 静态 GPU 预览与 CPU 模型资产引用／Scene 节点实例化已接通；最小 RenderScene 绘制提取与共享 GPU 几何也已接通；法线／UV 的 CPU 导入也已完成；GPU 属性传输与可视化已完成；基础材质／图片导入与纹理采样已完成；下一候选增量是基础光照，之后推进 Pass／图与阴影；所有场景对象继续使用 Entity，未来渲染通过 Mesh、Material 等组件组合提取。Ray Query GPU 求交仍需 Storage／设备地址缓冲、设备能力启用、绑定、加速结构和计算提交，不能把当前顶点缓冲视为这些能力已经具备。运行期 Shader 更新仍需安全替换和失败恢复验证。
 
 ## 验证策略与风险
 

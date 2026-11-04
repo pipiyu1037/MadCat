@@ -62,6 +62,53 @@ Asset triangle(unsigned indexType = 5123, bool interleaved = false)
     return asset;
 }
 
+Asset attributedTriangle(unsigned uvType = 5126, bool interleaved = false)
+{
+    auto asset = triangle(0);
+    const std::array normals{std::array{0.6f, 0.8f, 0.0f}, std::array{0.0f, 0.0f, -1.0f}, std::array{1.0f, 0.0f, 0.0f}};
+    const std::array uvs{std::array{0.0f, 1.0f}, std::array{0.25f, 0.75f}, std::array{-0.25f, 1.5f}};
+    const unsigned uvStride = uvType == 5126 ? 8 : 4;
+    auto normal = [&](size_t index) { for (const auto value : normals[index]) { appendFloat(asset.bytes, value); } };
+    auto uv = [&](size_t index)
+    {
+        if (uvType == 5126) { for (const auto value : uvs[index]) { appendFloat(asset.bytes, value); } }
+        else
+        {
+            const unsigned maximum = uvType == 5121 ? 255 : 65535, quarter = uvType == 5121 ? 64 : 16384;
+            const std::array values{std::array{0u, maximum}, std::array{quarter, quarter * 3}, std::array{maximum, 0u}};
+            for (const auto value : values[index]) { append(asset.bytes, value, uvType == 5121 ? 1 : 2); }
+            if (uvType == 5121) { append(asset.bytes, 0xcccc, 2); }
+        }
+    };
+    if (interleaved) { for (size_t index = 0; index < 3; ++index) { normal(index); uv(index); } }
+    else
+    {
+        for (size_t index = 0; index < 3; ++index) { normal(index); }
+        for (size_t index = 0; index < 3; ++index) { uv(index); }
+    }
+    std::string views = R"({"buffer":0,"byteOffset":36,"byteLength":)" + std::to_string(interleaved ? (12 + uvStride) * 3 : 36);
+    if (interleaved) { views += R"(,"byteStride":)" + std::to_string(12 + uvStride); }
+    views += '}';
+    if (!interleaved)
+    {
+        views += R"(,{"buffer":0,"byteOffset":72,"byteLength":)" + std::to_string(uvStride * 3) + R"(,"byteStride":)" + std::to_string(uvStride) + '}';
+    }
+    replace(asset.json, R"("byteLength":36}],"bufferViews")", R"("byteLength":)" + std::to_string(asset.bytes.size()) + R"(}],"bufferViews")");
+    replace(asset.json, R"(}],"accessors")", "}," + views + R"(],"accessors")");
+    const auto accessors = R"({"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},{"bufferView":)" +
+        std::to_string(interleaved ? 1 : 2) + R"(,"byteOffset":)" + std::to_string(interleaved ? 12 : 0) + R"(,"componentType":)" +
+        std::to_string(uvType) + (uvType == 5126 ? "" : R"(,"normalized":true)") + R"(,"count":3,"type":"VEC2"})";
+    replace(asset.json, R"(}],"meshes")", "}," + accessors + R"(],"meshes")");
+    replace(asset.json, R"("attributes":{"POSITION":0})", R"("attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2})");
+    return asset;
+}
+
+void setFloat(Bytes& bytes, size_t offset, float value)
+{
+    const auto bits = std::bit_cast<uint32_t>(value);
+    for (size_t index = 0; index < 4; ++index) { bytes.at(offset + index) = static_cast<std::byte>((bits >> (index * 8)) & 255); }
+}
+
 void write(const std::filesystem::path& file, const Bytes& bytes)
 {
     std::ofstream output(file, std::ios::binary | std::ios::trunc);
@@ -88,7 +135,10 @@ void rejected(std::string_view name, const Asset& asset, std::string_view diagno
     const auto file = fixture(name, asset);
     const auto result = importGltfGeometry(file);
     check(!result && result.error().file == file && !result.error().message.empty(), "Invalid asset was accepted or lacked diagnostics");
-    if (!diagnostic.empty()) { check(result.error().message.find(diagnostic) != std::string::npos, "Unexpected rejection diagnostic"); }
+    if (!diagnostic.empty() && result.error().message.find(diagnostic) == std::string::npos)
+    {
+        throw std::runtime_error("Expected diagnostic '" + std::string(diagnostic) + "', got: " + result.error().message);
+    }
 }
 void verifyTriangle(const madcat::assets::GltfGeometry& result)
 {
@@ -115,9 +165,57 @@ void interleavedPositions()
     check(result.has_value(), "Interleaved POSITION failed");
     verifyTriangle(*result);
 }
+void optionalAttributes()
+{
+    const auto absent = importGltfGeometry(fixture("absent-attributes", triangle()));
+    check(absent && absent->meshes[0].primitives[0].normals.empty() && absent->meshes[0].primitives[0].texcoords0.empty(), "Missing attributes were fabricated");
+    auto asset = attributedTriangle();
+    replace(asset.json, R"(,"NORMAL":1)", "");
+    auto result = importGltfGeometry(fixture("uv-only", asset));
+    check(result && result->meshes[0].primitives[0].normals.empty() && result->meshes[0].primitives[0].texcoords0.size() == 3, "UV depends on normals");
+    asset = attributedTriangle(); replace(asset.json, R"(,"TEXCOORD_0":2)", "");
+    result = importGltfGeometry(fixture("normal-only", asset));
+    check(result && result->meshes[0].primitives[0].normals.size() == 3 && result->meshes[0].primitives[0].texcoords0.empty(), "Normals depend on UV");
+    asset = attributedTriangle(); replace(asset.json, R"("TEXCOORD_0":2)", R"("TEXCOORD_1":2)");
+    result = importGltfGeometry(fixture("other-uv-set", asset));
+    check(result && result->meshes[0].primitives[0].texcoords0.empty(), "Additional UV set substituted for set zero");
+}
+void verifyAttributes(const madcat::assets::GltfGeometry& result, unsigned uvType = 5126)
+{
+    verifyTriangle(result);
+    const auto& primitive = result.meshes[0].primitives[0];
+    check(primitive.normals.size() == 3 && primitive.texcoords0.size() == 3, "Attribute count lost");
+    const std::array expected{glm::vec3{.6f,.8f,0}, glm::vec3{0,0,-1}, glm::vec3{1,0,0}};
+    for (size_t index = 0; index < 3; ++index)
+    {
+        for (int axis = 0; axis < 3; ++axis) { near(primitive.normals[index][axis], expected[index][axis]); }
+    }
+    near(primitive.texcoords0[0].x, 0); near(primitive.texcoords0[0].y, 1);
+    const float quarter = uvType == 5126 ? .25f : uvType == 5121 ? 64.f / 255 : 16384.f / 65535;
+    near(primitive.texcoords0[1].x, quarter); near(primitive.texcoords0[1].y, quarter * 3);
+    near(primitive.texcoords0[2].x, uvType == 5126 ? -.25f : 1); near(primitive.texcoords0[2].y, uvType == 5126 ? 1.5f : 0);
+}
+void normalUvFormatsAndLayouts()
+{
+    for (const auto type : {5126u, 5121u, 5123u})
+    {
+        for (const bool interleaved : {false, true})
+        {
+            const auto result = importGltfGeometry(fixture("attributes-" + std::to_string(type) + (interleaved ? "-interleaved" : "-separate"), attributedTriangle(type, interleaved)));
+            check(result.has_value(), "Normal/UV encoding or layout failed");
+            verifyAttributes(*result, type);
+        }
+    }
+    auto asset = attributedTriangle();
+    setFloat(asset.bytes, 60, 1.00005f);
+    setFloat(asset.bytes, 88, std::numeric_limits<float>::max());
+    const auto result = importGltfGeometry(fixture("preserved-attributes", asset));
+    check(result && result->meshes[0].primitives[0].normals[2].x == 1.00005f &&
+        result->meshes[0].primitives[0].texcoords0[2].x == std::numeric_limits<float>::max(), "Accepted attributes were normalized or clamped");
+}
 void glbContainer()
 {
-    auto asset = triangle();
+    auto asset = attributedTriangle(5123, true);
     replace(asset.json, R"("uri":"mesh.bin",)", "");
     while (asset.json.size() % 4) { asset.json += ' '; }
     while (asset.bytes.size() % 4) { asset.bytes.push_back(std::byte{}); }
@@ -132,6 +230,7 @@ void glbContainer()
     const auto result = importGltfGeometry(root / "triangle.glb");
     check(result.has_value(), "GLB failed");
     verifyTriangle(*result);
+    verifyAttributes(*result, 5123);
     glb.resize(18);
     write(root / "truncated.glb", glb);
     check(!importGltfGeometry(root / "truncated.glb"), "Truncated GLB accepted");
@@ -153,11 +252,12 @@ std::string base64(const Bytes& bytes)
 }
 void dataUri()
 {
-    auto asset = triangle();
+    auto asset = attributedTriangle(5121, true);
     replace(asset.json, "mesh.bin", "data:application/octet-stream;base64," + base64(asset.bytes));
     const auto result = importGltfGeometry(fixture("embedded", asset, false));
     check(result.has_value(), "Base64 buffer failed");
     verifyTriangle(*result);
+    verifyAttributes(*result, 5121);
 }
 void unicodePaths()
 {
@@ -174,7 +274,7 @@ void unicodePaths()
 }
 void ownedResultsAndRetry()
 {
-    auto asset = triangle();
+    auto asset = attributedTriangle();
     const auto file = fixture("ownership", asset);
     auto result = importGltfGeometry(file);
     check(result.has_value(), "Initial import failed");
@@ -182,10 +282,12 @@ void ownedResultsAndRetry()
     write(file.parent_path() / "mesh.bin", Bytes{});
     check(!importGltfGeometry(file), "Broken replacement accepted");
     verifyTriangle(*result);
+    verifyAttributes(*result);
     write(file, asset.json); write(file.parent_path() / "mesh.bin", asset.bytes);
     auto retry = importGltfGeometry(file);
     check(retry.has_value(), "Import retry failed");
     verifyTriangle(*retry);
+    verifyAttributes(*retry);
 }
 void sharedMeshesAndHierarchy()
 {
@@ -262,6 +364,55 @@ void badAccessorsAndIndices()
     asset = triangle(); replace(asset.json, R"("attributes":{"POSITION":0})", R"("mode":1,"attributes":{"POSITION":0})"); rejected("lines", asset, "TRIANGLES");
     asset = triangle(); replace(asset.json, R"("count":3,"type":"SCALAR")", R"("count":2,"type":"SCALAR")"); rejected("index-count", asset, "multiple of three");
 }
+void invalidAttributeAccessors()
+{
+    auto asset = attributedTriangle();
+    replace(asset.json, R"("bufferView":1,"componentType":5126)", R"("bufferView":1,"componentType":5123)"); rejected("normal-component", asset, "NORMAL must");
+    asset = attributedTriangle(); replace(asset.json, R"("bufferView":1,"componentType":5126)", R"("bufferView":1,"componentType":5126,"normalized":true)"); rejected("normalized-float-normal", asset, "NORMAL must");
+    asset = attributedTriangle(); replace(asset.json, R"("bufferView":1,"componentType":5126,"count":3,"type":"VEC3")",
+        R"("bufferView":1,"componentType":5126,"count":3,"type":"VEC2")"); rejected("normal-shape", asset, "NORMAL must");
+    asset = attributedTriangle(); replace(asset.json, R"("bufferView":1,"componentType":5126,"count":3)", R"("bufferView":1,"componentType":5126,"count":2)"); rejected("normal-count", asset, "mesh 0 primitive 0: NORMAL count");
+    asset = attributedTriangle(); replace(asset.json, R"("count":3,"type":"VEC2")", R"("count":2,"type":"VEC2")"); rejected("uv-count", asset, "TEXCOORD_0 count");
+    asset = attributedTriangle(); replace(asset.json, R"("type":"VEC2")", R"("type":"SCALAR")"); rejected("uv-shape", asset, "TEXCOORD_0 must");
+    asset = attributedTriangle(); replace(asset.json, R"("byteOffset":0,"componentType":5126)", R"("byteOffset":0,"componentType":5126,"normalized":true)"); rejected("normalized-float-uv", asset, "TEXCOORD_0 must");
+    asset = attributedTriangle(5121); replace(asset.json, R"("normalized":true,)", ""); rejected("unnormalized-u8-uv", asset, "TEXCOORD_0 must");
+    asset = attributedTriangle(5123); replace(asset.json, R"("normalized":true,)", ""); rejected("unnormalized-u16-uv", asset, "TEXCOORD_0 must");
+    asset = attributedTriangle(5121); replace(asset.json, R"("componentType":5121)", R"("componentType":5120)"); rejected("signed-uv", asset, "TEXCOORD_0 must");
+    asset = attributedTriangle(); replace(asset.json, R"("byteOffset":0,"componentType":5126)", R"("byteOffset":0,"componentType":5125)"); rejected("uint32-uv", asset, "TEXCOORD_0 must");
+    asset = attributedTriangle(); replace(asset.json, R"("NORMAL":1)", R"("NORMAL":1,"NORMAL":1)"); rejected("duplicate-normal", asset, "duplicate or invalid NORMAL");
+    asset = attributedTriangle(); replace(asset.json, R"("TEXCOORD_0":2)", R"("TEXCOORD_0":2,"TEXCOORD_0":2)"); rejected("duplicate-uv", asset, "duplicate TEXCOORD_0");
+    asset = attributedTriangle(); replace(asset.json, R"("NORMAL":1)", R"("NORMAL_1":1)"); rejected("invalid-normal-index", asset, "invalid NORMAL");
+    asset = attributedTriangle(); replace(asset.json, R"("byteOffset":0,"componentType":5126)", R"("byteOffset":4,"componentType":5126)"); rejected("uv-accessor-range", asset, "accessor 2");
+    asset = attributedTriangle(); replace(asset.json, R"("byteOffset":72,"byteLength":24)", R"("byteOffset":72,"byteLength":28)"); rejected("uv-buffer-view-range", asset, "bufferView 2");
+    asset = attributedTriangle(5121); replace(asset.json, R"("byteStride":4)", R"("byteStride":2)"); rejected("uv-stride-alignment", asset, "stride");
+    asset = attributedTriangle(5121); replace(asset.json, R"(,"byteStride":4)", ""); rejected("uv-implicit-stride-alignment", asset, "4-byte");
+    asset = attributedTriangle(5121); replace(asset.json, R"("byteOffset":0,"componentType":5121)", R"("byteOffset":1,"componentType":5121)"); rejected("uv-offset-alignment", asset, "4-byte");
+    asset = attributedTriangle(); replace(asset.json, R"("attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2})",
+        R"("attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2}},{"attributes":{"POSITION":0,"NORMAL":2})");
+    rejected("later-primitive-context", asset, "mesh 0 primitive 1: NORMAL must");
+}
+void invalidAttributeValues()
+{
+    for (const auto value : {0.f, 2.f, std::numeric_limits<float>::max(), std::numeric_limits<float>::denorm_min()})
+    {
+        auto asset = attributedTriangle();
+        setFloat(asset.bytes, 60, value);
+        rejected("nonunit-normal-" + std::to_string(value), asset, "mesh 0 primitive 0: NORMAL must have unit length");
+    }
+    for (const auto value : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity()})
+    {
+        for (size_t axis = 0; axis < 3; ++axis)
+        {
+            auto asset = attributedTriangle(); setFloat(asset.bytes, 36 + axis * 4, value);
+            rejected("nonfinite-normal-" + std::to_string(axis), asset, "nonfinite NORMAL");
+        }
+        for (size_t axis = 0; axis < 2; ++axis)
+        {
+            auto asset = attributedTriangle(); setFloat(asset.bytes, 72 + axis * 4, value);
+            rejected("nonfinite-uv-" + std::to_string(axis), asset, "nonfinite TEXCOORD_0");
+        }
+    }
+}
 void unsupportedData()
 {
     auto asset = triangle();
@@ -318,11 +469,13 @@ int main(int argc, char** argv)
     std::filesystem::create_directories(root);
     const struct { const char* name; void (*run)(); } cases[] = {
         {"unsigned indices and nonindexed triangles", unsignedIndicesAndNonindexed}, {"interleaved positions", interleavedPositions},
+        {"absent and independent optional attributes", optionalAttributes}, {"normal/UV formats, layouts and preserved values", normalUvFormatsAndLayouts},
         {"GLB and truncation", glbContainer}, {"base64 data URI", dataUri}, {"Unicode and URI-decoded paths", unicodePaths},
         {"owned results and failure recovery", ownedResultsAndRetry}, {"shared meshes and hierarchy", sharedMeshesAndHierarchy},
         {"multiple mesh primitives", multiplePrimitives},
         {"TRS, matrix and scale conventions", trsMatrixAndShear}, {"default scene and root selection", sceneSelection},
         {"missing/broken files and buffers", badFilesAndBuffers}, {"accessors, index bounds and finite positions", badAccessorsAndIndices},
+        {"normal/UV accessor diagnostics", invalidAttributeAccessors}, {"finite attributes and unit normals", invalidAttributeValues},
         {"unsupported features", unsupportedData}, {"invalid hierarchy and transforms", invalidHierarchyAndTransforms},
         {"deep iterative hierarchy", deepHierarchy}
     };
