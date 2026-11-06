@@ -3,6 +3,8 @@
 #include "VulkanDevice.h"
 #include "VulkanDepthTexture.h"
 #include "VulkanFunctions.h"
+#include "VulkanFrameLighting.h"
+#include "VulkanFrameGraph.h"
 #include "VulkanSwapchain.h"
 #include "VulkanTrianglePipeline.h"
 
@@ -21,6 +23,7 @@ struct VulkanClearRenderer::State
         VkImage handle = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
         bool presented = false;
+        std::unique_ptr<detail::VulkanFrameGraph> graph;
     };
 
     VkDevice device = VK_NULL_HANDLE;
@@ -33,6 +36,7 @@ struct VulkanClearRenderer::State
     BufferRef vertexKeepAlive;
     BufferRef indexKeepAlive;
     std::vector<TextureBindingRef> materialKeepAlive;
+    detail::VulkanFrameLighting lighting;
     TextureRef depth;
     bool depthInitialized = false;
     std::vector<Image> images;
@@ -57,9 +61,6 @@ struct VulkanClearRenderer::State
     PFN_vkResetCommandPool resetCommandPool = nullptr;
     PFN_vkBeginCommandBuffer beginCommandBuffer = nullptr;
     PFN_vkEndCommandBuffer endCommandBuffer = nullptr;
-    PFN_vkCmdPipelineBarrier2 cmdPipelineBarrier2 = nullptr;
-    PFN_vkCmdBeginRendering cmdBeginRendering = nullptr;
-    PFN_vkCmdEndRendering cmdEndRendering = nullptr;
     PFN_vkCreateSemaphore createSemaphore = nullptr;
     PFN_vkDestroySemaphore destroySemaphore = nullptr;
     PFN_vkCreateFence createFence = nullptr;
@@ -88,9 +89,6 @@ struct VulkanClearRenderer::State
         LOAD_FRAME_FUNCTION(ResetCommandPool, resetCommandPool)
         LOAD_FRAME_FUNCTION(BeginCommandBuffer, beginCommandBuffer)
         LOAD_FRAME_FUNCTION(EndCommandBuffer, endCommandBuffer)
-        LOAD_FRAME_FUNCTION(CmdPipelineBarrier2, cmdPipelineBarrier2)
-        LOAD_FRAME_FUNCTION(CmdBeginRendering, cmdBeginRendering)
-        LOAD_FRAME_FUNCTION(CmdEndRendering, cmdEndRendering)
         LOAD_FRAME_FUNCTION(CreateSemaphore, createSemaphore)
         LOAD_FRAME_FUNCTION(DestroySemaphore, destroySemaphore)
         LOAD_FRAME_FUNCTION(CreateFence, createFence)
@@ -151,79 +149,7 @@ struct VulkanClearRenderer::State
         if (!detail::checkResult(beginCommandBuffer(commandBuffer, &begin), "vkBeginCommandBuffer")) { return false; }
 
         const auto& image = images[imageIndex];
-        VkImageMemoryBarrier2 barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        // Match the acquire semaphore wait stage, including the layout transition.
-        barrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-        barrier.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-        barrier.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-        barrier.oldLayout = image.presented ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED;
-        barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image = image.handle;
-        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        VkDependencyInfo dependency{};
-        dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-        dependency.imageMemoryBarrierCount = 1;
-        dependency.pImageMemoryBarriers = &barrier;
-        cmdPipelineBarrier2(commandBuffer, &dependency);
-
-        VkImageMemoryBarrier2 depthBarrier{};
-        depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        constexpr auto depthStages = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
-        depthBarrier.srcStageMask = depthInitialized ? depthStages : VK_PIPELINE_STAGE_2_NONE;
-        depthBarrier.srcAccessMask = depthInitialized ? VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : VK_ACCESS_2_NONE;
-        depthBarrier.dstStageMask = depthStages;
-        depthBarrier.dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        depthBarrier.oldLayout = depthInitialized ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
-        depthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        depthBarrier.srcQueueFamilyIndex = depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        depthBarrier.image = detail::TextureAccess::image(depth);
-        depthBarrier.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
-        VkDependencyInfo depthDependency{};
-        depthDependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-        depthDependency.imageMemoryBarrierCount = 1;
-        depthDependency.pImageMemoryBarriers = &depthBarrier;
-        cmdPipelineBarrier2(commandBuffer, &depthDependency);
-
-        VkRenderingAttachmentInfo attachment{};
-        attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        attachment.imageView = image.view;
-        attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        std::ranges::copy(color, attachment.clearValue.color.float32);
-        VkRenderingAttachmentInfo depthAttachment{};
-        depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        depthAttachment.imageView = detail::TextureAccess::view(depth);
-        depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depthAttachment.clearValue.depthStencil = {1.0f, 0};
-        VkRenderingInfo rendering{};
-        rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-        rendering.renderArea.extent = extent;
-        rendering.layerCount = 1;
-        rendering.colorAttachmentCount = 1;
-        rendering.pColorAttachments = &attachment;
-        rendering.pDepthAttachment = &depthAttachment;
-        cmdBeginRendering(commandBuffer, &rendering);
-        if (triangle)
-        {
-            for (const auto& draw : draws)
-            {
-                if (!triangle->recordIndexedDraw(commandBuffer, extent, draw)) { return false; }
-            }
-        }
-        cmdEndRendering(commandBuffer);
-
-        barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-        barrier.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
-        barrier.dstAccessMask = VK_ACCESS_2_NONE;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        cmdPipelineBarrier2(commandBuffer, &dependency);
+        if (!image.graph->record(commandBuffer, color, draws, image.presented, depthInitialized)) { return false; }
         return detail::checkResult(endCommandBuffer(commandBuffer), "vkEndCommandBuffer");
     }
 };
@@ -240,7 +166,8 @@ VulkanClearRenderer::~VulkanClearRenderer()
     }
 }
 
-bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwapchain& swapchain, TextureRef depth, const VulkanTrianglePipeline* triangle)
+bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwapchain& swapchain, TextureRef depth,
+    const graph::GraphicsGraphFactory& graphFactory, const VulkanTrianglePipeline* triangle)
 {
     if (state_)
     {
@@ -282,6 +209,7 @@ bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwa
         created->indexKeepAlive = triangle->indexBuffer();
         const auto bindings = triangle->materialBindings();
         created->materialKeepAlive.assign(bindings.begin(), bindings.end());
+        if (!bindings.empty() && !created->lighting.initialize(device, triangle->lightingLayout())) { return false; }
     }
     if (!created->loadFunctions(device.physicalDeviceInfo().instance)) { return false; }
     created->images.resize(swapchain.images().size());
@@ -298,6 +226,8 @@ bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwa
         VkImageView imageView = VK_NULL_HANDLE;
         if (!detail::checkResult(created->createImageView(created->device, &view, nullptr, &imageView), "vkCreateImageView")) { return false; }
         image.view = imageView;
+        image.graph = std::make_unique<detail::VulkanFrameGraph>();
+        if (!image.graph->initialize(device, image.handle, image.view, created->extent, created->depth, triangle, created->lighting, graphFactory)) { return false; }
     }
     VkCommandPoolCreateInfo pool{};
     pool.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -351,16 +281,16 @@ ClearFrameResult VulkanClearRenderer::draw(const std::array<float, 4>& color, st
     return drawIndexed(color, draws);
 }
 
-ClearFrameResult VulkanClearRenderer::drawIndexed(const std::array<float, 4>& color, std::span<const IndexedDraw> draws)
+ClearFrameResult VulkanClearRenderer::drawIndexed(const std::array<float, 4>& color, std::span<const IndexedDraw> draws, const FrameLighting& lighting)
 {
-    if (!state_) { return ClearFrameResult::Failed; }
+    if (!state_ || !lighting.valid()) { return ClearFrameResult::Failed; }
     auto& frame = *state_;
     if (!frame.triangle && !draws.empty()) { return ClearFrameResult::Failed; }
     for (const auto& draw : draws)
     {
         if (draw.indexCount == 0 || draw.indexCount % 3 != 0 || draw.firstIndex > frame.triangle->indexCount() ||
             draw.indexCount > frame.triangle->indexCount() - draw.firstIndex ||
-            !draw.transform.valid() || (frame.materialKeepAlive.empty() ? (draw.material != 0 || draw.transform.view == GeometryView::Material) : draw.material >= frame.materialKeepAlive.size()))
+            !draw.transform.valid() || (frame.materialKeepAlive.empty() ? (draw.material != 0 || draw.transform.view == GeometryView::Material || draw.transform.view == GeometryView::Lit) : draw.material >= frame.materialKeepAlive.size()))
         {
             std::fprintf(stderr, "Vulkan error: invalid indexed Draw snapshot before acquisition.\n");
             return ClearFrameResult::Failed;
@@ -369,6 +299,9 @@ ClearFrameResult VulkanClearRenderer::drawIndexed(const std::array<float, 4>& co
     if (frame.status != ClearFrameResult::Presented) { return frame.status; }
     frame.status = ClearFrameResult::Failed;
     if (!frame.wait()) { return frame.status; }
+    // The previous GPU read has completed. Coherent host writes precede submit,
+    // which performs the host-to-device domain operation for the next read.
+    if (!frame.materialKeepAlive.empty()) { frame.lighting.write(lighting); }
     if (!detail::checkResult(frame.resetFences(frame.device, 1, &frame.acquireFence), "vkResetFences(acquire)")) { return frame.status; }
     uint32_t imageIndex = 0;
     // A finite timeout keeps window events responsive when no image is available.

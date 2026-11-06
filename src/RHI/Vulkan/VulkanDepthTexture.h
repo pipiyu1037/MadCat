@@ -20,6 +20,7 @@ struct TextureAccess
     [[nodiscard]] static VkImage image(const TextureRef& texture) noexcept;
     [[nodiscard]] static VkImageView view(const TextureRef& texture) noexcept;
     [[nodiscard]] static VkFormat format(const TextureRef& texture) noexcept;
+    [[nodiscard]] static uint32_t mipLevels(const TextureRef& texture) noexcept;
 };
 }
 }

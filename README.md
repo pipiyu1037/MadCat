@@ -1,6 +1,6 @@
 # MadCat
 
-使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前可绘制彩色三角形，并通过 `--gltf` 显示共享 GPU 几何的双实例 glTF／GLB 场景。支持三维顶点／索引、Scene／相机矩阵、深度遮挡、单帧同步、resize／最小化恢复，以及 Shader 手动编译、SPIR-V 验证和 Vulkan 资源的 RAII 管理。材质与贴图尚未接入。
+使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前可绘制彩色三角形，并通过 `--gltf` 显示共享 GPU 几何的双实例 glTF／GLB 场景。支持基础色材质／贴图、方向光漫反射、Scene／相机矩阵、深度遮挡、单帧同步、resize／最小化恢复，以及 Shader 手动编译、SPIR-V 验证和 Vulkan 资源的 RAII 管理。
 
 文档：[开发范围、进度与验收](docs/project-development.md) · [架构设计](docs/architecture-design.md)。
 
@@ -300,7 +300,7 @@ cmake --build build --config Debug --target MadCatSceneDrawChecks MadCatTriangle
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario scene
 ```
 
-[CPU 场景绘制检查](tests/TriangleSceneChecks.cpp) 用独立逐点解析变换验证七种姿态、不同宽高比、矩阵打包、近远裁剪、快照、错误恢复和相反绘制顺序。`drawTransforms()` 返回拥有至多两个矩阵值的快照，renderer 在同一次动态渲染中按顺序 Draw；两个模型共享同一顶点缓冲。窗口脚本独立计算投影、透视校正颜色及屏幕空间深度，检查重复切换和姿态改变不重建管线。尚无自由相机控制、通用 Pass／Render Graph；glTF 静态预览见下节。
+[CPU 场景绘制检查](tests/TriangleSceneChecks.cpp) 用独立逐点解析变换验证七种姿态、不同宽高比、矩阵打包、近远裁剪、快照、错误恢复和相反绘制顺序。`drawTransforms()` 返回拥有至多两个矩阵值的快照，renderer 在同一次动态渲染中按顺序 Draw；两个模型共享同一顶点缓冲。窗口脚本独立计算投影、透视校正颜色及屏幕空间深度，检查重复切换和姿态改变不重建管线。尚无自由相机控制；实际绘制已接入下文最小 Pass／Render Graph，glTF 静态预览见下节。
 
 ## 深度附件与遮挡
 
@@ -315,7 +315,7 @@ cmake --build build --config Debug --target MadCatDepthChecks MadCatTriangleChec
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario depth
 ```
 
-`MadCatDepthChecks` 包含 26 项模拟检查，覆盖 D16 回退、图像能力／内存类型、缺失函数、查询／创建／分配／绑定／视图失败、重试、引用和释放顺序。深度窗口场景在重叠区寻找两个采样点，分别由不同三角形位于前方，按最近 NDC 深度计算颜色，检查顺序反转、逐帧清除、resize 和恢复。实际 Debug／Release 场景通过，本机为 RTX 5060 Ti／D32_SFLOAT；D16 回退尚未在真实驱动场景单独验收。当前无 stencil、MSAA、深度采样／查看器、通用纹理上传或 Render Graph 自动同步。
+`MadCatDepthChecks` 包含 26 项模拟检查，覆盖 D16 回退、图像能力／内存类型、缺失函数、查询／创建／分配／绑定／视图失败、重试、引用和释放顺序。深度窗口场景在重叠区寻找两个采样点，分别由不同三角形位于前方，按最近 NDC 深度计算颜色，检查顺序反转、逐帧清除、resize 和恢复。实际 Debug／Release 场景通过，本机为 RTX 5060 Ti／D32_SFLOAT；D16 回退尚未在真实驱动场景单独验收。当前无 stencil、MSAA 或深度采样／查看器；图已接管颜色／深度附件的同步，见下文最小图说明。
 
 ## CPU glTF 几何导入
 
@@ -430,7 +430,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.p
 
 [CPU 检查](tests/RenderSceneChecks.cpp) 的 8 组覆盖层级、快照、失效／溢出、几何校验、资产标识隔离，以及真实 Suzanne／TransformProbe 的独立编辑、删除与恢复。管线模拟新增索引子范围与越界检查。两种配置的模型窗口检查覆盖两种资产、独立变换、删除至空场景、恢复、反序、resize、最小化恢复和安全退出；TransformProbe 每帧最多 38 个独立解析像素，Suzanne 为左右实例可见性冒烟。Debug 开启同步验证，无 warning／error；Release 未主动启用验证层。
 
-基础色材质与贴图已实现；基础光照、通用 Pass／Render Graph 和运行期 Shader 更新仍待实现，F03 尚未整体验收。
+基础色材质／贴图、方向光与最小 Pass／Render Graph 已实现；通用管线准备和运行期 Shader 更新仍待实现，F03 尚未整体验收。
 
 ## 法线与 UV 可视化
 
@@ -474,7 +474,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.p
 
 资产导入分为 [图片来源读取](src/Assets/GltfImages.cpp)、[stb_image 解码适配](src/Assets/Image.cpp)和[材质／采样器转换](src/Assets/GltfMaterials.cpp)。URI 百分号与 base64 处理复用 cgltf，PNG／JPEG 解码交给开源 [stb_image 2.30](https://github.com/nothings/stb/blob/d14d46f6b44456eb88beac58cba833a4135d4c89/stb_image.h)，其实现仅在一个私有 C 翻译单元编译，并关闭其他格式及文件 I/O。完整 glTF、额外 UV 集、纹理变换、压缩纹理、法线／金属粗糙度贴图着色、透明混合及 PBR 待后续实现。[glTF 材质规范](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#materials)
 
-[采样纹理上传](src/RHI/Vulkan/VulkanSampledTexture.h)使用 coherent staging、专用 device-local 图像和完整 mip 链；单次启动提交完成后才释放上传内存。返回时处于同一队列的 `SHADER_READ_ONLY_OPTIMAL`／Fragment sampled-read 状态，未来 Render Graph 导入必须显式交接。set 0 的 binding 0 是图像、binding 1 是采样器；具名 C++ 槽位与 Shader 对齐。`TextureBindingRef` 拥有只读 Descriptor、采样器并保留纹理；应用、管线和帧上下文保活，resize 不重传，GPU 完成后释放。
+[采样纹理上传](src/RHI/Vulkan/VulkanSampledTexture.h)使用 coherent staging、专用 device-local 图像和完整 mip 链；单次启动提交完成后才释放上传内存。返回时处于同一队列的 `SHADER_READ_ONLY_OPTIMAL`／Fragment sampled-read 状态，当前图导入显式交接这一状态。set 0 的 binding 0 是图像、binding 1 是采样器；具名 C++ 槽位与 Shader 对齐。`TextureBindingRef` 拥有只读 Descriptor、采样器并保留纹理；应用、管线和帧上下文保活，resize 不重传，GPU 完成后释放。
 
 Draw 常量仍为 128 字节：三个法线列的 xyz 不变，其 w 保存基础色 RGB；offset 120／124 保存 alpha／alphaCutoff。Shader 裁剪使用 `DemoteToHelperInvocation`，Sandbox 会查询并选择支持该 Vulkan 1.3 feature 的设备，Device 仅在查询支持时启用，不凭显卡型号假定可用。
 
@@ -482,7 +482,50 @@ Draw 常量仍为 128 字节：三个法线列的 xyz 不变，其 w 保存基�
 
 原创 [MaterialProbe](assets/models/README.md#材质与采样参考资产)有四种材质，[独立像素参考](tests/MaterialPixelReference.ps1)每帧 54 点覆盖 sRGB 后过滤、因子、MASK、寻址及 mip。材质窗口检查保留默认、镜像、反序、resize 和最小化恢复五次采样；stb_image 替换后的 Debug 参考场景与 Suzanne 外部贴图冒烟均通过，同步验证无 warning／error，上传共享与退出释放通过。未重跑 Release GPU 场景。Suzanne 无独立逐像素参考，不据此宣称完整外观或 PBR 验收。
 
-当前 GPU 材质／几何在启动时固定；没有运行期图片替换、资产卸载、通用绑定系统或 Render Graph。这里只实现基础色贴图预览，F03 尚未整体验收。下一步为基础光照，再推进通用 Pass／图与阴影。
+当前 GPU 材质／几何在启动时固定；没有运行期图片替换、资产卸载或通用绑定系统。绘制已接入下文的最小 Render Graph；M 保留基础色预览，光照使用下节的 L 模式，F03 尚未整体验收。
+
+## 基础方向光
+
+加载模型后按 `L` 显示方向光 Lambert 漫反射，按 `J` 循环默认方向、旋转方向和关灯；`M` 返回不受光的基础色模式，`C`／`N`／`U` 保留诊断显示。默认仍是 M。灯光和模型变换无需重启或重建管线；按 `9` 检查非均匀缩放，`0` 检查镜像。
+
+```powershell
+cmake --build build --config Debug --target MadCatShaders MadCat MadCatRenderSceneChecks MadCatTriangleChecks
+.\build\Debug\MadCat.exe --gltf assets/models/Suzanne/Suzanne.gltf
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario lighting
+cmake --build build --config Release --target MadCat MadCatRenderSceneChecks MadCatTriangleChecks
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Release -Scenario lighting
+```
+
+[DirectionalLight](src/Scene/Light.h) 是 Entity 上的 CPU 组件，保存线性 RGB 和辐照度缩放；局部 −Z 为光传播方向，继承父子世界变换。[RenderScene](src/RenderScene/RenderScene.h)提取指向光源的单位方向和 RGB 辐照度；本版支持零或一盏方向光，多盏返回诊断。Sandbox 的光源颜色为 `(1,.8,.6)`、辐照度缩放 π，父节点绕 Y 为 −35°／55°，子节点绕 X 为 −25°。
+
+L 模式在线性空间计算 `基础色 × 辐照度 × max(dot(N,L),0) / π`，交换链执行 sRGB 显示编码。法线按世界逆转置传递、插值后归一化；双面材质有效背面的法线翻转，镜像补偿绕序，MASK 保留透明裁剪。缺失法线、奇异法线变换或零插值法线显示洋红色。无环境光，关灯后的有效表面为黑色。本版没有阴影、HDR／色调映射、PBR 或更多灯型；输出超出 SDR 范围时截断。
+
+光照数据使用独立的 [32 字节帧 Uniform Buffer](src/RHI/FrameLighting.h)，set 1／binding 0、仅片元可见；Draw 常量仍为 128 字节。每个帧上下文独立拥有 UBO 和不可变 Descriptor，等待上一帧提交完成后才更新，GPU／呈现退役并释放命令后销毁。C++ 与 Shader 必须一起更新，重新编译前先关闭旧程序。
+
+Debug／Release 的 RenderScene 10 组、管线 66 项与材质 3 组检查通过，Slang 编译／SPIR-V 验证及 12 项编译失败恢复通过。原创 [LightingProbe](assets/models/README.md#方向光参考资产)的八次采样每次 54 个独立解析像素均通过，覆盖灯光旋转／关闭、非均匀缩放、镜像、反序、resize 和最小化恢复；Debug 同步验证无 warning／error，Release 未主动启用验证层。另通过 Debug 原材质五次采样及 Suzanne 光照八次可见性冒烟；Suzanne 没有逐像素参考。最小图执行见下节，后续补图内纹理与深度采样，再接方向光阴影。
+
+## 最小 C++ Pass 与 Render Graph
+
+现有窗口绘制经过 `Clear → Forward → Present`。[建图工厂](src/Passes/ForwardPass.h)由 Sandbox 显式传入，普通 Pass 通过 [PassContext](src/RenderGraph/RenderGraph.h) 和 [RHI 图形命令](src/RHI/GraphicsCommands.h)记录工作，不包含 Vulkan 类型。后端适配器只导入实际资源、执行图计划和记录同步；提交与 WSI 呈现仍由渲染器统一组织。
+
+```powershell
+cmake --build build --config Debug --target MadCat MadCatRenderGraphChecks MadCatTriangleChecks
+cmake --build build --config Release --target MadCat MadCatRenderGraphChecks MadCatTriangleChecks
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario lighting
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Release -Scenario lighting
+```
+
+Clear 清除完整颜色／深度附件并返回新版本；Forward 加载这两个版本，声明顶点、索引、帧光照 Uniform 和所有可绑定基础色图像，绘制后再次返回新版本；Present 声明读取最终颜色，图将其转换为呈现布局。实际 `vkQueuePresentKHR` 在统一提交之后执行。写后写也需要同步，深度在两个动态渲染实例之间保存并加载；相关机制见 [Vulkan 同步示例](https://docs.vulkan.org/guide/latest/synchronization_examples.html)。
+
+[图编译器](src/RenderGraph/RenderGraph.cpp)校验资源种类、初始化、写入后继和图身份，按生产者／读取者及旧版本读取到后继写入的依赖排序。每次写入产生新版本，同版本分叉写入会报错；重复导入同一底层图像／缓冲会合并身份。有环时诊断包含节点、资源和版本。仅有旧句柄不能保留被覆盖前的像素。
+
+图保存每个节点的 `Declared` 和 Pass 值；`Parameters` 在记录开始时复制固定。编译计划复用，记录时结合本帧显式外部状态生成屏障。`PassContext` 拒绝未声明资源／版本／用途、错误附件加载方式及未结束的渲染，即使 Pass 忽略错误返回也会取消整图。记录结果返回预期最终状态；记录失败不推进外部状态，整图成功记录后才统一提交。
+
+[Vulkan 执行适配](src/RHI/Vulkan/VulkanFrameGraph.cpp)为每个交换链图像建立独立计划，导入颜色、共享深度、顶点／索引、帧 UBO 和去重后的材质图像。图外上传交接 HostWrite 或 Fragment sampled-read；每帧 UBO 更新后交接 HostWrite，深度和交换链状态由成功提交／呈现记录提供。RHI 在上一帧完成后复用缓冲，持有实际资源至命令退役。模型／灯光参数变化不重新编图，resize 在等待完成后重建。
+
+本增量支持单队列、整资源访问和已有资源导入；管线与 Descriptor 仍沿用当前预先准备的固定绘制接口。尚无图内纹理分配、子资源范围、Compute／Dispatch、通用 `prepare`／管线切换、运行期图切换、稳定提交标识或 Shader 更新；不能据此标记 F04／F05 整体验收。
+
+Debug／Release 主程序、七组图检查和 66 项原管线检查通过，无编译警告。两种配置的光照八次采样每次 54 点通过；Debug 另通过模型删除至空／恢复、深度遮挡及反序、resize／最小化恢复和最小化退出。检查还核对每个交换链图像只建立一份三节点计划，材质探针共导入八个实际资源；Debug 同步验证无 warning／error，Release 未主动启用验证层。本轮未修改或重编 Shader，未测性能。下一步补图内纹理与深度采样，再接方向光阴影。
 
 ## 手动编译 Shader
 
@@ -589,7 +632,7 @@ cmake --build build --config Debug --target MadCatBufferChecks MadCatTriangleChe
 cmake --build build --config Release --target MadCatBufferChecks MadCatTriangleChecks MadCat
 ```
 
-`MadCatBufferChecks` 包含 40 项模拟 Vulkan 检查，覆盖两个用途的缺失函数、内存类型筛选、创建／分配／绑定／映射失败、清理、重试、源数据复制、引用释放与索引值上限。当前没有 staging／设备本地复制、非 coherent 回退、uint16 索引、Storage 缓冲、可变上传区或通用提交回收系统。未来 Render Graph 导入分别声明 Vertex Attribute Input／Vertex Attribute Read 与 Index Input／Index Read，不能因引用存在而省略访问声明。
+`MadCatBufferChecks` 包含 40 项模拟 Vulkan 检查，覆盖两个用途的缺失函数、内存类型筛选、创建／分配／绑定／映射失败、清理、重试、源数据复制、引用释放与索引值上限。当前没有 staging／设备本地复制、非 coherent 回退、uint16 索引、Storage 缓冲、可变上传区或通用提交回收系统。当前图导入分别声明 Vertex Attribute Input／Vertex Attribute Read 与 Index Input／Index Read，不能因引用存在而省略访问声明。
 
 ## 三角形绘制与检查
 
@@ -635,7 +678,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.p
 
 每帧等待上一帧三个完成条件后复用资源；acquire 使用 50 ms 超时，无可用图像时返回 `Retry`，不重置提交 Fence。成功后记录 `UNDEFINED`／`PRESENT_SRC_KHR` → `COLOR_ATTACHMENT_OPTIMAL` → `PRESENT_SRC_KHR` 转换；提交等待阶段为颜色附件输出，完成信号覆盖全部命令。只等待确实已发起的工作；录制／提交失败仍等待已发起的 acquisition，present 的 out-of-date／surface-lost 与内存不足排队语义分开处理。[acquire 要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkAcquireNextImageKHR.html)、[present 错误语义](https://docs.vulkan.org/refpages/latest/refpages/source/vkQueuePresentKHR.html)
 
-呈现 Fence 确认呈现资源可退役，不能用提交 Fence 或单独的 `vkDeviceWaitIdle` 替代。本轮等待呈现 Fence 后再复用唯一的 render-finished 信号量，保持一个在途帧，不以此宣称性能结果。清屏器属于后端基础验证路径，未来由 Pass／Render Graph 执行替代。帧错误后停止后续提交；完成等待失败会诊断，析构重试仍失败时终止进程，避免释放无法确认完成的资源；设备丢失恢复未实现。[呈现信号量与退出问题](https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html)、[呈现 Fence 语义](https://docs.vulkan.org/refpages/latest/refpages/source/VkSwapchainPresentFenceInfoKHR.html)
+呈现 Fence 确认呈现资源可退役，不能用提交 Fence 或单独的 `vkDeviceWaitIdle` 替代。本轮等待呈现 Fence 后再复用唯一的 render-finished 信号量，保持一个在途帧，不以此宣称性能结果。清屏器现在保留帧生命周期与呈现职责，Pass 绘制和资源同步已由最小图执行接管。帧错误后停止后续提交；完成等待失败会诊断，析构重试仍失败时终止进程，避免释放无法确认完成的资源；设备丢失恢复未实现。[呈现信号量与退出问题](https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html)、[呈现 Fence 语义](https://docs.vulkan.org/refpages/latest/refpages/source/VkSwapchainPresentFenceInfoKHR.html)
 
 ## 常见初始化问题
 

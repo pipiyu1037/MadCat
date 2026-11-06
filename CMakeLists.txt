@@ -220,6 +220,25 @@ add_custom_target(MadCatMaterialChecks
     VERBATIM
 )
 
+add_library(MadCatRenderGraph STATIC src/RenderGraph/RenderGraph.cpp)
+target_compile_features(MadCatRenderGraph PUBLIC cxx_std_23)
+target_include_directories(MadCatRenderGraph PUBLIC src)
+set_target_properties(MadCatRenderGraph PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+    target_compile_options(MadCatRenderGraph PRIVATE /W4 /permissive- /utf-8)
+endif()
+add_executable(RenderGraphChecks EXCLUDE_FROM_ALL tests/RenderGraphChecks.cpp)
+target_link_libraries(RenderGraphChecks PRIVATE MadCatRenderGraph)
+if(MSVC)
+    target_compile_options(RenderGraphChecks PRIVATE /W4 /permissive- /utf-8)
+endif()
+add_custom_target(MadCatRenderGraphChecks
+    COMMAND "$<TARGET_FILE:RenderGraphChecks>"
+    DEPENDS RenderGraphChecks
+    COMMENT "Checking graph resource versions, dependencies, synchronization and execution boundaries"
+    VERBATIM
+)
+
 add_executable(MadCat
     apps/Sandbox/main.cpp
     apps/Sandbox/TriangleScene.cpp
@@ -229,6 +248,8 @@ add_executable(MadCat
     src/RHI/Vulkan/VulkanDepthTexture.cpp
     src/RHI/Vulkan/VulkanSampledTexture.cpp
     src/RHI/Vulkan/VulkanClearRenderer.cpp
+    src/RHI/Vulkan/VulkanFrameLighting.cpp
+    src/RHI/Vulkan/VulkanFrameGraph.cpp
     src/RHI/Vulkan/VulkanDevice.cpp
     src/RHI/Vulkan/VulkanInstance.cpp
     src/RHI/Vulkan/VulkanPhysicalDevice.cpp
@@ -245,7 +266,7 @@ target_compile_definitions(MadCat PRIVATE
     VK_NO_PROTOTYPES
     MADCAT_SHADER_DIRECTORY="${CMAKE_CURRENT_BINARY_DIR}/shaders/triangle"
 )
-target_link_libraries(MadCat PRIVATE glfw Vulkan::Headers MadCatRenderScene)
+target_link_libraries(MadCat PRIVATE glfw Vulkan::Headers MadCatRenderScene MadCatRenderGraph)
 
 if(MSVC)
     target_compile_options(MadCat PRIVATE /W4 /permissive- /utf-8)

@@ -2,11 +2,19 @@
 
 #include "Scene/Camera.h"
 #include "Scene/Model.h"
+#include "Scene/Light.h"
+#include "RHI/FrameLighting.h"
 #include "RHI/ColoredVertex.h"
 #include "RHI/IndexedDraw.h"
 
 namespace madcat::render
 {
+// One directional light for this first forward-lighting increment. Requires
+// current worlds outside queries. No light yields black; multiple lights,
+// collapsed world +Z or invalid/overflowing radiometry return a diagnostic.
+// Returned values own their data; no component or GPU objects are borrowed.
+[[nodiscard]] std::expected<rhi::FrameLighting, std::string> extractLighting(const scene::Scene& scene);
+
 struct PrimitiveId
 {
     assets::ModelAssetId model;

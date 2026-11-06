@@ -9,6 +9,7 @@
 
 namespace madcat::rhi
 {
+uint32_t detail::TextureAccess::mipLevels(const TextureRef& texture) noexcept { return texture.state_ ? texture.state_->mipLevels : 0; }
 uint32_t TextureRef::width() const noexcept { return state_ ? state_->width : 0; }
 uint32_t TextureRef::height() const noexcept { return state_ ? state_->height : 0; }
 VkDevice detail::TextureAccess::device(const TextureRef& texture) noexcept { return texture.state_ ? texture.state_->device : VK_NULL_HANDLE; }

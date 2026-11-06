@@ -40,8 +40,9 @@ public:
     // Indices must be same-Device uint32 triangles, nonempty and in vertex bounds.
     // triangle.slang requires material bindings, including a white fallback.
     // An empty span is reserved for descriptor-free shader exercises; it cannot
-    // record Material view. Nonempty entries share the fixed set-0 image/sampler
-    // layout and are retained together with geometry until GPU completion.
+    // record Material/Lit view. Nonempty entries share the fixed set-0 image/sampler
+    // layout and create the set-1 fragment lighting layout. Each renderer owns
+    // its own lighting buffer/set; geometry/materials are retained until completion.
     // Failure releases partial resources; repeated initialization preserves state.
     [[nodiscard]] bool initialize(const VulkanDevice& device, VkFormat colorFormat,
         const VulkanShaderModule& vertex, const VulkanShaderModule& fragment, BufferRef vertices, BufferRef indices, VkFormat depthFormat,
@@ -56,15 +57,21 @@ public:
     [[nodiscard]] BufferRef indexBuffer() const;
     [[nodiscard]] uint32_t indexCount() const;
     [[nodiscard]] std::span<const TextureBindingRef> materialBindings() const;
+    // Backend-only layout borrowed by each renderer's independent frame UBO.
+    [[nodiscard]] VkDescriptorSetLayout lightingLayout() const;
 
     // Caller provides a recording primary graphics command buffer from the same
     // Device, inside compatible dynamic rendering. Extent must fit Device limits.
     // Sets viewport/scissor, binds both buffers, copies valid draw constants and records
     // DrawIndexed(indexCount, 1, 0, 0, 0). Invalid input records no Vulkan commands.
-    [[nodiscard]] bool recordDraw(VkCommandBuffer commandBuffer, VkExtent2D extent, const DrawTransform& transform) const;
+    // With materials, lighting must be a same-Device set allocated from
+    // lightingLayout(), backed by data retained unchanged until GPU completion.
+    [[nodiscard]] bool recordDraw(VkCommandBuffer commandBuffer, VkExtent2D extent, const DrawTransform& transform,
+        VkDescriptorSet lighting = VK_NULL_HANDLE) const;
     // Nonempty triangle range into the retained index buffer. Validated before
     // recording; instances share buffers and supply their own matrix snapshots.
-    [[nodiscard]] bool recordIndexedDraw(VkCommandBuffer commandBuffer, VkExtent2D extent, const IndexedDraw& draw) const;
+    [[nodiscard]] bool recordIndexedDraw(VkCommandBuffer commandBuffer, VkExtent2D extent, const IndexedDraw& draw,
+        VkDescriptorSet lighting = VK_NULL_HANDLE) const;
 
 private:
     struct State;

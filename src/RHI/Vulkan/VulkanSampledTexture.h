@@ -22,6 +22,7 @@ struct TextureBindingAccess
     [[nodiscard]] static VkDevice device(const TextureBindingRef& binding);
     [[nodiscard]] static VkDescriptorSetLayout layout(const TextureBindingRef& binding);
     [[nodiscard]] static VkDescriptorSet set(const TextureBindingRef& binding);
+    [[nodiscard]] static TextureRef texture(const TextureBindingRef& binding);
 };
 }
 }

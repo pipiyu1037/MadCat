@@ -39,6 +39,12 @@ AABB 为 `[-1,-1,0]..[1,1,.5]`，居中点 `(0,0,.25)`，预览适配缩放 `.6`
 
 [独立像素参考](../../tests/MaterialPixelReference.ps1)直接使用解析坐标／UV／纹理字节与因子常量，计算透视插值、sRGB 解码、过滤、寻址、裁剪和深度，不读取应用上传数据或矩阵。stb_image 替换后，Debug 的默认／镜像／反序／resize／最小化恢复五次采样各 54 点通过，含四类材质与透明裁剪；同时检查只上传 3 张 GPU 图像（白色回退及两张实际图片）并创建 4 份绑定，退出安全释放，同步验证无 warning／error。命令见 [材质工作流](../../README.md#基础材质图片与纹理采样)。这不是光照／PBR 测试。
 
+## 方向光参考资产
+
+[LightingProbe.gltf](LightingProbe.gltf) 复用本仓库原创 MaterialProbe 的位置、UV、材质和内嵌图片；增加用于 Lambert 验证的法线与反向索引，不含第三方资产。Primitive 0 的三个法线为 `(.6,0,.8)`、`(0,.8,.6)`、`(-.8,0,.6)`；Primitive 1 索引 `0,2,1`，法线均 `(0,0,-1)`，材质改为 doubleSided，用于验证背面翻转；Primitive 2 缺法线，L 模式应为洋红色；Primitive 3 法线均 `(0,0,1)`。沿用 MaterialProbe 的 AABB `[-1,-1,0]..[1,1,.6]` 与适配缩放 `.6`。
+
+[光照解析参考](../../tests/LightingPixelReference.ps1)复用材质采样和投影插值辅助函数，以独立逆缩放、旋转、法线归一化、背面修正及 Lambert 公式计算预期值。灯光颜色 `(1,.8,.6)`，辐照度缩放 π，父 Y 旋转 −35°／55°、子 X 旋转 −25°；关闭时缩放为零。Debug／Release 八次采样每次 54 点通过；同时检查帧 UBO 创建／释放数量、释放顺序和灯光切换不重建管线。Debug 开启同步验证，无 warning／error；Release 未主动启用验证层。复现命令见 [基础方向光](../../README.md#基础方向光)。
+
 ## 外部开源模型
 
 [Suzanne](Suzanne/README.md) 是从 Khronos 官方 glTF Sample Assets 固定提交原样下载的经典猴头模型，采用 CC0 许可。目录保留 `.gltf`、外部 `.bin`、两张贴图及许可；没有格式转换。已通过 Debug／Release 导入和静态绘制、模型／相机变换、resize 与最小化恢复检查。来源、文件哈希、命令和验证边界见模型说明。

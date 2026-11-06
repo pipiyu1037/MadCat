@@ -1,7 +1,7 @@
 param(
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug',
     [string]$BuildDirectory = 'build',
-    [ValidateSet('resize', 'close-minimized', 'modal', 'stress', 'scene', 'depth', 'model', 'attributes', 'materials')][string]$Scenario = 'resize',
+    [ValidateSet('resize', 'close-minimized', 'modal', 'stress', 'scene', 'depth', 'model', 'attributes', 'materials', 'lighting')][string]$Scenario = 'resize',
     [string]$ModelPath = ''
 )
 $ErrorActionPreference = 'Stop'
@@ -10,6 +10,7 @@ $probePath = Join-Path $workspace 'assets/models/TransformProbe.gltf'
 if ($Scenario -eq 'model' -and -not $ModelPath) { $ModelPath = $probePath }
 if ($Scenario -eq 'attributes' -and -not $ModelPath) { $ModelPath = Join-Path $workspace 'assets/models/AttributeProbe.gltf' }
 if ($Scenario -eq 'materials' -and -not $ModelPath) { $ModelPath = Join-Path $workspace 'assets/models/MaterialProbe.gltf' }
+if ($Scenario -eq 'lighting' -and -not $ModelPath) { $ModelPath = Join-Path $workspace 'assets/models/LightingProbe.gltf' }
 $hasModel = [bool]$ModelPath
 if ($hasModel) { $ModelPath = (Resolve-Path -LiteralPath $ModelPath).Path }
 $referenceModel = $hasModel -and ((Get-FileHash -LiteralPath $ModelPath).Hash -eq (Get-FileHash -LiteralPath $probePath).Hash)
@@ -18,8 +19,10 @@ $attributeProbe = Join-Path $workspace 'assets/models/AttributeProbe.gltf'
 $referenceAttributes = $hasModel -and ((Get-FileHash -LiteralPath $ModelPath).Hash -eq (Get-FileHash -LiteralPath $attributeProbe).Hash)
 if ($referenceAttributes) { . (Join-Path $PSScriptRoot 'AttributePixelReference.ps1') }
 $materialProbe = Join-Path $workspace 'assets/models/MaterialProbe.gltf'
-$referenceMaterials = $hasModel -and ((Get-FileHash -LiteralPath $ModelPath).Hash -eq (Get-FileHash -LiteralPath $materialProbe).Hash)
+$lightingProbe = Join-Path $workspace 'assets/models/LightingProbe.gltf'
+$referenceMaterials = $hasModel -and ((Get-FileHash -LiteralPath $ModelPath).Hash -in @((Get-FileHash -LiteralPath $materialProbe).Hash,(Get-FileHash -LiteralPath $lightingProbe).Hash))
 if ($referenceMaterials) { . (Join-Path $PSScriptRoot 'MaterialPixelReference.ps1') }
+if ($Scenario -eq 'lighting') { . (Join-Path $PSScriptRoot 'LightingPixelReference.ps1') }
 $buildPath = if ([IO.Path]::IsPathRooted($BuildDirectory)) { $BuildDirectory } else { Join-Path $workspace $BuildDirectory }
 $buildPath = (Resolve-Path -LiteralPath $buildPath).Path
 $outputRoot = Join-Path $buildPath 'verification/triangle'
@@ -99,6 +102,7 @@ function Convert-Srgb([double]$Value) {
 }
 $referencePose = 0
 $referenceView = $(if ($Scenario -eq 'materials') { 3 } else { 0 })
+$referenceLighting = 0
 $script:modelDeleted = @($false, $false)
 function Rotate-Y([double[]]$Vector, [double]$Degrees) {
     $angle = $Degrees * [Math]::PI / 180
@@ -192,7 +196,7 @@ function Select-Pose([int]$Pose) {
 }
 function Select-View([int]$View) {
     $before = [regex]::Matches((Read-Log), 'geometry view presented;').Count
-    $key = [IntPtr](@(0x43,0x4E,0x55,0x4D)[$View])
+    $key = [IntPtr](@(0x43,0x4E,0x55,0x4D,0x4C)[$View])
     [void][TriangleWindowCheck]::PostMessage($windowState.Handle, 0x100, $key, [IntPtr]1)
     [void][TriangleWindowCheck]::PostMessage($windowState.Handle, 0x101, $key, [IntPtr]0xC0000001)
     Wait-Condition {
@@ -200,6 +204,17 @@ function Select-View([int]$View) {
         return $entries.Count -gt $before -and [int]$entries[$entries.Count - 1].Groups[1].Value -eq $View
     } 'geometry view presentation'
     $script:referenceView = $View
+}
+function Cycle-Lighting {
+    $before = [regex]::Matches((Read-Log), 'lighting presented;').Count
+    $next = ($script:referenceLighting + 1) % 3
+    [void][TriangleWindowCheck]::PostMessage($windowState.Handle, 0x100, [IntPtr]0x4A, [IntPtr]1)
+    [void][TriangleWindowCheck]::PostMessage($windowState.Handle, 0x101, [IntPtr]0x4A, [IntPtr]0xC0000001)
+    Wait-Condition {
+        $entries = [regex]::Matches((Read-Log), 'lighting presented; (\d)')
+        return $entries.Count -gt $before -and [int]$entries[$entries.Count - 1].Groups[1].Value -eq $next
+    } 'light presentation'
+    $script:referenceLighting = $next
 }
 function Check-Pixels([string]$Label) {
     # Wait for restore/compositor animation before sampling physical screen pixels.
@@ -282,10 +297,27 @@ try {
     [void][TriangleWindowCheck]::SetWindowPos($windowState.Handle, [IntPtr](-1), 30, 30, 1100, 760, 0x10)
     Wait-Presentation 0
     if ($hasModel -and $Scenario -ne 'materials') { Select-View 0 }
+    if ($Scenario -eq 'lighting') { Select-View 4 }
     Check-Pixels 'initial'
     if ($Scenario -eq 'close-minimized') {
         [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 6)
         Wait-Condition { (Read-Log) -match 'rendering paused;' } 'minimize'
+    } elseif ($Scenario -eq 'lighting') {
+        $pipelineCount = [regex]::Matches((Read-Log), 'Triangle pipeline created;').Count
+        Cycle-Lighting; Check-Pixels 'light-rotated'
+        Cycle-Lighting; Check-Pixels 'light-off'
+        Cycle-Lighting
+        Select-Pose 8; Check-Pixels 'light-nonuniform'
+        Select-Pose 9; Check-Pixels 'light-mirrored'
+        Select-Pose 6; Check-Pixels 'light-reverse'
+        if ([regex]::Matches((Read-Log), 'Triangle pipeline created;').Count -ne $pipelineCount) { throw 'Light/instance edits rebuilt pipeline' }
+        Resize-To 800 580 'light-resized'
+        $before = Get-ReadyCount
+        [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 6)
+        Wait-Condition { (Read-Log) -match 'rendering paused;' } 'light minimize'
+        [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 9)
+        Wait-Presentation $before
+        Check-Pixels 'light-restored'
     } elseif ($Scenario -eq 'materials') {
         $pipelineCount = [regex]::Matches((Read-Log), 'Triangle pipeline created;').Count
         Select-Pose 9; Check-Pixels 'material-mirrored'
@@ -401,6 +433,11 @@ try {
     $log = Read-Log
     if ($appProcess.ExitCode -ne 0 -or $log -match 'Vulkan \[(error|warning)\]|Vulkan error:|GLFW error|MadCat error:|MadCat rendering failed:') { throw "Application failed (see $errorPath)" }
     $pipelines = [regex]::Matches($log, 'Triangle pipeline created;').Count
+    $expectedGraphs = 0
+    foreach ($swap in [regex]::Matches($log, 'Swapchain created; [^\r\n]*, (\d+) images')) { $expectedGraphs += [int]$swap.Groups[1].Value }
+    $graphs = [regex]::Matches($log, 'Render Graph: compiled 3 Passes, (\d+) imported resources; Clear -> Forward -> Present\.')
+    if ($expectedGraphs -lt 1 -or $graphs.Count -ne $expectedGraphs) { throw 'Acquired-image graph count/order mismatch or graph rebuilt for parameters' }
+    if ($referenceMaterials) { foreach ($graph in $graphs) { if ([int]$graph.Groups[1].Value -ne 8) { throw 'RenderScene resources missing from graph imports or shared image identity lost' } } }
     $sampled = [regex]::Matches($log, 'Sampled texture uploaded;').Count
     if ($sampled -lt 1 -or $sampled -ne [regex]::Matches($log, 'Sampled texture destroyed\.').Count -or
         [regex]::Matches($log,'Texture binding created\.').Count -ne [regex]::Matches($log,'Texture binding destroyed\.').Count -or
@@ -450,6 +487,11 @@ try {
         if ($depths[$index].Groups[1].Value -ne $swaps[$index].Groups[1].Value -or $depths[$index].Groups[2].Value -ne $swaps[$index].Groups[2].Value) {
             throw 'Depth attachment extent did not follow Swapchain'
         }
+    }
+    if ([regex]::Matches($log, 'Frame lighting buffer created;').Count -ne $pipelines -or
+        [regex]::Matches($log, 'Frame lighting buffer destroyed\.').Count -ne $pipelines -or
+        [regex]::Matches($log, '(?s)Frame lighting buffer destroyed.*?Clear renderer destroyed.*?Triangle pipeline destroyed').Count -ne $pipelines) {
+        throw 'Frame lighting buffer retirement count/order mismatch'
     }
     Write-Output "$name PASS (exit 0, $pipelines pipelines safely retired, clean validation)"
 } finally {

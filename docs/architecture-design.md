@@ -1,6 +1,6 @@
 # MadCat 架构设计
 
-更新日期：2026-11-05。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
+更新日期：2026-11-06。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
 
 ## 文档职责与设计状态
 
@@ -752,7 +752,39 @@ RenderScene 为启动几何去重材质键 `(ModelAssetId, optional materialInde
 
 TextureBindingRef 共享拥有 DescriptorPool／SetLayout／Set、Sampler 和 TextureRef。固定 set 0：具名 BaseColorImageBinding=0（SAMPLED_IMAGE）、BaseColorSamplerBinding=1（SAMPLER），仅 Fragment 可见；Slang 使用相同槽位。每份绑定建立后不可修改；不同 Sampler 共享同一图像，不同材质可共享同一绑定。无贴图材质绑定白色回退图像。管线和帧上下文各保留绑定，命令在 fence／呈现退役后释放，再销毁绑定及图像。resize 重用绑定和图片；空材质跨度仅用于无 Descriptor 的 Shader 模拟练习，不能记录 Material 模式。
 
-M 输出线性因子乘 sRGB 图像采样，交换链执行显示编码；MASK 相乘后裁剪，OPAQUE 忽略 alpha。按 doubleSided 和世界行列式符号处理面向，诊断模式保留原有双面可见性。`discard` 生成 DemoteToHelperInvocation，因此 Vulkan 1.3 查询记录该 feature，Device 只按支持启用，Sandbox 选择支持它的设备。光照、PBR、其他材质纹理、透明混合、实例材质覆盖、运行期替换与通用绑定／图尚未实现。
+M 输出线性因子乘 sRGB 图像采样，交换链执行显示编码；MASK 相乘后裁剪，OPAQUE 忽略 alpha。按 doubleSided 和世界行列式符号处理面向，诊断模式保留原有双面可见性。`discard` 生成 DemoteToHelperInvocation，因此 Vulkan 1.3 查询记录该 feature，Device 只按支持启用，Sandbox 选择支持它的设备。基础光照见下节；PBR、其他材质纹理、透明混合、实例材质覆盖、运行期替换与通用绑定／图尚未实现。
+
+### 方向光与帧光照数据（当前实现）
+
+2026-11-06 新增 [DirectionalLight](../src/Scene/Light.h) 普通组件，仅保存线性 RGB 与非负辐照度缩放。灯光是 Scene Entity，局部 −Z 代表光传播；RenderScene 从完整世界矩阵的 +Z 列提取并归一化指向光源的方向，平移不影响结果。缩放／剪切按完整矩阵继承；推荐灯光层级采用单位缩放。轴坍缩则拒绝，不猜测替代方向。
+
+`extractLighting(const Scene&)` 要求查询外、世界矩阵已更新；返回拥有数据的 [FrameLighting](../src/RHI/FrameLighting.h) 值快照，无组件指针或 GPU 对象。第一版支持零或一盏方向光：零盏得到零辐照度，多盏返回错误，不静默丢弃。负值、非有限参数和 RGB 乘缩放溢出 float 均返回诊断。
+
+上传 ABI 为两个 float4、32 字节／16 字节对齐：offset 0 为单位 `toLight.xyz`，offset 16 为线性 RGB `irradiance.xyz`，两个 w 均为零。固定 set 1／binding 0、UNIFORM_BUFFER、Fragment 可见；set 0 的材质绑定和 128 字节顶点 Push Constant 不变。管线拥有布局；[帧上下文](../src/RHI/Vulkan/VulkanClearRenderer.cpp)独立拥有 [coherent 映射 UBO 与 DescriptorPool／Set](../src/RHI/Vulkan/VulkanFrameLighting.h)，不同上下文不共享可变内存。Descriptor 在创建后不更新，逐帧只修改缓冲内容。
+
+`drawIndexed(..., const FrameLighting&)` 在 acquire 前校验数据，在上一帧提交和呈现等待完成后写入自己的缓冲，随后记录并提交；调用后不借用 CPU 快照。HOST_COHERENT 写入发生于队列提交前，提交提供 host→device 内存域操作；不需要额外 transfer 命令。销毁时等待 GPU／呈现完成，释放命令池后销毁 Descriptor 和缓冲，管线布局与 Device 保持有效。相关规则见 [Vulkan 同步规范](https://docs.vulkan.org/spec/latest/chapters/synchronization.html#synchronization-submission-host-writes)。当前最小图显式声明该 Uniform 读取，不把它视为隐藏的场景访问。
+
+L 模式计算 `albedo × irradiance × max(dot(N,L),0) / π`，法线在透视插值后归一化；MASK 先按基础色 alpha 裁剪。负世界行列式补偿有效面向，双面有效背面的法线翻转，符合 [glTF 双面材质约定](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#double-sided)。缺失／奇异／零法线显示洋红色。没有环境光、阴影、HDR／色调映射或 PBR，直接输出当前 sRGB 交换链，超范围值截断。J 仅修改示例灯光的 CPU 组件与 Transform，不重建管线；M 和诊断视图保持原有语义。
+
+## 最小图与图形执行接口（当前实现）
+
+2026-11-06 将已有光照绘制接入端到端的 `Clear → Forward → Present`。本增量选择导入已存在的资源，先验证真实 GPU 同步；代价是图暂不分配中间纹理，图形命令仍限当前准备好的管线。项目仍以单进程、单队列、一个在途帧执行，未新增后端抽象或调度系统。
+
+[Graph／Builder／Plan](../src/RenderGraph/RenderGraph.h) 不依赖 Vulkan，`Resource` 持有图身份、逻辑资源索引与版本。导入以底层对象的类型和实际身份去重，初始内容有效性和访问状态必须显式交接；冲突导入返回诊断。写入返回新版本，区分 Overwrite 完整初始化与 Preserve 保留修改。一个版本最多有一个写入后继；读取依赖其生产者，后继写入还依赖旧版本的所有读取者。图编译检查初始化、资源种类、跨图引用、写入分叉和环，不做自动裁剪或资源复制。
+
+`addPass` 按值保存 Pass 与 `Declared`，返回节点索引和类型化 Outputs，编译计划拥有声明数据。每个 Pass 的 Parameters 由调用方按节点提供，Plan 在记录开始时复制为本帧数据；参数类型不符或命令失败返回带节点名称的错误。候选 Graph 后续失败不修改已经编译的 Plan。当前尚未实现通用 `PrepareInfo／Prepared`：Sandbox 仍先创建匹配的固定 Vulkan 管线，帧上下文借用它并保留全部实际资源；不能把当前固定管线用法推广为任意 Shader 更新支持。
+
+[GraphicsGraphFactory](../src/RenderGraph/GraphicsGraph.h) 是当前图形执行的窄入口，接收已有 Graph 与导入句柄，返回编译计划及帧参数构造函数。Sandbox 显式传入 [buildForwardGraph](../src/Passes/ForwardPass.h)。建图策略归 C++ Pass 层；[VulkanFrameGraph](../src/RHI/Vulkan/VulkanFrameGraph.h) 只提供实际导入、命令和屏障转换，不依赖具体 Pass 类型。此接口当前服务现有绘制，不承诺通用 Compute、离屏资源准备或任意参数编辑。
+
+[PassContext](../src/RenderGraph/RenderGraph.cpp) 按本节点完整句柄和用途检查资源访问、附件加载语义、Draw 的几何／Uniform／采样图像及渲染边界；检查错误会保留并使整图失败，不能由忽略某次 bool 返回绕过。[RHI GraphicsCommands](../src/RHI/GraphicsCommands.h) 仅收到当前导入表中的槽位，后端再次核对真实几何、材质及当前资源 usage 能力。普通 Pass 不获得 Vulkan 句柄或队列提交权限。
+
+编译计划固定节点顺序和访问契约；记录时以本帧外部状态推导屏障，保留读阶段的并集并处理 RAW／WAR／WAW 与布局变化。后端将其转换为 Synchronization2 图像／缓冲屏障；交换链首个转换匹配 acquire 等待的 ColorAttachmentOutput 阶段。Clear 通过完整附件清除写出初始化版本，Forward 使用 Load 并写出新版本，两个动态渲染实例之间显式安排颜色／深度写后写依赖且保存深度。规则依据 [Vulkan 同步示例](https://docs.vulkan.org/guide/latest/synchronization_examples.html)。
+
+图外不可变几何首次以 HostWrite 交接，之后以 Vertex／Index 读取交接；启动纹理上传等待完成并以 Fragment sampled-read 交接，Uniform 在每帧完成等待后更新再以 HostWrite 交接。每个交换链图像有独立计划和导入身份，共享深度的状态由渲染帧成功提交后更新。整图失败不返回可发布状态，渲染器不提交前缀；实际队列提交成功后才登记深度使用，呈现状态另行记录。适配器检查最终颜色为 Present、深度为 Depth，避免错误图交还不兼容状态。当前 acquire 后记录失败仍受控停止，不增加运行期重试。
+
+图资源句柄和同步状态不代替 GPU 资源所有权：帧上下文持有 BufferRef、TextureBindingRef、深度和 UBO，管线仍须活到帧退役。统一等待提交／呈现完成并释放命令后，才销毁图的执行映射和 GPU 依赖。resize 同步销毁后重建；CPU 候选计划隔离已验证，运行期图候选失败保留旧画面的机制尚未实现。
+
+七组 CPU 图检查覆盖依赖排序、未初始化输入、多写者、环、重复导入、访问权限、候选隔离、记录失败、WAW／HostWrite 同步和帧参数固定；实际 GPU 验证覆盖附件 Clear→Load 绘制及呈现。图内写出纹理再采样、子资源、跨队列、图资源分配与通用准备版本仍是后续范围，不能由本次附件场景代替验收。
 
 ## 实现参考建议
 

@@ -198,6 +198,7 @@ struct detail::TextureBindingState
 VkDevice detail::TextureBindingAccess::device(const TextureBindingRef& ref) { return ref.state_ ? ref.state_->device : VK_NULL_HANDLE; }
 VkDescriptorSetLayout detail::TextureBindingAccess::layout(const TextureBindingRef& ref) { return ref.state_ ? ref.state_->layout : VK_NULL_HANDLE; }
 VkDescriptorSet detail::TextureBindingAccess::set(const TextureBindingRef& ref) { return ref.state_ ? ref.state_->set : VK_NULL_HANDLE; }
+TextureRef detail::TextureBindingAccess::texture(const TextureBindingRef& ref) { return ref.state_ ? ref.state_->texture : TextureRef{}; }
 
 TextureBindingRef createTextureBinding(const VulkanDevice& device, TextureRef texture, const SamplerDesc& sampler)
 {

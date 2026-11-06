@@ -230,6 +230,60 @@ void realModels()
         check(scene.selectPose(6) && scene.draws(2)->front().entity == restored->back().entity, "Reverse draw order failed");
     }
 }
+
+void directionalLighting()
+{
+    scene::Scene scene;
+    const auto parent = scene.create(), light = scene.create();
+    check(scene.setParent(light, parent), "Light parenting failed");
+    auto* component = scene.add<scene::DirectionalLight>(light);
+    check(component != nullptr, "Light component failed");
+    component->color = {.5f, 1, .25f}; component->irradiance = 2;
+    scene::LocalTransform rig, local;
+    rig.translation = {10,20,30}; rig.rotation = glm::angleAxis(glm::radians(90.f), glm::vec3(0,1,0));
+    local.rotation = glm::angleAxis(glm::radians(-30.f), glm::vec3(1,0,0));
+    local.scale = {2,3,4};
+    check(scene.setLocalTransform(parent, rig) && scene.setLocalTransform(light, local) && scene.updateWorldTransforms(), "Light rig setup failed");
+    const auto snapshot = render::extractLighting(scene);
+    check(snapshot && snapshot->valid(), "Light extraction failed");
+    near(snapshot->toLight[0], std::sqrt(3.f)/2); near(snapshot->toLight[1], .5f); near(snapshot->toLight[2], 0);
+    near(snapshot->irradiance[0], 1); near(snapshot->irradiance[1], 2); near(snapshot->irradiance[2], .5f);
+    rig.translation = {-10,-20,-30};
+    check(scene.setLocalTransform(parent, rig) && scene.updateWorldTransforms(), "Light translation failed");
+    check(render::extractLighting(scene)->toLight == snapshot->toLight, "Translation affected directional light");
+    component->irradiance = 0;
+    check(render::extractLighting(scene)->irradiance == rhi::FrameLighting{}.irradiance, "Disabled light retained radiance");
+    near(snapshot->irradiance[0], 1);
+    check(scene.destroy(light) && scene.updateWorldTransforms(), "Light deletion failed");
+    const auto empty = render::extractLighting(scene);
+    check(empty && empty->valid() && empty->irradiance == rhi::FrameLighting{}.irradiance, "No-light Scene did not produce black lighting");
+}
+
+void lightingBoundaries()
+{
+    scene::Scene scene;
+    const auto light = scene.create();
+    auto* component = scene.add<scene::DirectionalLight>(light);
+    check(component && !render::extractLighting(scene), "Stale light worlds accepted");
+    check(scene.updateWorldTransforms(), "Light world update failed");
+    scene.each<scene::DirectionalLight>([&](ecs::Entity, const auto&) {
+        check(!render::extractLighting(scene), "Lighting extraction inside query accepted");
+    });
+    component->irradiance = -1;
+    check(!render::extractLighting(scene), "Negative light accepted");
+    component->irradiance = std::numeric_limits<float>::max(); component->color.x = 2;
+    check(!render::extractLighting(scene), "Light float overflow accepted");
+    component->color.x = std::numeric_limits<float>::quiet_NaN();
+    check(!render::extractLighting(scene), "Nonfinite light accepted");
+    *component = {};
+    scene::LocalTransform collapsed; collapsed.scale.z = 0;
+    check(scene.setLocalTransform(light, collapsed) && scene.updateWorldTransforms() && !render::extractLighting(scene), "Collapsed light axis accepted");
+    check(scene.setLocalTransform(light, {}) && scene.updateWorldTransforms(), "Light recovery failed");
+    const auto other = scene.create();
+    check(scene.add<scene::DirectionalLight>(other) && scene.updateWorldTransforms() && !render::extractLighting(scene), "Multiple lights silently truncated");
+    auto invalid = rhi::FrameLighting{}; invalid.toLight[2] = 0;
+    check(!invalid.valid(), "Zero GPU light direction accepted");
+}
 }
 
 int main(int argc, char** argv)
@@ -240,7 +294,8 @@ int main(int argc, char** argv)
         directory = argv[1];
         extractionAndSharing(); editsAndSnapshots(); invalidInputs(); invalidGeometry(); assetIdentity(); realModels();
         attributesAndNormalTransforms(); invalidAttributes();
-        std::printf("RenderScene checks: 8 groups passed.\n"); return 0;
+        directionalLighting(); lightingBoundaries();
+        std::printf("RenderScene checks: 10 groups passed.\n"); return 0;
     }
     catch (const std::exception& error) { std::fprintf(stderr, "RenderScene checks failed: %s\n", error.what()); return 1; }
 }

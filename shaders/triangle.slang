@@ -12,6 +12,12 @@ struct DrawTransform
 [[vk::push_constant]] ConstantBuffer<DrawTransform> drawTransform;
 [[vk::binding(0, 0)]] Texture2D<float4> baseColorTexture;
 [[vk::binding(1, 0)]] SamplerState baseColorSampler;
+struct FrameLighting
+{
+    float4 toLight;
+    float4 irradiance;
+};
+[[vk::binding(0, 1)]] ConstantBuffer<FrameLighting> frameLighting;
 
 struct VertexOutput
 {
@@ -43,7 +49,7 @@ VertexOutput vertexMain(float3 position : POSITION, float3 color : COLOR0, float
 [shader("fragment")]
 float4 fragmentMain(VertexOutput input, bool frontFace : SV_IsFrontFace) : SV_Target0
 {
-    if (input.view == 3)
+    if (input.view == 3 || input.view == 4)
     {
         bool mirrored = (input.attributes & 8) != 0;
         if ((input.attributes & 16) == 0 && (frontFace == mirrored)) discard;
@@ -53,6 +59,17 @@ float4 fragmentMain(VertexOutput input, bool frontFace : SV_IsFrontFace) : SV_Ta
         float4 texel = baseColorTexture.Sample(baseColorSampler, input.uv);
         if ((input.attributes & 64) != 0) color *= texel;
         if ((input.attributes & 32) != 0 && color.a < input.cutoff) discard;
+        if (input.view == 4)
+        {
+            if ((input.attributes & 5) != 5) return float4(1, 0, 1, 1);
+            float magnitude = max(abs(input.worldNormal.x), max(abs(input.worldNormal.y), abs(input.worldNormal.z)));
+            if (!(magnitude > 0) || !isfinite(magnitude)) return float4(1, 0, 1, 1);
+            float3 normal = normalize(input.worldNormal / magnitude);
+            // Mirroring changes winding. Flip only the effective back face of
+            // a double-sided surface, after inverse-transpose normal transport.
+            if (frontFace == mirrored) normal = -normal;
+            color.rgb *= (frameLighting.irradiance.xyz / 3.141592653589793) * max(dot(normal, frameLighting.toLight.xyz), 0.0);
+        }
         return float4(color.rgb, 1);
     }
     if (input.view == 1)

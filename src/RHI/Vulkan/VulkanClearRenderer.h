@@ -3,6 +3,8 @@
 #include "RHI/DrawTransform.h"
 #include "RHI/IndexedDraw.h"
 #include "RHI/Texture.h"
+#include "RHI/FrameLighting.h"
+#include "RenderGraph/GraphicsGraph.h"
 
 #include <array>
 #include <memory>
@@ -22,8 +24,8 @@ enum class ClearFrameResult
     Failed
 };
 
-// Minimal Vulkan backend exercise, to be replaced by Pass/Render Graph execution
-// as those mechanisms arrive. Borrows Device, Swapchain and optional triangle
+// Single-frame Vulkan presenter executing caller-provided graphics graph plans.
+// Borrows Device, Swapchain and optional prebuilt triangle
 // pipeline, which must outlive it. Retains the matching depth texture and waits
 // for GPU completion before releasing
 // recorded commands, allowing the caller to destroy the pipeline afterwards.
@@ -42,7 +44,8 @@ public:
     // Requires enabled EXT present fences. Failure releases partial resources
     // and permits retry; repeated successful initialization is rejected.
     [[nodiscard]] bool initialize(const VulkanDevice& device, const VulkanSwapchain& swapchain,
-        TextureRef depth, const VulkanTrianglePipeline* triangle = nullptr);
+        TextureRef depth, const graph::GraphicsGraphFactory& graphFactory,
+        const VulkanTrianglePipeline* triangle = nullptr);
     // Clears color and depth (1.0), then draws the supplied matrix snapshots.
     // Retry means no image acquired (finite acquire timeout).
     // Unavailable/Failed are terminal: no further acquire or submit until rebuilt.
@@ -50,7 +53,10 @@ public:
     // Draw ranges share the retained buffers; empty input clears the Scene.
     // Range/matrix validation occurs before acquisition. Parameters are copied
     // into commands; no caller-owned snapshots are borrowed after this call.
-    [[nodiscard]] ClearFrameResult drawIndexed(const std::array<float, 4>& color, std::span<const IndexedDraw> draws);
+    // Lighting is validated before acquire and copied into this frame's coherent
+    // UBO after its previous submit completes. No caller memory is retained.
+    [[nodiscard]] ClearFrameResult drawIndexed(const std::array<float, 4>& color, std::span<const IndexedDraw> draws,
+        const FrameLighting& lighting = {});
     // Waits for acquisition, command submission and present-resource retirement.
     // Also called on destruction, before releasing views or synchronization.
     [[nodiscard]] bool waitIdle();

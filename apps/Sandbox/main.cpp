@@ -13,6 +13,7 @@
 #include "RHI/Vulkan/VulkanTrianglePipeline.h"
 #include "TriangleScene.h"
 #include "ModelScene.h"
+#include "Passes/ForwardPass.h"
 #include "ModelMaterials.h"
 
 #include <cstdio>
@@ -89,6 +90,8 @@ public:
             if (action == GLFW_PRESS && key == GLFW_KEY_N) { app->requestedView_ = madcat::rhi::GeometryView::WorldNormal; }
             if (action == GLFW_PRESS && key == GLFW_KEY_U) { app->requestedView_ = madcat::rhi::GeometryView::Texcoord; }
             if (action == GLFW_PRESS && key == GLFW_KEY_M) { app->requestedView_ = madcat::rhi::GeometryView::Material; }
+            if (action == GLFW_PRESS && key == GLFW_KEY_L && app->modelScene_) { app->requestedView_ = madcat::rhi::GeometryView::Lit; }
+            if (action == GLFW_PRESS && key == GLFW_KEY_J && app->modelScene_) { app->requestedLighting_ = (app->requestedLighting_ + 1) % 3; }
             if (action == GLFW_PRESS && key == GLFW_KEY_0 && app->modelScene_) { app->requestedPose_ = 9; }
         });
         glfwSetFramebufferSizeCallback(window_, [](GLFWwindow* target, int, int) {
@@ -171,7 +174,7 @@ private:
             if (!candidate->swapchain.initialize(device_, surface_, {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}) ||
                 !(candidate->depth = madcat::rhi::createDepthTexture(device_, candidate->swapchain.extent().width, candidate->swapchain.extent().height)) ||
                 !candidate->triangle.initialize(device_, candidate->swapchain.surfaceFormat().format, vertex_, fragment_, vertices_, indices_, madcat::rhi::detail::TextureAccess::format(candidate->depth), materials_) ||
-                !candidate->renderer.initialize(device_, candidate->swapchain, candidate->depth, &candidate->triangle))
+                !candidate->renderer.initialize(device_, candidate->swapchain, candidate->depth, madcat::passes::buildForwardGraph, &candidate->triangle))
             {
                 std::fprintf(stderr, "MadCat error: presentation creation/rebuild failed; stopping rendering.\n");
                 return false;
@@ -195,12 +198,24 @@ private:
         const auto aspect = static_cast<float>(extent.width) / static_cast<float>(extent.height);
         if (modelScene_)
         {
+            if (activeLighting_ != requestedLighting_)
+            {
+                if (!modelScene_->selectLighting(requestedLighting_)) { return false; }
+                activeLighting_ = requestedLighting_;
+            }
             auto snapshot = modelScene_->draws(aspect);
             if (!snapshot) { throw std::runtime_error(snapshot.error()); }
             auto draws = madcat::render::resolveDraws(*geometry_, *snapshot);
             if (!draws) { throw std::runtime_error(draws.error()); }
             for (auto& draw : *draws) { draw.transform.view = requestedView_; }
-            result = presentation_->renderer.drawIndexed({0.04f, 0.08f, 0.16f, 1.0f}, *draws);
+            const auto lighting = modelScene_->lighting();
+            if (!lighting) { throw std::runtime_error(lighting.error()); }
+            result = presentation_->renderer.drawIndexed({0.04f, 0.08f, 0.16f, 1.0f}, *draws, *lighting);
+            if (result == madcat::rhi::ClearFrameResult::Presented && loggedLighting_ != activeLighting_)
+            {
+                loggedLighting_ = activeLighting_;
+                std::fprintf(stderr, "MadCat: lighting presented; %d (J=default/rotated/off).\n", loggedLighting_);
+            }
             if (result == madcat::rhi::ClearFrameResult::Presented && loggedPose_ != activePose_)
             {
                 std::fprintf(stderr, "MadCat: model instances presented; pose %d, %zu draws, %zu shared primitives.\n",
@@ -223,7 +238,7 @@ private:
         if (result == madcat::rhi::ClearFrameResult::Presented && loggedView_ != static_cast<int>(requestedView_))
         {
             loggedView_ = static_cast<int>(requestedView_);
-            std::fprintf(stderr, "MadCat: geometry view presented; %d (M=material, C=color, N=world normal, U=UV; magenta=unavailable).\n", loggedView_);
+            std::fprintf(stderr, "MadCat: geometry view presented; %d (L=lit, M=material, C=color, N=world normal, U=UV; magenta=unavailable).\n", loggedView_);
         }
         if (result == madcat::rhi::ClearFrameResult::Failed) { return false; }
         rebuildPending_ |= result == madcat::rhi::ClearFrameResult::SwapchainUnavailable;
@@ -243,6 +258,7 @@ private:
     std::vector<madcat::rhi::TextureBindingRef> materials_;
     madcat::rhi::GeometryView requestedView_ = madcat::rhi::GeometryView::Color;
     int loggedView_ = -1;
+    int requestedLighting_ = 0, activeLighting_ = 0, loggedLighting_ = -1;
     std::unique_ptr<Presentation> presentation_;
     int framebufferWidth_ = 0;
     int framebufferHeight_ = 0;

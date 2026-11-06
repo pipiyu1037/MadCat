@@ -9,7 +9,7 @@
 
 namespace madcat::rhi
 {
-enum class GeometryView : uint32_t { Color, WorldNormal, Texcoord, Material };
+enum class GeometryView : uint32_t { Color, WorldNormal, Texcoord, Material, Lit };
 enum GeometryAttribute : uint32_t { HasNormal = 1, HasTexcoord = 2, NormalTransformValid = 4,
     Mirrored = 8, DoubleSided = 16, AlphaMask = 32, HasTexture = 64 };
 
@@ -35,7 +35,7 @@ struct alignas(16) DrawTransform
 
     [[nodiscard]] bool valid() const
     {
-        return static_cast<uint32_t>(view) <= static_cast<uint32_t>(GeometryView::Material) && (attributes & ~127u) == 0 &&
+        return static_cast<uint32_t>(view) <= static_cast<uint32_t>(GeometryView::Lit) && (attributes & ~127u) == 0 &&
             std::isfinite(baseColorAlpha) && std::isfinite(alphaCutoff) &&
             std::ranges::all_of(clipFromLocal, [](float value) { return std::isfinite(value); }) &&
             std::ranges::all_of(normalFromLocal, [](float value) { return std::isfinite(value); });

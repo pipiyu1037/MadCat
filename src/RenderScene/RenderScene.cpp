@@ -16,6 +16,35 @@ void require(bool condition, std::string_view message)
 }
 }
 
+std::expected<rhi::FrameLighting, std::string> extractLighting(const scene::Scene& scene)
+{
+    try
+    {
+        require(!scene.isIterating() && scene.worldTransformsCurrent(), "Lighting requires updated worlds outside queries");
+        rhi::FrameLighting result;
+        size_t count = 0;
+        scene.each<scene::DirectionalLight>([&](ecs::Entity entity, const auto& light) {
+            require(++count == 1, "Only one directional light is currently supported");
+            const auto* world = scene.worldTransform(entity);
+            require(world != nullptr, "Light world transform is unavailable");
+            const glm::dvec3 axis((*world)[2]);
+            const auto length = glm::length(axis);
+            require(std::isfinite(length) && length > 0, "Directional light world +Z axis is collapsed");
+            require(std::isfinite(light.irradiance) && light.irradiance >= 0, "Directional light irradiance must be finite and nonnegative");
+            for (size_t index = 0; index < 3; ++index)
+            {
+                const auto channel = light.color[static_cast<int>(index)];
+                const auto value = double(channel) * light.irradiance;
+                require(std::isfinite(channel) && channel >= 0 && value <= std::numeric_limits<float>::max(), "Directional light color/irradiance is invalid or exceeds float range");
+                result.toLight[index] = static_cast<float>(axis[static_cast<int>(index)] / length);
+                result.irradiance[index] = static_cast<float>(value);
+            }
+        });
+        return result;
+    }
+    catch (const Failure& failure) { return std::unexpected(failure.message); }
+}
+
 std::expected<std::vector<MeshDraw>, std::string> extractDraws(
     const scene::Scene& scene, const assets::ModelAssets& assets, ecs::Entity camera, float aspect)
 {

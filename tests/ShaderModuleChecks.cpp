@@ -865,7 +865,7 @@ void triangleChecks(const std::filesystem::path& root)
             {
                 auto invalid = expectedTransform;
                 if (mode == 0) { invalid.normalFromLocal[4] = std::numeric_limits<float>::quiet_NaN(); }
-                if (mode == 1) { invalid.view = static_cast<madcat::rhi::GeometryView>(4); }
+                if (mode == 1) { invalid.view = static_cast<madcat::rhi::GeometryView>(5); }
                 if (mode == 2) { invalid.attributes = 128; }
                 recorded.clear();
                 check(!pipeline.recordDraw(commandToken, expectedExtent, invalid) && recorded.empty(), "Invalid normal/view/flags reached Vulkan");

@@ -63,7 +63,7 @@ function Get-MaterialTriangles([double]$Aspect) {
                 $vertices+=[pscustomobject]@{U=.5+.5*[Math]::Sqrt(3)*$p[0]/($Aspect*$w);V=.5-.5*[Math]::Sqrt(3)*$p[1]/$w;W=$w
                     Z=(1000/(.1-1000)*($p[2]-3)+.1*1000/(.1-1000))/$w;Color=$color}
             }
-            [pscustomobject]@{Vertices=$vertices;Primitive=$primitive}
+            [pscustomobject]@{Vertices=$vertices;Primitive=$primitive;Instance=$instance}
         }
     }
 }
@@ -86,9 +86,10 @@ function Check-MaterialPixels($Bitmap,[double]$Aspect,[string]$Label) {
             $fragment=Get-Fragment $triangle.Vertices (($x+.5)/$Bitmap.Width) (($y+.5)/$Bitmap.Height)
             if($null-eq $fragment){continue}
             $color=$fragment.Color
-            if($script:referenceView-eq 3){
+            if($script:referenceView-eq 3-or $script:referenceView-eq 4){
                 $color=Get-ReferenceMaterial $triangle.Primitive $fragment.Color
                 if($null-eq $color){++$masked;continue}
+                if($script:referenceView-eq 4){$color=Get-LightingColor $triangle (($x+.5)/$Bitmap.Width) (($y+.5)/$Bitmap.Height) $color}
             }
             if($null-eq $closest-or $fragment.Depth-lt $closest.Depth){
                 $closest=$fragment;$winner=$triangle.Primitive
@@ -101,7 +102,7 @@ function Check-MaterialPixels($Bitmap,[double]$Aspect,[string]$Label) {
     }
     if(-not($script:modelDeleted[0]-and $script:modelDeleted[1])){
         foreach($count in $seen){if($count-lt 2){throw 'Material reference missed a material'}}
-        if($script:referenceView-eq 3-and $masked-lt 1){throw 'Material reference missed alpha cutoff'}
+        if($script:referenceView-ge 3-and $masked-lt 1){throw 'Material reference missed alpha cutoff'}
     }
     Write-Output "$name $Label PASS ($($samples.Count) analytic material samples, per-material $seen, discarded $masked)"
 }
