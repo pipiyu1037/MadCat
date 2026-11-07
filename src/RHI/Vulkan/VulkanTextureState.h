@@ -22,7 +22,7 @@ struct TextureState
         if (view) { destroyView(device, view, nullptr); }
         if (image) { destroyImage(device, image, nullptr); }
         if (memory) { freeMemory(device, memory, nullptr); }
-        if (image) { std::fprintf(stderr, "Vulkan: %s texture destroyed.\n", sampled ? "Sampled" : "Depth"); }
+        if (image) { std::fprintf(stderr, "Vulkan: %s texture destroyed.\n", format == VK_FORMAT_R8G8B8A8_SRGB ? "Sampled" : sampled ? "Sampled depth" : "Depth"); }
     }
 };
 }

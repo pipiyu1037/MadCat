@@ -1,4 +1,5 @@
 #include "Passes/ForwardPass.h"
+#include "Passes/DepthViewPass.h"
 #include <cstdio>
 #include <stdexcept>
 
@@ -11,9 +12,11 @@ graph::Resource texture(graph::Graph& g, uint64_t identity=1, bool valid=false)
 struct Commands : rhi::GraphicsCommands
 {
     int begins=0, ends=0, draws=0;
+    int displays=0;
     bool beginRendering(uint32_t,uint32_t,rhi::AttachmentLoad,const std::array<float,4>&) override { ++begins; return true; }
     bool drawIndexed(uint32_t,uint32_t,uint32_t,std::span<const uint32_t>,const rhi::IndexedDraw&) override { ++draws; return true; }
     bool endRendering() override { ++ends; return true; }
+    bool displayDepth(uint32_t) override { ++displays; return true; }
 };
 void versionsAndOrdering()
 {
@@ -165,9 +168,58 @@ void parameterIsolation()
     check(plan && plan->record(commands,parameters,{},[](auto){return true;}),"Parameter probe failed");
     check(seen==std::vector<int>{7,8} && std::any_cast<int>(parameters[1])==999,"Frame observed a parameter edit after recording started");
 }
+void managedDepthContracts()
+{
+    for (const auto extent : {std::array<uint32_t,2>{0,32},std::array<uint32_t,2>{32,0}})
+    {
+        graph::Graph g; (void)g.createDepthTexture("bad extent",{extent[0],extent[1]});
+        check(!g.compile(),"Zero managed extent accepted");
+    }
+    {
+        graph::Graph g; auto d=g.createDepthTexture("unwritten depth",{32,32});
+        g.builder(g.addNode("reader")).read(d,graph::Use::Sampled);
+        check(!g.compile(),"Uninitialized managed depth accepted");
+    }
+    {
+        graph::Graph g; auto d=g.createDepthTexture("attachment only",{32,32,false});
+        const auto written=g.builder(g.addNode("writer")).write(d,graph::Use::Depth,graph::Write::Overwrite);
+        g.builder(g.addNode("reader")).read(written,graph::Use::Sampled);
+        check(!g.compile(),"Sampled usage missing from allocation contract accepted");
+    }
+    graph::Graph g;
+    auto first=g.createDepthTexture("depth",{32,32}), second=g.createDepthTexture("depth",{32,32});
+    check(first.index!=second.index,"Managed textures aliased by name/empty native identity");
+    auto snapshot=g.compile(); (void)g.createDepthTexture("bad candidate",{0,0});
+    check(snapshot && snapshot->resources().size()==2 && !g.compile(),"Candidate edit changed compiled resource descriptions");
+}
+void managedDepthExecution()
+{
+    graph::Graph g;
+    auto color=texture(g);
+    auto depth=g.import("external depth",2,graph::Kind::Depth,graph::Use::None,false);
+    auto v=g.import("vertices",3,graph::Kind::Buffer,graph::Use::HostWrite,true);
+    auto i=g.import("indices",4,graph::Kind::Buffer,graph::Use::HostWrite,true);
+    auto program=passes::buildDepthViewGraph(g,{color,depth,v,i,{},{},64,48});
+    check(bool(program),"Managed depth graph failed compilation");
+    check(program->plan.resources().back().depthTexture->width==64,"Lost managed texture description");
+    const auto slot=program->plan.resources().size()-1;
+    const rhi::IndexedDraw draw{};
+    auto parameters=program->parameters({},std::span(&draw,1));
+    std::vector<graph::Use> states{graph::Use::None,graph::Use::None,graph::Use::HostWrite,graph::Use::HostWrite,graph::Use::None};
+    Commands commands; std::vector<graph::Barrier> barriers;
+    auto result=program->plan.record(commands,parameters,states,[&](auto b){barriers.push_back(b); return true;});
+    check(result && commands.displays==1 && commands.draws==1 && commands.begins==3,"Managed depth draw/display failed");
+    check((*result)[slot]==graph::Use::Sampled,"Depth not left in sampled state");
+    check(std::ranges::any_of(barriers,[&](auto b){return b.resource==slot && b.before==graph::Use::Depth && b.after==graph::Use::Sampled;}),"Missing depth RAW barrier");
+    barriers.clear();
+    auto repeated=program->plan.record(commands,parameters,*result,[&](auto b){barriers.push_back(b); return true;});
+    check(repeated && std::ranges::any_of(barriers,[&](auto b){return b.resource==slot && b.before==graph::Use::Sampled && b.after==graph::Use::Depth;}),"Missing next-frame depth WAR barrier");
+    auto failed=program->plan.record(commands,parameters,states,[](auto){return false;});
+    check(!failed && states[slot]==graph::Use::None,"Failed recording published resource states");
+}
 }
 int main()
 {
-    try { versionsAndOrdering(); diagnostics(); duplicateIdentity(); executionAndFailure(); accessAndSnapshots(); forwardSynchronization(); parameterIsolation(); std::puts("Render Graph checks: 7 groups passed."); return 0; }
+    try { versionsAndOrdering(); diagnostics(); duplicateIdentity(); executionAndFailure(); accessAndSnapshots(); forwardSynchronization(); parameterIsolation(); managedDepthContracts(); managedDepthExecution(); std::puts("Render Graph checks: 9 groups passed."); return 0; }
     catch(const std::exception& error) { std::fprintf(stderr,"Render Graph checks failed: %s\n",error.what()); return 1; }
 }

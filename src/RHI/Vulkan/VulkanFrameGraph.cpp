@@ -1,6 +1,7 @@
 #include "VulkanFrameGraph.h"
 #include "VulkanBuffer.h"
 #include "VulkanDepthTexture.h"
+#include "VulkanDepthViewPipeline.h"
 #include "VulkanDevice.h"
 #include "VulkanFrameLighting.h"
 #include "VulkanFunctions.h"
@@ -37,14 +38,19 @@ Scope scope(graph::Use use)
 }
 struct VulkanFrameGraph::State : GraphicsCommands
 {
-    struct Native { VkImage image=VK_NULL_HANDLE; VkBuffer buffer=VK_NULL_HANDLE; VkImageAspectFlags aspect=0; uint32_t mips=1; };
+    struct Native { VkImage image=VK_NULL_HANDLE; VkBuffer buffer=VK_NULL_HANDLE; VkImageAspectFlags aspect=0; uint32_t mips=1;
+        TextureRef ownedDepth; TextureBindingRef sampled; };
     graph::GraphicsGraph program;
     std::vector<Native> native;
     std::vector<graph::Use> initial;
+    std::vector<graph::Use> pending;
+    bool geometrySubmitted = false;
     uint32_t colorSlot=0, depthSlot=0, vertexSlot=UINT32_MAX, indexSlot=UINT32_MAX, lightingSlot=UINT32_MAX;
     std::vector<uint32_t> materialTextures;
     TextureRef depth;
     const VulkanTrianglePipeline* pipeline=nullptr;
+    const VulkanDepthViewPipeline* depthView=nullptr;
+    uint32_t activeDepth=UINT32_MAX;
     const VulkanFrameLighting* lighting=nullptr;
     VkImageView colorView=VK_NULL_HANDLE;
     VkExtent2D extent{};
@@ -87,38 +93,48 @@ struct VulkanFrameGraph::State : GraphicsCommands
     }
     bool beginRendering(uint32_t color, uint32_t depthIndex, AttachmentLoad load, const std::array<float,4>& clearColor) override
     {
-        if (color!=colorSlot || depthIndex!=depthSlot) { return false; }
+        if (color!=colorSlot || (depthIndex!=UINT32_MAX &&
+            (depthIndex>=native.size() || native[depthIndex].aspect!=VK_IMAGE_ASPECT_DEPTH_BIT))) { return false; }
+        activeDepth=depthIndex;
         VkRenderingAttachmentInfo attachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         attachment.imageView=colorView; attachment.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         attachment.loadOp=load==AttachmentLoad::Clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
         attachment.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
         std::ranges::copy(clearColor,attachment.clearValue.color.float32);
         VkRenderingAttachmentInfo depthAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-        depthAttachment.imageView=TextureAccess::view(depth); depthAttachment.imageLayout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        const auto depthTarget=depthIndex==depthSlot ? depth : depthIndex==UINT32_MAX ? TextureRef{} : native[depthIndex].ownedDepth;
+        depthAttachment.imageView=TextureAccess::view(depthTarget); depthAttachment.imageLayout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         depthAttachment.loadOp=attachment.loadOp; depthAttachment.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
         depthAttachment.clearValue.depthStencil={1,0};
         VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
         rendering.renderArea.extent=extent; rendering.layerCount=1; rendering.colorAttachmentCount=1;
-        rendering.pColorAttachments=&attachment; rendering.pDepthAttachment=&depthAttachment;
+        rendering.pColorAttachments=&attachment; rendering.pDepthAttachment=depthIndex==UINT32_MAX ? nullptr : &depthAttachment;
         begin(command,&rendering); return true;
     }
     bool drawIndexed(uint32_t vertices, uint32_t indices, uint32_t uniform,
         std::span<const uint32_t> textures, const IndexedDraw& draw) override
     {
-        if (!pipeline || vertices!=vertexSlot || indices!=indexSlot || uniform!=lightingSlot) { return false; }
+        if (!pipeline || activeDepth==UINT32_MAX || vertices!=vertexSlot || indices!=indexSlot || uniform!=lightingSlot) { return false; }
         if (!materialTextures.empty() && (draw.material>=materialTextures.size() ||
             std::ranges::find(textures,materialTextures[draw.material])==textures.end())) { return false; }
         return pipeline->recordIndexedDraw(command,extent,draw,lighting->set());
     }
     bool endRendering() override { end(command); return true; }
+    bool displayDepth(uint32_t slot) override
+    {
+        return depthView && activeDepth==UINT32_MAX && slot<native.size() && native[slot].sampled &&
+            depthView->record(command,extent,native[slot].sampled);
+    }
 };
 VulkanFrameGraph::VulkanFrameGraph()=default;
 VulkanFrameGraph::~VulkanFrameGraph()=default;
 bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkImageView view, VkExtent2D extent,
     TextureRef depth, const VulkanTrianglePipeline* pipeline, const VulkanFrameLighting& lighting,
-    const graph::GraphicsGraphFactory& factory)
+    const graph::GraphicsGraphFactory& factory, const VulkanDepthViewPipeline* depthView)
 {
     if (state_ || !device.handle() || !image || !view || !depth || !factory) { return false; }
+    if (depthView && (depthView->deviceHandle()!=device.handle() ||
+        (pipeline && depthView->colorFormat()!=pipeline->colorFormat()))) { return false; }
     auto state=std::make_unique<State>();
     const auto getProc=loadFunction<PFN_vkGetDeviceProcAddr>(device.physicalDeviceInfo().instance,"vkGetDeviceProcAddr");
     if (!getProc) { return false; }
@@ -127,6 +143,7 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
     state->end=reinterpret_cast<PFN_vkCmdEndRendering>(getProc(device.handle(),"vkCmdEndRendering"));
     if (!state->barrier || !state->begin || !state->end) { return false; }
     state->depth=std::move(depth); state->pipeline=pipeline; state->lighting=&lighting; state->extent=extent; state->colorView=view;
+    state->depthView=depthView;
     graph::Graph graph;
     const auto import=[&](std::string name, uint64_t id, graph::Kind kind, graph::Use use, bool valid, State::Native native) {
         auto resource=graph.import(std::move(name),id,kind,use,valid);
@@ -138,6 +155,7 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
         {TextureAccess::image(state->depth),VK_NULL_HANDLE,VK_IMAGE_ASPECT_DEPTH_BIT});
     state->colorSlot=color.index; state->depthSlot=depthResource.index;
     graph::GraphicsImports input{color,depthResource,{},{},{},{}};
+    input.width=extent.width; input.height=extent.height;
     if (pipeline)
     {
         const auto vertexBuffer=BufferAccess::handle(pipeline->vertexBuffer()), indexBuffer=BufferAccess::handle(pipeline->indexBuffer());
@@ -160,13 +178,37 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
     }
     auto program=factory(graph,input);
     if (!program) { std::fprintf(stderr,"Render Graph error: %s\n",program.error().c_str()); return false; }
-    if (!program->parameters || program->plan.resources().size()!=state->native.size())
-    { std::fprintf(stderr,"Render Graph error: graphics executor supports imported resources only and requires frame parameters.\n"); return false; }
+    if (!program->parameters || program->plan.resources().size()<state->native.size())
+    { std::fprintf(stderr,"Render Graph error: invalid resource table or missing frame parameters.\n"); return false; }
+    const auto importedCount=state->native.size();
+    for (size_t slot=importedCount; slot<program->plan.resources().size(); ++slot)
+    {
+        const auto& resource=program->plan.resources()[slot];
+        if (!resource.depthTexture) { std::fprintf(stderr,"Render Graph error: unsupported managed resource.\n"); return false; }
+        const auto desc=*resource.depthTexture;
+        // The fixed forward pipeline requires the same attachment extent/format.
+        if (desc.width!=extent.width || desc.height!=extent.height)
+        { std::fprintf(stderr,"Render Graph error: managed depth must match the current output extent.\n"); return false; }
+        auto texture=createDepthTexture(device,desc.width,desc.height,desc.sampled);
+        if (!texture) { return false; }
+        if (pipeline && TextureAccess::format(texture)!=pipeline->depthFormat())
+        { std::fprintf(stderr,"Render Graph error: sampled depth format is incompatible with the prepared forward pipeline.\n"); return false; }
+        TextureBindingRef binding;
+        if (desc.sampled)
+        {
+            SamplerDesc sampler; sampler.linearMag=sampler.linearMin=false;
+            sampler.wrapU=sampler.wrapV=SamplerDesc::Wrap::Clamp; sampler.mips=SamplerDesc::Mips::None;
+            binding=createTextureBinding(device,texture,sampler);
+            if (!binding) { return false; }
+        }
+        state->native.push_back({TextureAccess::image(texture),VK_NULL_HANDLE,VK_IMAGE_ASPECT_DEPTH_BIT,1,texture,binding});
+        state->initial.push_back(graph::Use::None);
+    }
     for (uint32_t slot=0; slot<state->native.size(); ++slot)
     {
         const auto& native=state->native[slot];
         const auto expected=native.image ? identity(native.image) : identity(native.buffer);
-        if (program->plan.resources()[slot].identity!=expected)
+        if (slot<importedCount && program->plan.resources()[slot].identity!=expected)
         { std::fprintf(stderr,"Render Graph error: plan/import identity mismatch.\n"); return false; }
     }
     for (const auto& node : program->plan.nodes())
@@ -174,7 +216,8 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
         for (const auto& access : node.accesses)
         {
             const auto slot=access.resource.index;
-            const auto allowed=slot==state->colorSlot ? graph::Use::Color|graph::Use::Present :
+            const auto allowed=slot>=importedCount ? graph::Use::Depth|(state->native[slot].sampled ? graph::Use::Sampled : graph::Use::None) :
+                slot==state->colorSlot ? graph::Use::Color|graph::Use::Present :
                 slot==state->depthSlot ? graph::Use::Depth : slot==state->vertexSlot ? graph::Use::Vertex :
                 slot==state->indexSlot ? graph::Use::Index : slot==state->lightingSlot ? graph::Use::Uniform : graph::Use::Sampled;
             if (!graph::includes(allowed,access.use))
@@ -184,7 +227,8 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
     state->program=std::move(*program);
     std::string order;
     for (const auto node : state->program.plan.order()) { if (!order.empty()) { order+=" -> "; } order+=state->program.plan.nodes()[node].name; }
-    std::fprintf(stderr,"Render Graph: compiled %zu Passes, %zu imported resources; %s.\n",state->program.plan.nodes().size(),state->native.size(),order.c_str());
+    std::fprintf(stderr,"Render Graph: compiled %zu Passes, %zu imported resources; %s.\n",state->program.plan.nodes().size(),importedCount,order.c_str());
+    if (state->native.size()>importedCount) { std::fprintf(stderr,"Render Graph: allocated %zu managed depth texture(s).\n",state->native.size()-importedCount); }
     state_=std::move(state); return true;
 }
 bool VulkanFrameGraph::record(VkCommandBuffer command, const std::array<float,4>& color,
@@ -192,16 +236,29 @@ bool VulkanFrameGraph::record(VkCommandBuffer command, const std::array<float,4>
 {
     if (!state_ || !command) { return false; }
     auto& state=*state_; state.command=command;
+    state.pending.clear();
     auto initial=state.initial;
     initial[state.colorSlot]=presented ? graph::Use::Present : graph::Use::None;
     initial[state.depthSlot]=depthInitialized ? graph::Use::Depth : graph::Use::None;
-    if (state.vertexSlot!=UINT32_MAX && depthInitialized)
+    if (state.vertexSlot!=UINT32_MAX && (depthInitialized || state.geometrySubmitted))
     { initial[state.vertexSlot]=graph::Use::Vertex; initial[state.indexSlot]=graph::Use::Index; }
     const auto parameters=state.program.parameters(color,draws);
     const auto result=state.program.plan.record(state,parameters,initial,[&](const auto& barrier){ return state.transition(barrier); });
     if (!result) { std::fprintf(stderr,"Render Graph error: %s\n",result.error().c_str()); return false; }
-    if ((*result)[state.colorSlot]!=graph::Use::Present || (*result)[state.depthSlot]!=graph::Use::Depth)
+    if ((*result)[state.colorSlot]!=graph::Use::Present ||
+        ((*result)[state.depthSlot]!=graph::Use::Depth && (*result)[state.depthSlot]!=initial[state.depthSlot]))
     { std::fprintf(stderr,"Render Graph error: output states do not match presenter/depth handoff.\n"); return false; }
+    state.pending=*result;
     return true;
+}
+bool VulkanFrameGraph::submitted()
+{
+    if (!state_ || state_->pending.empty()) { return false; }
+    const bool depthInitialized=state_->pending[state_->depthSlot]==graph::Use::Depth;
+    state_->geometrySubmitted=true;
+    for (size_t slot=0; slot<state_->native.size(); ++slot)
+    { if (state_->native[slot].ownedDepth) { state_->initial[slot]=state_->pending[slot]; } }
+    state_->pending.clear();
+    return depthInitialized;
 }
 }

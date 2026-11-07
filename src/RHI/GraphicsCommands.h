@@ -19,5 +19,7 @@ public:
     virtual bool drawIndexed(uint32_t vertices, uint32_t indices, uint32_t lighting,
         std::span<const uint32_t> textures, const IndexedDraw& draw) = 0;
     virtual bool endRendering() = 0;
+    // Fullscreen depth visualization with a color-only rendering instance.
+    virtual bool displayDepth(uint32_t) { return false; }
 };
 }

@@ -10,7 +10,7 @@ if(SHADER_PACKAGE STREQUAL "ray-query")
 else()
     set(first_stage vertex)
     set(missing_stage fragment)
-    set(package_files vertex.spv fragment.spv manifest.txt triangle.slang)
+    set(package_files vertex.spv fragment.spv manifest.txt "${SHADER_PACKAGE}.slang")
 endif()
 # Exercise the real compiler/validator in a separate directory, including paths
 # with spaces. Never modify source shaders or the published application package.

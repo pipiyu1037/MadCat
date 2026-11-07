@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.25)
 
-# Only these two self-contained exercises are supported; this is not a general
+# Only these self-contained exercises are supported; this is not a general
 # shader package format. Keep the existing triangle invocation compatible.
 if(NOT DEFINED SHADER_PACKAGE)
     set(SHADER_PACKAGE triangle)
 endif()
 set(required_tools SLANGC SPIRV_VAL)
-if(SHADER_PACKAGE STREQUAL "triangle")
+if(SHADER_PACKAGE STREQUAL "triangle" OR SHADER_PACKAGE STREQUAL "depth-view")
     set(stages vertex fragment)
 elseif(SHADER_PACKAGE STREQUAL "ray-query")
     set(stages compute)

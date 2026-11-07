@@ -75,6 +75,7 @@ std::map<VkImage, VkDeviceMemory> boundImages;
 std::string_view failingDepthOperation;
 bool noD32 = false, noD16 = false, rejectD32Image = false;
 VkExtent3D maxDepthExtent{4096, 4096, 1};
+bool sampledDepth = false, noSampledDepth = false;
 VkSampleCountFlags depthSamples = VK_SAMPLE_COUNT_1_BIT;
 uint32_t depthMemoryTypeBits = 4;
 int imageCreates = 0;
@@ -200,13 +201,16 @@ VKAPI_ATTR void VKAPI_CALL formatProperties(VkPhysicalDevice physical, VkFormat 
 {
     check(physical == reinterpret_cast<VkPhysicalDevice>(4) && (format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D16_UNORM), "Wrong depth format query");
     *properties = {};
-    if (format == VK_FORMAT_D32_SFLOAT ? !noD32 : !noD16) { properties->optimalTilingFeatures = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT; }
+    if (format == VK_FORMAT_D32_SFLOAT ? !noD32 : !noD16) {
+        properties->optimalTilingFeatures = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        if (!noSampledDepth) { properties->optimalTilingFeatures |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT; }
+    }
 }
 VKAPI_ATTR VkResult VKAPI_CALL imageProperties(VkPhysicalDevice physical, VkFormat format, VkImageType type,
     VkImageTiling tiling, VkImageUsageFlags usage, VkImageCreateFlags flags, VkImageFormatProperties* properties)
 {
     check(physical == reinterpret_cast<VkPhysicalDevice>(4) && type == VK_IMAGE_TYPE_2D && tiling == VK_IMAGE_TILING_OPTIMAL &&
-        usage == VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT && flags == 0, "Wrong image capability query");
+        usage == VkImageUsageFlags(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | (sampledDepth ? VK_IMAGE_USAGE_SAMPLED_BIT : 0)) && flags == 0, "Wrong image capability query");
     if (failingDepthOperation == "query") { return VK_ERROR_OUT_OF_HOST_MEMORY; }
     if (rejectD32Image && format == VK_FORMAT_D32_SFLOAT) { return VK_ERROR_FORMAT_NOT_SUPPORTED; }
     *properties = {maxDepthExtent, 1, 1, depthSamples, 65536};
@@ -219,7 +223,7 @@ VKAPI_ATTR VkResult VKAPI_CALL createImage(VkDevice device, const VkImageCreateI
     check(device == deviceToken && !allocator && info->sType == VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO && !info->pNext && info->flags == 0 &&
         info->imageType == VK_IMAGE_TYPE_2D && info->extent.width == 64 && info->extent.height == 48 && info->extent.depth == 1 &&
         info->mipLevels == 1 && info->arrayLayers == 1 && info->samples == VK_SAMPLE_COUNT_1_BIT && info->tiling == VK_IMAGE_TILING_OPTIMAL &&
-        info->usage == VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT && info->sharingMode == VK_SHARING_MODE_EXCLUSIVE &&
+        info->usage == VkImageUsageFlags(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | (sampledDepth ? VK_IMAGE_USAGE_SAMPLED_BIT : 0)) && info->sharingMode == VK_SHARING_MODE_EXCLUSIVE &&
         info->queueFamilyIndexCount == 0 && info->initialLayout == VK_IMAGE_LAYOUT_UNDEFINED, "Wrong depth image creation");
     check(info->format == VK_FORMAT_D32_SFLOAT || info->format == VK_FORMAT_D16_UNORM, "Wrong depth image format");
     *image = reinterpret_cast<VkImage>(9999);
@@ -775,6 +779,25 @@ void depthChecks()
     copy = {};
     check(clean(), "Last reference did not release view/image/memory");
     ++cases;
+    sampledDepth = noSampledDepth = true;
+    check(!createDepthTexture(device,64,48,true) && clean(),"Depth attachment feature incorrectly substituted for sampling support");
+    ++cases;
+    noSampledDepth = false; rejectD32Image = true;
+    {
+        auto sampled = createDepthTexture(device,64,48,true);
+        check(sampled && TextureAccess::format(sampled)==VK_FORMAT_D16_UNORM,"Combined attachment/sampled usage fallback failed");
+    }
+    check(clean(),"Sampled depth fallback leaked"); ++cases;
+    rejectD32Image = false;
+    for (const auto* operation : {"image","allocate","bind","view"})
+    {
+        failingDepthOperation=operation;
+        check(!createDepthTexture(device,64,48,true) && clean(),"Sampled depth failure leaked");
+        failingDepthOperation={};
+        { auto sampled=createDepthTexture(device,64,48,true); check(bool(sampled),"Sampled depth retry failed"); }
+        check(clean(),"Sampled depth retry leaked"); ++cases;
+    }
+    sampledDepth = false;
 }
 
 void triangleChecks(const std::filesystem::path& root)

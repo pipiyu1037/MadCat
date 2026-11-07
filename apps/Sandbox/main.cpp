@@ -4,6 +4,7 @@
 #include "RHI/Vulkan/VulkanDevice.h"
 #include "RHI/Vulkan/VulkanBuffer.h"
 #include "RHI/Vulkan/VulkanDepthTexture.h"
+#include "RHI/Vulkan/VulkanDepthViewPipeline.h"
 #include "RHI/Vulkan/VulkanClearRenderer.h"
 #include "RHI/Vulkan/VulkanInstance.h"
 #include "RHI/Vulkan/VulkanPhysicalDevice.h"
@@ -14,6 +15,7 @@
 #include "TriangleScene.h"
 #include "ModelScene.h"
 #include "Passes/ForwardPass.h"
+#include "Passes/DepthViewPass.h"
 #include "ModelMaterials.h"
 
 #include <cstdio>
@@ -63,6 +65,7 @@ struct Presentation
     madcat::rhi::VulkanSwapchain swapchain;
     madcat::rhi::TextureRef depth;
     madcat::rhi::VulkanTrianglePipeline triangle;
+    madcat::rhi::VulkanDepthViewPipeline depthView;
     madcat::rhi::VulkanClearRenderer renderer;
 };
 
@@ -73,10 +76,12 @@ public:
         const madcat::rhi::VulkanShaderModule& vertex, const madcat::rhi::VulkanShaderModule& fragment,
         madcat::rhi::BufferRef vertices, madcat::rhi::BufferRef indices,
         madcat::sandbox::ModelScene* modelScene, const madcat::render::GeometryBatch* geometry,
-        std::vector<madcat::rhi::TextureBindingRef> materials)
+        std::vector<madcat::rhi::TextureBindingRef> materials,
+        const madcat::rhi::VulkanShaderModule* depthVertex, const madcat::rhi::VulkanShaderModule* depthFragment)
         : window_(window), device_(device), surface_(surface), vertex_(vertex), fragment_(fragment),
           vertices_(std::move(vertices)), indices_(std::move(indices)), modelScene_(modelScene), geometry_(geometry),
-          materials_(std::move(materials)), requestedView_(modelScene ? madcat::rhi::GeometryView::Material : madcat::rhi::GeometryView::Color)
+          materials_(std::move(materials)), depthVertex_(depthVertex), depthFragment_(depthFragment),
+          requestedView_(modelScene ? madcat::rhi::GeometryView::Material : madcat::rhi::GeometryView::Color)
     {
         iconified_ = glfwGetWindowAttrib(window_, GLFW_ICONIFIED) == GLFW_TRUE;
         glfwSetWindowUserPointer(window_, this);
@@ -174,7 +179,10 @@ private:
             if (!candidate->swapchain.initialize(device_, surface_, {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}) ||
                 !(candidate->depth = madcat::rhi::createDepthTexture(device_, candidate->swapchain.extent().width, candidate->swapchain.extent().height)) ||
                 !candidate->triangle.initialize(device_, candidate->swapchain.surfaceFormat().format, vertex_, fragment_, vertices_, indices_, madcat::rhi::detail::TextureAccess::format(candidate->depth), materials_) ||
-                !candidate->renderer.initialize(device_, candidate->swapchain, candidate->depth, madcat::passes::buildForwardGraph, &candidate->triangle))
+                (depthVertex_ && !candidate->depthView.initialize(device_, candidate->swapchain.surfaceFormat().format, *depthVertex_, *depthFragment_)) ||
+                !candidate->renderer.initialize(device_, candidate->swapchain, candidate->depth,
+                    depthVertex_ ? madcat::passes::buildDepthViewGraph : madcat::passes::buildForwardGraph,
+                    &candidate->triangle, depthVertex_ ? &candidate->depthView : nullptr))
             {
                 std::fprintf(stderr, "MadCat error: presentation creation/rebuild failed; stopping rendering.\n");
                 return false;
@@ -256,6 +264,8 @@ private:
     madcat::sandbox::ModelScene* modelScene_;
     const madcat::render::GeometryBatch* geometry_;
     std::vector<madcat::rhi::TextureBindingRef> materials_;
+    const madcat::rhi::VulkanShaderModule* depthVertex_;
+    const madcat::rhi::VulkanShaderModule* depthFragment_;
     madcat::rhi::GeometryView requestedView_ = madcat::rhi::GeometryView::Color;
     int loggedView_ = -1;
     int requestedLighting_ = 0, activeLighting_ = 0, loggedLighting_ = -1;
@@ -282,17 +292,24 @@ int main(int argc, char** argv)
     madcat::assets::ModelAssets assets;
     std::unique_ptr<madcat::sandbox::ModelScene> modelScene;
     std::optional<madcat::render::GeometryBatch> model;
+    bool depthView = false;
     try
     {
-        if (argc != 1)
+        std::optional<std::filesystem::path> modelPath;
+        for (int argument=1; argument<argc; ++argument)
         {
-            if (argc != 3 || std::filesystem::path(argv[1]) != std::filesystem::path("--gltf"))
+            const std::filesystem::path option(argv[argument]);
+            if (option=="--depth-view" && !depthView) { depthView=true; }
+            else if (option=="--gltf" && !modelPath && argument+1<argc) { modelPath=argv[++argument]; }
+            else
             {
-                std::fprintf(stderr, "Usage: MadCat [--gltf <model.gltf|model.glb>]\n");
+                std::fprintf(stderr, "Usage: MadCat [--gltf <model.gltf|model.glb>] [--depth-view]\n");
                 return EXIT_FAILURE;
             }
-            const std::filesystem::path path(argv[2]);
-            auto imported = madcat::assets::importGltfGeometry(path);
+        }
+        if (modelPath)
+        {
+            auto imported = madcat::assets::importGltfGeometry(*modelPath);
             if (!imported)
             {
                 const auto filename = imported.error().file.u8string();
@@ -347,6 +364,10 @@ int main(int argc, char** argv)
             const std::filesystem::path shaderDirectory(u8"" MADCAT_SHADER_DIRECTORY);
             madcat::rhi::VulkanShaderModule vertexShader;
             madcat::rhi::VulkanShaderModule fragmentShader;
+            madcat::rhi::VulkanShaderModule depthVertex, depthFragment;
+            if (depthView && (!depthVertex.initialize(device, shaderDirectory.parent_path()/"depth-view/vertex.spv") ||
+                !depthFragment.initialize(device, shaderDirectory.parent_path()/"depth-view/fragment.spv")))
+            { throw std::runtime_error("Depth viewer Shader initialization failed; build MadCatShaders then restart"); }
             if (vertexShader.initialize(device, shaderDirectory / "vertex.spv") &&
                 fragmentShader.initialize(device, shaderDirectory / "fragment.spv"))
             {
@@ -367,7 +388,8 @@ int main(int argc, char** argv)
                 auto materials = madcat::sandbox::prepareMaterialBindings(device, assets, model ? std::span<const madcat::render::MaterialData>(model->materials) : std::span<const madcat::render::MaterialData>{});
                 if (!materials) { throw std::runtime_error(materials.error()); }
                 SandboxApplication app(window, device, surface, vertexShader, fragmentShader, std::move(vertices), std::move(indices),
-                    modelScene.get(), model ? &*model : nullptr, std::move(*materials));
+                    modelScene.get(), model ? &*model : nullptr, std::move(*materials),
+                    depthView ? &depthVertex : nullptr, depthView ? &depthFragment : nullptr);
                 exitCode = EXIT_SUCCESS;
                 while (!glfwWindowShouldClose(window) && !app.failed())
                 {

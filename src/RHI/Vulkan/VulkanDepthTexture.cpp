@@ -17,7 +17,7 @@ VkImage detail::TextureAccess::image(const TextureRef& texture) noexcept { retur
 VkImageView detail::TextureAccess::view(const TextureRef& texture) noexcept { return texture.state_ ? texture.state_->view : VK_NULL_HANDLE; }
 VkFormat detail::TextureAccess::format(const TextureRef& texture) noexcept { return texture.state_ ? texture.state_->format : VK_FORMAT_UNDEFINED; }
 
-TextureRef createDepthTexture(const VulkanDevice& device, uint32_t width, uint32_t height)
+TextureRef createDepthTexture(const VulkanDevice& device, uint32_t width, uint32_t height, bool sampled)
 {
     if (!device.handle() || width == 0 || height == 0)
     {
@@ -34,6 +34,8 @@ TextureRef createDepthTexture(const VulkanDevice& device, uint32_t width, uint32
     state->device = device.handle();
     state->width = width;
     state->height = height;
+    state->sampled = sampled;
+    const VkImageUsageFlags usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | (sampled ? VK_IMAGE_USAGE_SAMPLED_BIT : 0);
     PFN_vkCreateImage createImage = nullptr;
     PFN_vkGetImageMemoryRequirements getRequirements = nullptr;
     PFN_vkAllocateMemory allocateMemory = nullptr;
@@ -53,10 +55,11 @@ TextureRef createDepthTexture(const VulkanDevice& device, uint32_t width, uint32
     {
         VkFormatProperties properties{};
         getFormats(device.physicalDevice(), format, &properties);
-        if ((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) == 0) { continue; }
+        const VkFormatFeatureFlags required = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | (sampled ? VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT : 0);
+        if ((properties.optimalTilingFeatures & required) != required) { continue; }
         VkImageFormatProperties imageProperties{};
         const auto result = getImageFormats(device.physicalDevice(), format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
-            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, 0, &imageProperties);
+            usage, 0, &imageProperties);
         if (result == VK_ERROR_FORMAT_NOT_SUPPORTED) { continue; }
         if (!detail::checkResult(result, "vkGetPhysicalDeviceImageFormatProperties")) { return {}; }
         if (width > imageProperties.maxExtent.width || height > imageProperties.maxExtent.height ||
@@ -78,7 +81,7 @@ TextureRef createDepthTexture(const VulkanDevice& device, uint32_t width, uint32
     imageInfo.mipLevels = imageInfo.arrayLayers = 1;
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    imageInfo.usage = usage;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImage image = VK_NULL_HANDLE;
@@ -124,7 +127,7 @@ TextureRef createDepthTexture(const VulkanDevice& device, uint32_t width, uint32
     VkImageView view = VK_NULL_HANDLE;
     if (!detail::checkResult(createView(state->device, &viewInfo, nullptr, &view), "vkCreateImageView(depth)")) { return {}; }
     state->view = view;
-    std::fprintf(stderr, "Vulkan: Depth texture created; %u x %u, format %d, memory type %u.\n", width, height, static_cast<int>(state->format), memoryType);
+    std::fprintf(stderr, "Vulkan: %s texture created; %u x %u, format %d, memory type %u.\n", sampled ? "Sampled depth" : "Depth", width, height, static_cast<int>(state->format), memoryType);
     TextureRef result;
     result.state_ = std::move(state);
     return result;

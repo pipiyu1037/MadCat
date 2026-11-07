@@ -128,6 +128,7 @@ struct VulkanClearRenderer::State
             std::terminate();
         }
         if (commandPool) { destroyCommandPool(device, commandPool, nullptr); }
+        std::fprintf(stderr,"Vulkan: Frame commands retired.\n");
         for (const auto& image : images)
         {
             if (image.view) { destroyImageView(device, image.view, nullptr); }
@@ -167,7 +168,7 @@ VulkanClearRenderer::~VulkanClearRenderer()
 }
 
 bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwapchain& swapchain, TextureRef depth,
-    const graph::GraphicsGraphFactory& graphFactory, const VulkanTrianglePipeline* triangle)
+    const graph::GraphicsGraphFactory& graphFactory, const VulkanTrianglePipeline* triangle, const VulkanDepthViewPipeline* depthView)
 {
     if (state_)
     {
@@ -227,7 +228,7 @@ bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwa
         if (!detail::checkResult(created->createImageView(created->device, &view, nullptr, &imageView), "vkCreateImageView")) { return false; }
         image.view = imageView;
         image.graph = std::make_unique<detail::VulkanFrameGraph>();
-        if (!image.graph->initialize(device, image.handle, image.view, created->extent, created->depth, triangle, created->lighting, graphFactory)) { return false; }
+        if (!image.graph->initialize(device, image.handle, image.view, created->extent, created->depth, triangle, created->lighting, graphFactory, depthView)) { return false; }
     }
     VkCommandPoolCreateInfo pool{};
     pool.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -352,7 +353,7 @@ ClearFrameResult VulkanClearRenderer::drawIndexed(const std::array<float, 4>& co
     submit.pSignalSemaphoreInfos = &signal;
     if (!detail::checkResult(frame.queueSubmit2(frame.queue, 1, &submit, frame.submitFence), "vkQueueSubmit2")) { return frame.status; }
     frame.submitPending = true;
-    frame.depthInitialized = true;
+    frame.depthInitialized = frame.images[imageIndex].graph->submitted();
     if (!detail::checkResult(frame.resetFences(frame.device, 1, &frame.presentFence), "vkResetFences(present)")) { return frame.status; }
     VkSwapchainPresentFenceInfoEXT retirement{};
     retirement.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT;

@@ -25,9 +25,10 @@ bool PassContext::require(Resource resource, Use use)
 bool PassContext::beginRendering(Resource color, Resource depth, rhi::AttachmentLoad load, const std::array<float,4>& clearColor)
 {
     if (rendering_) { error_ = "nested rendering is unsupported"; return false; }
-    if (!require(color, Use::Color) || !require(depth, Use::Depth)) { return false; }
+    if (!require(color, Use::Color) || (depth.graph && !require(depth, Use::Depth))) { return false; }
     for (const auto resource : {color, depth})
     {
+        if (!resource.graph) { continue; }
         const auto access = std::ranges::find_if(accesses_, [&](const auto& a) { return a.resource == resource; });
         if (!access->write || (access->contents == Write::Preserve) != (load == rhi::AttachmentLoad::Load))
         { error_ = "attachment load operation differs from declaration"; return false; }
@@ -59,6 +60,13 @@ bool PassContext::endRendering()
     if (!result) { error_ = "RHI endRendering failed"; }
     return result;
 }
+bool PassContext::displayDepth(Resource depth)
+{
+    if (!rendering_) { error_ = "Depth display outside rendering"; return false; }
+    if (!require(depth, Use::Sampled)) { return false; }
+    if (!commands_.displayDepth(depth.index)) { error_ = "RHI depth display failed"; return false; }
+    return true;
+}
 void Graph::fail(std::string message) { if (error_.empty()) { error_ = std::move(message); } }
 bool Graph::valid(Resource r) const
 { return r.graph == identity_ && r.index < resources_.size() && r.version < resources_[r.index].versions.size(); }
@@ -78,6 +86,13 @@ Resource Graph::import(std::string name, uint64_t identity, Kind kind, Use initi
     resources_.push_back({std::move(name), identity, kind, initial, {{-1, UINT32_MAX, validContents}}});
     return {identity_, index, 0};
 }
+Resource Graph::createDepthTexture(std::string name, DepthTextureDesc description)
+{
+    if (!description.width || !description.height) { fail("Invalid managed depth extent: " + name); return {}; }
+    const auto index = static_cast<uint32_t>(resources_.size());
+    resources_.push_back({std::move(name), 0, Kind::Depth, Use::None, {{-1, UINT32_MAX, false}}, description});
+    return {identity_, index, 0};
+}
 uint32_t Graph::addNode(std::string name)
 {
     const auto index = static_cast<uint32_t>(nodes_.size());
@@ -92,6 +107,8 @@ void Graph::access(uint32_t node, Access access)
     auto& target = nodes_[node];
     if (!valid(access.resource)) { fail(target.name + ": missing or foreign graph resource"); return; }
     const auto& resource = resources_[access.resource.index];
+    if (resource.depthTexture && access.use == Use::Sampled && !resource.depthTexture->sampled)
+    { fail(target.name + ": depth texture was not declared sampleable: " + resource.name); return; }
     if (!compatible(resource.kind, access.use) || access.use == Use::HostWrite || access.use == Use::None)
     { fail(target.name + ": incompatible use of " + resource.name); return; }
     for (auto& prior : target.accesses)
@@ -190,7 +207,11 @@ std::expected<std::vector<Use>, std::string> Plan::record(rhi::GraphicsCommands&
     std::vector<Use> states(initialStates.begin(), initialStates.end());
     const std::vector<std::any> fixedParameters(parameters.begin(), parameters.end());
     for (uint32_t slot = 0; slot < states.size(); ++slot)
-    { if (states[slot] != Use::None && !compatible(resources_[slot].kind, states[slot])) { return std::unexpected("Invalid external state: " + resources_[slot].name); } }
+    {
+        if ((states[slot] != Use::None && !compatible(resources_[slot].kind, states[slot])) ||
+            (resources_[slot].depthTexture && states[slot] == Use::Sampled && !resources_[slot].depthTexture->sampled))
+        { return std::unexpected("Invalid external state: " + resources_[slot].name); }
+    }
     for (const auto index : order_)
     {
         const auto& node = nodes_[index];

@@ -5,6 +5,7 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -17,6 +18,8 @@ constexpr Use operator|(Use a, Use b) { return Use(uint32_t(a) | uint32_t(b)); }
 constexpr bool includes(Use a, Use b) { return (uint32_t(a) & uint32_t(b)) == uint32_t(b); }
 enum class Kind { Color, Depth, Buffer };
 enum class Write { Overwrite, Preserve };
+// First managed texture: one depth mip/layer, with optional fragment sampling.
+struct DepthTextureDesc { uint32_t width, height; bool sampled = true; };
 struct Identity {};
 struct Resource
 {
@@ -38,6 +41,7 @@ public:
     [[nodiscard]] bool drawIndexed(Resource vertices, Resource indices, Resource lighting,
         std::span<const Resource> textures, const rhi::IndexedDraw& draw);
     [[nodiscard]] bool endRendering();
+    [[nodiscard]] bool displayDepth(Resource depth);
     [[nodiscard]] const std::string& error() const { return error_; }
     [[nodiscard]] bool finished() const { return !rendering_; }
 private:
@@ -60,6 +64,7 @@ struct Imported
     Kind kind;
     Use initial;
     std::vector<Version> versions;
+    std::optional<DepthTextureDesc> depthTexture;
 };
 class Plan
 {
@@ -88,6 +93,7 @@ public:
     // Identity comes from the backend's actual image/buffer identity. Reimports
     // alias the same logical resource; conflicting initial contracts are errors.
     [[nodiscard]] Resource import(std::string name, uint64_t identity, Kind kind, Use initial, bool valid);
+    [[nodiscard]] Resource createDepthTexture(std::string name, DepthTextureDesc description);
     [[nodiscard]] uint32_t addNode(std::string name);
     [[nodiscard]] Builder builder(uint32_t node);
     void dependsOn(uint32_t node, uint32_t prerequisite);

@@ -15,6 +15,7 @@ namespace madcat::rhi
 class VulkanDevice;
 class VulkanSwapchain;
 class VulkanTrianglePipeline;
+class VulkanDepthViewPipeline;
 
 enum class ClearFrameResult
 {
@@ -45,7 +46,7 @@ public:
     // and permits retry; repeated successful initialization is rejected.
     [[nodiscard]] bool initialize(const VulkanDevice& device, const VulkanSwapchain& swapchain,
         TextureRef depth, const graph::GraphicsGraphFactory& graphFactory,
-        const VulkanTrianglePipeline* triangle = nullptr);
+        const VulkanTrianglePipeline* triangle = nullptr, const VulkanDepthViewPipeline* depthView = nullptr);
     // Clears color and depth (1.0), then draws the supplied matrix snapshots.
     // Retry means no image acquired (finite acquire timeout).
     // Unavailable/Failed are terminal: no further acquire or submit until rebuilt.

@@ -1,6 +1,6 @@
 # MadCat 架构设计
 
-更新日期：2026-11-06。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
+更新日期：2026-11-08。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
 
 ## 文档职责与设计状态
 
@@ -768,7 +768,7 @@ L 模式计算 `albedo × irradiance × max(dot(N,L),0) / π`，法线在透视�
 
 ## 最小图与图形执行接口（当前实现）
 
-2026-11-06 将已有光照绘制接入端到端的 `Clear → Forward → Present`。本增量选择导入已存在的资源，先验证真实 GPU 同步；代价是图暂不分配中间纹理，图形命令仍限当前准备好的管线。项目仍以单进程、单队列、一个在途帧执行，未新增后端抽象或调度系统。
+2026-11-06 将已有光照绘制接入端到端的 `Clear → Forward → Present`。首轮增量选择导入已存在的资源，先验证真实 GPU 同步；图内深度纹理扩展见本节后文，图形命令仍限当前准备好的管线。项目仍以单进程、单队列、一个在途帧执行，未新增后端抽象或调度系统。
 
 [Graph／Builder／Plan](../src/RenderGraph/RenderGraph.h) 不依赖 Vulkan，`Resource` 持有图身份、逻辑资源索引与版本。导入以底层对象的类型和实际身份去重，初始内容有效性和访问状态必须显式交接；冲突导入返回诊断。写入返回新版本，区分 Overwrite 完整初始化与 Preserve 保留修改。一个版本最多有一个写入后继；读取依赖其生产者，后继写入还依赖旧版本的所有读取者。图编译检查初始化、资源种类、跨图引用、写入分叉和环，不做自动裁剪或资源复制。
 
@@ -780,11 +780,27 @@ L 模式计算 `albedo × irradiance × max(dot(N,L),0) / π`，法线在透视�
 
 编译计划固定节点顺序和访问契约；记录时以本帧外部状态推导屏障，保留读阶段的并集并处理 RAW／WAR／WAW 与布局变化。后端将其转换为 Synchronization2 图像／缓冲屏障；交换链首个转换匹配 acquire 等待的 ColorAttachmentOutput 阶段。Clear 通过完整附件清除写出初始化版本，Forward 使用 Load 并写出新版本，两个动态渲染实例之间显式安排颜色／深度写后写依赖且保存深度。规则依据 [Vulkan 同步示例](https://docs.vulkan.org/guide/latest/synchronization_examples.html)。
 
-图外不可变几何首次以 HostWrite 交接，之后以 Vertex／Index 读取交接；启动纹理上传等待完成并以 Fragment sampled-read 交接，Uniform 在每帧完成等待后更新再以 HostWrite 交接。每个交换链图像有独立计划和导入身份，共享深度的状态由渲染帧成功提交后更新。整图失败不返回可发布状态，渲染器不提交前缀；实际队列提交成功后才登记深度使用，呈现状态另行记录。适配器检查最终颜色为 Present、深度为 Depth，避免错误图交还不兼容状态。当前 acquire 后记录失败仍受控停止，不增加运行期重试。
+图外不可变几何首次以 HostWrite 交接，之后以 Vertex／Index 读取交接；启动纹理上传等待完成并以 Fragment sampled-read 交接，Uniform 在每帧完成等待后更新再以 HostWrite 交接。每个交换链图像有独立计划和导入身份，共享深度的状态由渲染帧成功提交后更新。整图失败不返回可发布状态，渲染器不提交前缀；实际队列提交成功后才登记深度使用，呈现状态另行记录。适配器检查最终颜色为 Present、使用过的外部深度为 Depth（未使用则保持原状态），避免错误图交还不兼容状态。当前 acquire 后记录失败仍受控停止，不增加运行期重试。
 
 图资源句柄和同步状态不代替 GPU 资源所有权：帧上下文持有 BufferRef、TextureBindingRef、深度和 UBO，管线仍须活到帧退役。统一等待提交／呈现完成并释放命令后，才销毁图的执行映射和 GPU 依赖。resize 同步销毁后重建；CPU 候选计划隔离已验证，运行期图候选失败保留旧画面的机制尚未实现。
 
-七组 CPU 图检查覆盖依赖排序、未初始化输入、多写者、环、重复导入、访问权限、候选隔离、记录失败、WAW／HostWrite 同步和帧参数固定；实际 GPU 验证覆盖附件 Clear→Load 绘制及呈现。图内写出纹理再采样、子资源、跨队列、图资源分配与通用准备版本仍是后续范围，不能由本次附件场景代替验收。
+2026-11-06 的七组 CPU 图检查覆盖依赖排序、未初始化输入、多写者、环、重复导入、访问权限、候选隔离、记录失败、WAW／HostWrite 同步和帧参数固定；实际 GPU 验证覆盖附件 Clear→Load 绘制及呈现。该轮尚未覆盖图内写出纹理再采样或图资源分配，后续扩展见下节；子资源、跨队列与通用准备版本仍待实现。
+
+### 图内深度纹理与采样（当前实现）
+
+2026-11-08 增加 [DepthViewPass](../src/Passes/DepthViewPass.h) 和 `--depth-view`。它复用 Clear／Forward 写出深度，再用颜色附件单独绑定的 DepthView 全屏节点采样；Forward 仍有颜色输出，当前不是专用的只写深度几何管线。
+
+`Graph::createDepthTexture(name, DepthTextureDesc{width, height, true})` 只保存描述并返回未初始化版本，非零尺寸、先写后读及用途能力由 CPU 图校验；相同名称不合并资源。Plan 拥有描述副本，候选图修改不改变已编译计划。当前沿用资源表 `Imported` 的名字，内部纹理由可选描述区分，native identity 为零；不将该零值用于资源身份去重。
+
+VulkanFrameGraph 在编译成功后为内部描述创建专用 TextureRef，每个交换链图像各有独立分配／状态，使用一个 mip／层。格式查询覆盖 DepthAttachment 与 Sampled 的组合，按 D32_SFLOAT、D16_UNORM 尝试；当前要求与已有 Forward 管线的深度格式、输出尺寸相容，失败明确诊断。nearest／Clamp 绑定不依赖深度格式的线性滤波能力；未支持的线性采样请求被拒绝。
+
+图推导 Depth→Sampled 的 RAW 以及后续 Sampled→Depth 的 WAR，RHI 分别映射为早／晚深度测试读写和 Fragment sampled-read，使用深度 aspect 与对应布局。每次记录先清除待提交状态，只有整图成功才产生候选最终状态；`submitted()` 仅由 queue submit 成功路径调用，更新图内资源并返回外部深度实际是否初始化。记录／结束命令／提交失败均不发布候选内部状态。图外每帧 UBO 的 HostWrite 不沿用上帧 Uniform 状态。
+
+Native 表保留图内纹理和不可变 Descriptor；渲染器等待提交／呈现完成并释放命令池后，才销毁映射、绑定与图内资源，随后销毁借用的 Forward／DepthView 管线。resize 同步重建；尚无池化、内存别名、子资源、运行期候选图发布或创建失败后的运行期恢复。
+
+[查看 Shader](../shaders/depth-view.slang) 通过 nearest SampleLevel 读取深度并输出 `1-deviceDepth`，交换链做一次 sRGB 编码，不将它解释为线性距离。全屏顶点使用 `SV_VulkanVertexID`；固定编译器下 `SV_VertexID` 会产生未启用的 DrawParameters capability，实际验证已发现并修正。[Slang SPIR-V 语义](https://shader-slang.org/slang/user-guide/spirv-target-specific)
+
+CPU 九组图检查覆盖内部尺寸／用途／未初始化、描述快照、独立身份、Depth→Sampled→Depth 和记录失败；32 项深度模拟覆盖组合用途查询、无采样 feature、D16 回退及失败清理。实际三角形、材质 MASK、模型层级／空帧及生命周期证据见开发文档；D16 仍仅模拟验证。阴影与通用 Prepare 未实现。
 
 ## 实现参考建议
 

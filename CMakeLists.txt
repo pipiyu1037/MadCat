@@ -250,6 +250,7 @@ add_executable(MadCat
     src/RHI/Vulkan/VulkanClearRenderer.cpp
     src/RHI/Vulkan/VulkanFrameLighting.cpp
     src/RHI/Vulkan/VulkanFrameGraph.cpp
+    src/RHI/Vulkan/VulkanDepthViewPipeline.cpp
     src/RHI/Vulkan/VulkanDevice.cpp
     src/RHI/Vulkan/VulkanInstance.cpp
     src/RHI/Vulkan/VulkanPhysicalDevice.cpp
@@ -318,12 +319,21 @@ set(MADCAT_SHADER_ARGUMENTS
 add_custom_target(MadCatShaders
     COMMAND "${CMAKE_COMMAND}" ${MADCAT_SHADER_ARGUMENTS}
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CompileShaders.cmake"
+    COMMAND "${CMAKE_COMMAND}" ${MADCAT_SHADER_TOOLS}
+        -DSHADER_PACKAGE=depth-view
+        "-DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/depth-view.slang"
+        "-DOUTPUT_ROOT=${CMAKE_CURRENT_BINARY_DIR}/shaders"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CompileShaders.cmake"
     BYPRODUCTS
         "${CMAKE_CURRENT_BINARY_DIR}/shaders/triangle/vertex.spv"
         "${CMAKE_CURRENT_BINARY_DIR}/shaders/triangle/fragment.spv"
         "${CMAKE_CURRENT_BINARY_DIR}/shaders/triangle/manifest.txt"
         "${CMAKE_CURRENT_BINARY_DIR}/shaders/triangle/triangle.slang"
-    SOURCES shaders/triangle.slang cmake/CompileShaders.cmake
+        "${CMAKE_CURRENT_BINARY_DIR}/shaders/depth-view/vertex.spv"
+        "${CMAKE_CURRENT_BINARY_DIR}/shaders/depth-view/fragment.spv"
+        "${CMAKE_CURRENT_BINARY_DIR}/shaders/depth-view/manifest.txt"
+        "${CMAKE_CURRENT_BINARY_DIR}/shaders/depth-view/depth-view.slang"
+    SOURCES shaders/triangle.slang shaders/depth-view.slang cmake/CompileShaders.cmake
     COMMENT "Compiling and validating Slang shaders (manual target)"
     VERBATIM
 )
@@ -331,6 +341,13 @@ add_custom_target(MadCatShaderChecks
     COMMAND "${CMAKE_COMMAND}" ${MADCAT_SHADER_ARGUMENTS}
         "-DCOMPILE_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/cmake/CompileShaders.cmake"
         "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/verification/shader-build"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ShaderBuildChecks.cmake"
+    COMMAND "${CMAKE_COMMAND}" ${MADCAT_SHADER_TOOLS}
+        -DSHADER_PACKAGE=depth-view
+        "-DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/depth-view.slang"
+        "-DOUTPUT_ROOT=${CMAKE_CURRENT_BINARY_DIR}/shaders"
+        "-DCOMPILE_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/cmake/CompileShaders.cmake"
+        "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/verification/depth-view-build"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ShaderBuildChecks.cmake"
     COMMENT "Checking shader compilation and failure recovery"
     VERBATIM

@@ -97,6 +97,10 @@ function Check-MaterialPixels($Bitmap,[double]$Aspect,[string]$Label) {
             }
         }
         if($winner-ge 0){++$seen[$winner]}
+        if($DepthView){
+            $shade=if($null-eq $closest){0}else{Convert-Srgb (1-$closest.Depth)}
+            $expected=@($shade,$shade,$shade)
+        }
         $pixel=$Bitmap.GetPixel($x,$y)
         if([Math]::Abs($pixel.R-$expected[0])-gt 3-or [Math]::Abs($pixel.G-$expected[1])-gt 3-or [Math]::Abs($pixel.B-$expected[2])-gt 3){throw "$Label material pixel ${x},${y}: actual $pixel, expected RGB $expected, primitive $winner, UV $($closest.Color)"}
     }

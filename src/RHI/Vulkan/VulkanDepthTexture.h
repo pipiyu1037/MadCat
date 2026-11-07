@@ -10,7 +10,8 @@ namespace madcat::rhi
 // requested extent. Owns a dedicated DEVICE_LOCAL allocation and depth-only view.
 // Initial layout is UNDEFINED; command recording must transition it explicitly.
 // Returns empty on Vulkan/capability failure; CPU allocation failures may throw.
-[[nodiscard]] TextureRef createDepthTexture(const VulkanDevice& device, uint32_t width, uint32_t height);
+// sampled adds SAMPLED usage and feature checks, without uploading/initializing.
+[[nodiscard]] TextureRef createDepthTexture(const VulkanDevice& device, uint32_t width, uint32_t height, bool sampled = false);
 
 namespace detail
 {

@@ -2,7 +2,8 @@ param(
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug',
     [string]$BuildDirectory = 'build',
     [ValidateSet('resize', 'close-minimized', 'modal', 'stress', 'scene', 'depth', 'model', 'attributes', 'materials', 'lighting')][string]$Scenario = 'resize',
-    [string]$ModelPath = ''
+    [string]$ModelPath = '',
+    [switch]$DepthView
 )
 $ErrorActionPreference = 'Stop'
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -53,6 +54,7 @@ public static class TriangleWindowCheck {
 }
 '@
 $name = "$($Configuration.ToLower())-$Scenario"
+if ($DepthView) { $name += '-depth-view' }
 if ($hasModel) { $name += '-' + [IO.Path]::GetFileNameWithoutExtension($ModelPath) }
 $errorPath = Join-Path $outputRoot "$name.stderr.log"
 $outPath = Join-Path $outputRoot "$name.stdout.log"
@@ -63,6 +65,7 @@ try {
     $launch = @{ FilePath = (Join-Path $buildPath "$Configuration/MadCat.exe"); WorkingDirectory = $outputRoot
         WindowStyle = 'Hidden'; PassThru = $true; RedirectStandardOutput = $outPath; RedirectStandardError = $errorPath }
     if ($hasModel) { $launch.ArgumentList = @('--gltf', ('"' + $ModelPath + '"')) }
+    if ($DepthView) { $launch.ArgumentList = $(if ($hasModel) { @($launch.ArgumentList) + '--depth-view' } else { @('--depth-view') }) }
     $appProcess = Start-Process @launch
     $null = $appProcess.Handle
 } finally { $env:VK_LAYER_VALIDATE_SYNC = $previousSync }
@@ -86,14 +89,14 @@ function Get-ClientSize {
 function Get-ReadyCount { return [regex]::Matches((Read-Log), 'MadCat: presentation ready;').Count }
 function Wait-Presentation([int]$PreviousCount) {
     Wait-Condition {
-        $log = Read-Log
+        [string]$presentationLog = Read-Log
         $size = Get-ClientSize
-        $matches = [regex]::Matches($log, 'MadCat: presentation ready; framebuffer (\d+) x (\d+), Swapchain (\d+) x (\d+)\.')
-        if ($matches.Count -le $PreviousCount) { return $false }
-        $last = $matches[$matches.Count - 1]
-        return ([int]$last.Groups[1].Value -eq $size[0] -and [int]$last.Groups[2].Value -eq $size[1] -and
-            [int]$last.Groups[3].Value -eq $size[0] -and [int]$last.Groups[4].Value -eq $size[1] -and
-            $log.Substring($last.Index) -match 'Clear frame presented \(1\)')
+        $presentations = [regex]::Matches($presentationLog, 'MadCat: presentation ready; framebuffer (\d+) x (\d+), Swapchain (\d+) x (\d+)\.')
+        if ($presentations.Count -le $PreviousCount) { return $false }
+        $lastPresentation = $presentations[$presentations.Count - 1]
+        return ([int]$lastPresentation.Groups[1].Value -eq $size[0] -and [int]$lastPresentation.Groups[2].Value -eq $size[1] -and
+            [int]$lastPresentation.Groups[3].Value -eq $size[0] -and [int]$lastPresentation.Groups[4].Value -eq $size[1] -and
+            [regex]::IsMatch($presentationLog.Substring($lastPresentation.Index), 'Clear frame presented \(1\)'))
     } 'presentation and first frame'
 }
 function Convert-Srgb([double]$Value) {
@@ -258,6 +261,10 @@ function Check-Pixels([string]$Label) {
             $expected = if ($null -ne $fragment) {
                 @((Convert-Srgb $fragment.Color[0]), (Convert-Srgb $fragment.Color[1]), (Convert-Srgb $fragment.Color[2]))
             } else { @(56, 80, 111) }
+            if ($DepthView) {
+                $shade = if ($null -eq $fragment) { 0 } else { Convert-Srgb (1 - $fragment.Depth) }
+                $expected = @($shade, $shade, $shade)
+            }
             $pixel = $bitmap.GetPixel($x, $y)
             if ([Math]::Abs($pixel.R - $expected[0]) -gt 3 -or [Math]::Abs($pixel.G - $expected[1]) -gt 3 -or [Math]::Abs($pixel.B - $expected[2]) -gt 3) {
                 throw "$Label pixel ${x},${y}: actual $pixel, expected RGB $expected"
@@ -435,18 +442,28 @@ try {
     $pipelines = [regex]::Matches($log, 'Triangle pipeline created;').Count
     $expectedGraphs = 0
     foreach ($swap in [regex]::Matches($log, 'Swapchain created; [^\r\n]*, (\d+) images')) { $expectedGraphs += [int]$swap.Groups[1].Value }
-    $graphs = [regex]::Matches($log, 'Render Graph: compiled 3 Passes, (\d+) imported resources; Clear -> Forward -> Present\.')
+    $graphPattern = if ($DepthView) { 'Render Graph: compiled 4 Passes, (\d+) imported resources; Clear -> Forward -> DepthView -> Present\.' } else { 'Render Graph: compiled 3 Passes, (\d+) imported resources; Clear -> Forward -> Present\.' }
+    $graphs = [regex]::Matches($log, $graphPattern)
     if ($expectedGraphs -lt 1 -or $graphs.Count -ne $expectedGraphs) { throw 'Acquired-image graph count/order mismatch or graph rebuilt for parameters' }
     if ($referenceMaterials) { foreach ($graph in $graphs) { if ([int]$graph.Groups[1].Value -ne 8) { throw 'RenderScene resources missing from graph imports or shared image identity lost' } } }
     $sampled = [regex]::Matches($log, 'Sampled texture uploaded;').Count
     if ($sampled -lt 1 -or $sampled -ne [regex]::Matches($log, 'Sampled texture destroyed\.').Count -or
         [regex]::Matches($log,'Texture binding created\.').Count -ne [regex]::Matches($log,'Texture binding destroyed\.').Count -or
         $log -notmatch '(?s)Clear renderer destroyed.*Triangle pipeline destroyed.*Swapchain destroyed.*Texture binding destroyed.*Sampled texture destroyed.*Device destroyed') { throw 'Sampled image/descriptor lifetime mismatch' }
-    if ($referenceMaterials -and ($sampled -ne 3 -or [regex]::Matches($log,'Texture binding created\.').Count -ne 4)) { throw 'Shared image/texture upload was duplicated' }
+    $managed = if ($DepthView) { $expectedGraphs } else { 0 }
+    if ($referenceMaterials -and ($sampled -ne 3 -or [regex]::Matches($log,'Texture binding created\.').Count -ne (4 + $managed))) { throw 'Shared image/texture upload was duplicated' }
+    if ($DepthView -and (
+        [regex]::Matches($log,'Sampled depth texture created;').Count -ne $expectedGraphs -or
+        [regex]::Matches($log,'Sampled depth texture destroyed\.').Count -ne $expectedGraphs -or
+        [regex]::Matches($log,'Render Graph: allocated 1 managed depth texture').Count -ne $expectedGraphs -or
+        [regex]::Matches($log,'Depth view pipeline created\.').Count -ne $pipelines -or
+        [regex]::Matches($log,'Depth view pipeline destroyed\.').Count -ne $pipelines -or
+        [regex]::Matches($log,'(?s)Frame commands retired.*?Sampled depth texture destroyed.*?Clear renderer destroyed.*?Depth view pipeline destroyed').Count -ne $pipelines)) { throw 'Managed depth or viewer lifetime mismatch' }
     if ($pipelines -lt 1 -or $pipelines -ne [regex]::Matches($log, 'Triangle pipeline destroyed\.').Count -or
         $pipelines -ne [regex]::Matches($log, 'Swapchain created;').Count -or $pipelines -ne [regex]::Matches($log, 'Swapchain destroyed\.').Count -or
         $pipelines -ne [regex]::Matches($log, '(?s)Clear renderer destroyed.*?Triangle pipeline destroyed.*?Swapchain destroyed').Count) { throw 'Pipeline/Swapchain lifetime count or order mismatch' }
-    if ([regex]::Matches($log, 'Shader Module created;').Count -ne 2 -or [regex]::Matches($log, 'Shader Module destroyed\.').Count -ne 2 -or
+    $moduleCount = if ($DepthView) { 4 } else { 2 }
+    if ([regex]::Matches($log, 'Shader Module created;').Count -ne $moduleCount -or [regex]::Matches($log, 'Shader Module destroyed\.').Count -ne $moduleCount -or
         $log -notmatch '(?s)Triangle pipeline destroyed.*Swapchain destroyed.*Shader Module destroyed.*Shader Module destroyed.*Device destroyed.*Surface destroyed.*Instance destroyed') { throw 'Module/Device destruction count or order mismatch' }
     $vertexBytes = 176; $indexBytes = 36; $indexCount = 9
     if ($hasModel) {

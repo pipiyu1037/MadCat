@@ -1,6 +1,6 @@
 # MadCat
 
-使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前可绘制彩色三角形，并通过 `--gltf` 显示共享 GPU 几何的双实例 glTF／GLB 场景。支持基础色材质／贴图、方向光漫反射、Scene／相机矩阵、深度遮挡、单帧同步、resize／最小化恢复，以及 Shader 手动编译、SPIR-V 验证和 Vulkan 资源的 RAII 管理。
+使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前可绘制彩色三角形，并通过 `--gltf` 显示共享 GPU 几何的双实例 glTF／GLB 场景。支持图内深度纹理与灰度查看、基础色材质／贴图、方向光漫反射、Scene／相机矩阵、深度遮挡、单帧同步、resize／最小化恢复，以及 Shader 手动编译、SPIR-V 验证和 Vulkan 资源的 RAII 管理。
 
 文档：[开发范围、进度与验收](docs/project-development.md) · [架构设计](docs/architecture-design.md)。
 
@@ -523,9 +523,30 @@ Clear 清除完整颜色／深度附件并返回新版本；Forward 加载这两
 
 [Vulkan 执行适配](src/RHI/Vulkan/VulkanFrameGraph.cpp)为每个交换链图像建立独立计划，导入颜色、共享深度、顶点／索引、帧 UBO 和去重后的材质图像。图外上传交接 HostWrite 或 Fragment sampled-read；每帧 UBO 更新后交接 HostWrite，深度和交换链状态由成功提交／呈现记录提供。RHI 在上一帧完成后复用缓冲，持有实际资源至命令退役。模型／灯光参数变化不重新编图，resize 在等待完成后重建。
 
-本增量支持单队列、整资源访问和已有资源导入；管线与 Descriptor 仍沿用当前预先准备的固定绘制接口。尚无图内纹理分配、子资源范围、Compute／Dispatch、通用 `prepare`／管线切换、运行期图切换、稳定提交标识或 Shader 更新；不能据此标记 F04／F05 整体验收。
+当前支持单队列、整资源访问、已有资源导入和下节的图内深度纹理；管线与 Descriptor 仍沿用预先准备的固定接口。尚无子资源范围、Compute／Dispatch、通用 `prepare`／任意管线切换、运行期图切换、稳定提交标识或 Shader 更新；F04／F05 尚未整体验收。
 
-Debug／Release 主程序、七组图检查和 66 项原管线检查通过，无编译警告。两种配置的光照八次采样每次 54 点通过；Debug 另通过模型删除至空／恢复、深度遮挡及反序、resize／最小化恢复和最小化退出。检查还核对每个交换链图像只建立一份三节点计划，材质探针共导入八个实际资源；Debug 同步验证无 warning／error，Release 未主动启用验证层。本轮未修改或重编 Shader，未测性能。下一步补图内纹理与深度采样，再接方向光阴影。
+2026-11-06 首轮图增量的 Debug／Release 主程序、七组图检查和 66 项原管线检查通过，无编译警告。两种配置的光照八次采样每次 54 点通过；Debug 另通过模型删除至空／恢复、深度遮挡及反序、resize／最小化恢复和最小化退出。检查还核对每个交换链图像只建立一份三节点计划，材质探针共导入八个实际资源；Debug 同步验证无 warning／error，Release 未主动启用验证层。该轮未修改或重编 Shader，未测性能；后续深度采样增量见下节。
+
+## 图内深度纹理与查看
+
+`--depth-view` 选择 [C++ 深度查看图](src/Passes/DepthViewPass.h)：`Clear → Forward → DepthView → Present`。Forward 将几何深度写入图创建的纹理，保留当前材质、MASK 与面向规则；DepthView 在只绑定颜色附件的全屏 Pass 中采样它。显示值为 `1 - deviceDepth`，经 sRGB 编码；清除区为黑色，近处更亮，数值不是线性距离。可与 `--gltf` 组合，原有姿态按键继续有效。
+
+```powershell
+cmake --build build --config Debug --target MadCatShaders MadCat MadCatRenderGraphChecks MadCatDepthChecks
+./build/Debug/MadCat.exe --depth-view
+./build/Debug/MadCat.exe --gltf assets/models/MaterialProbe.gltf --depth-view
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario depth -DepthView
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario materials -DepthView
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario model -DepthView
+```
+
+`Graph::createDepthTexture(name, {width, height, true})` 返回未初始化版本，必须先清除／写入才能读取；`sampled=false` 禁止声明采样。相同名字不合并资源。编译计划保存描述，[RHI 适配器](src/RHI/Vulkan/VulkanFrameGraph.cpp)为每个交换链图像的计划分别分配并保活纹理及不可变采样绑定。尺寸随输出重建，格式查询同时覆盖深度附件和采样用途；只支持一个 mip／层、nearest 采样和与当前 Forward 管线相容的格式／输出尺寸。当前不做内存别名或临时资源池。
+
+图自动处理深度写入到 Fragment sampled-read 的依赖，以及下一次使用该纹理时采样到深度写入的依赖。内部状态仅在队列提交成功后登记；每帧 UBO 的 HostWrite 仍显式交接。销毁前等待 GPU／呈现退役并释放命令，再释放图内纹理、Descriptor 和借用的管线。
+
+Debug／Release 各九组图检查、32 项深度与 66 项管线检查通过；Shader 两个包各 12 项编译失败恢复检查通过。两种配置均通过八次三角形深度参考采样；Debug 另通过材质五次每次 54 点、模型十一次（含空场景／恢复）、最小化退出及原方向光八次参考回归。所有 Debug 场景的同步验证无 warning／error；Release 未主动启用验证层。截图和日志在 `build/verification/triangle/`，深度查看器文件名含 `depth-view`。
+
+该链路仍复用写颜色和深度的 Forward 管线，之后覆盖颜色显示深度；尚无专用只写深度的几何管线或光源视角阴影。下一步实现方向光阴影，并补齐所需的专用深度绘制与绑定。
 
 ## 手动编译 Shader
 
@@ -538,9 +559,9 @@ cmake --build build --config Debug --target MadCatShaders
 cmake --build build --config Debug --target MadCatShaderChecks
 ```
 
-`MadCatShaders` 每次手动调用都会编译两个阶段，Debug／Release 使用同一套参数和产物目录。源码为 [triangle.slang](shaders/triangle.slang)，顶点入口为 `vertexMain`，片元入口为 `fragmentMain`；保留入口名称，直接生成 SPIR-V 1.6，使用 `-O0`，将警告视为错误，再执行 `spirv-val --target-env vulkan1.3`。当前顶点输入为 location 0／1／2 的 float3 位置／颜色／法线及 location 3 的 float2 UV；片元使用 set 0 的基础色图像／采样器，并声明 `Shader` 和 `DemoteToHelperInvocation` capability。布局与设备要求见前述材质工作流。[Slang 命令行参考](https://docs.shader-slang.org/en/stable/external/slang/docs/command-line-slangc-reference.html)
+`MadCatShaders` 每次手动调用依次编译 triangle 与 depth-view 两个包，每包含顶点和片元两个阶段，Debug／Release 使用同一套参数和产物目录。源码为 [triangle.slang](shaders/triangle.slang)，顶点入口为 `vertexMain`，片元入口为 `fragmentMain`；保留入口名称，直接生成 SPIR-V 1.6，使用 `-O0`，将警告视为错误，再执行 `spirv-val --target-env vulkan1.3`。当前顶点输入为 location 0／1／2 的 float3 位置／颜色／法线及 location 3 的 float2 UV；片元使用 set 0 的基础色图像／采样器，并声明 `Shader` 和 `DemoteToHelperInvocation` capability。布局与设备要求见前述材质工作流。[Slang 命令行参考](https://docs.shader-slang.org/en/stable/external/slang/docs/command-line-slangc-reference.html)
 
-成功产物位于 `build/shaders/triangle/`：
+triangle 产物位于 `build/shaders/triangle/`；depth-view 产物位于同级 `depth-view/`，文件结构相同，源码快照为 `depth-view.slang`：
 
 | 文件 | 内容 |
 |---|---|
@@ -550,7 +571,7 @@ cmake --build build --config Debug --target MadCatShaderChecks
 
 [编译脚本](cmake/CompileShaders.cmake) 先在候选目录编译并验证，两个阶段全部成功后才替换整组产物；编译／验证失败时保留上一组，清理候选文件并返回非零状态。目录发布中断时，下一次构建会先恢复已备份的上一组；同一输出目录使用进程锁避免并发发布。该流程属于离线构建，不是运行期热更新协议。
 
-[检查目标](tests/ShaderBuildChecks.cmake) 包含 12 个真实编译与故障场景，使用独立的 `build/verification/shader-build/`，核对失败前后的四个文件哈希。当前仅处理一个自包含 `.slang` 文件，尚未建立 include／import 依赖记录或反射。
+[检查目标](tests/ShaderBuildChecks.cmake) 对两个包分别运行 12 个真实编译与故障场景，使用独立的 `build/verification/shader-build/` 与 `build/verification/depth-view-build/`，核对失败前后的四个文件哈希。当前仅处理一个自包含 `.slang` 文件，尚未建立 include／import 依赖记录或反射。
 
 ## Ray Query 编译探针
 

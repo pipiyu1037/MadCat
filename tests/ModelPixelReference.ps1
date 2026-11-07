@@ -37,6 +37,7 @@ function Get-PreviewTriangles([double]$Aspect) {
 
 function Check-ModelPixels($Bitmap, [double]$Aspect, [string]$Label) {
     if (-not $referenceModel) {
+        if ($DepthView) { throw 'Depth viewer model checks require TransformProbe or MaterialProbe analytic references' }
         # Other assets get a smoke check; exact geometry/color evidence comes
         # from TransformProbe. Keep this distinction visible in output.
         $foreground = @(0, 0)
@@ -80,6 +81,10 @@ function Check-ModelPixels($Bitmap, [double]$Aspect, [string]$Label) {
             $expected = @((Convert-Srgb $closest.Color[0]), (Convert-Srgb $closest.Color[1]), (Convert-Srgb $closest.Color[2]))
         }
         $pixel = $Bitmap.GetPixel($x,$y)
+        if ($DepthView) {
+            $shade = if ($null -eq $closest) { 0 } else { Convert-Srgb (1-$closest.Depth) }
+            $expected = @($shade,$shade,$shade)
+        }
         if ([Math]::Abs($pixel.R - $expected[0]) -gt 3 -or [Math]::Abs($pixel.G - $expected[1]) -gt 3 -or [Math]::Abs($pixel.B - $expected[2]) -gt 3) {
             throw "$Label model pixel ${x},${y}: actual $pixel, expected RGB $expected"
         }

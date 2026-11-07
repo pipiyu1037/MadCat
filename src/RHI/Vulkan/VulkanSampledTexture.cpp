@@ -207,6 +207,10 @@ TextureBindingRef createTextureBinding(const VulkanDevice& device, TextureRef te
         static_cast<unsigned>(sampler.wrapU) > static_cast<unsigned>(SamplerDesc::Wrap::Mirror) ||
         static_cast<unsigned>(sampler.wrapV) > static_cast<unsigned>(SamplerDesc::Wrap::Mirror) ||
         static_cast<unsigned>(sampler.mips) > static_cast<unsigned>(SamplerDesc::Mips::Linear)) { return {}; }
+    // Depth formats need not support linear filtering. The initial depth viewer
+    // uses nearest sampling; reject unsupported sampler requests explicitly.
+    if (image->format != VK_FORMAT_R8G8B8A8_SRGB &&
+        (sampler.linearMag || sampler.linearMin || sampler.mips != SamplerDesc::Mips::None)) { return {}; }
     const auto getProc = detail::loadFunction<PFN_vkGetDeviceProcAddr>(device.physicalDeviceInfo().instance,"vkGetDeviceProcAddr");
     if (!getProc) { return {}; }
     auto state = std::make_shared<detail::TextureBindingState>(); state->device = device.handle(); state->texture = std::move(texture);
