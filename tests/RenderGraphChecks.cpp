@@ -1,5 +1,6 @@
 #include "Passes/ForwardPass.h"
 #include "Passes/DepthViewPass.h"
+#include "Passes/ShadowPass.h"
 #include <cstdio>
 #include <stdexcept>
 
@@ -12,9 +13,10 @@ graph::Resource texture(graph::Graph& g, uint64_t identity=1, bool valid=false)
 struct Commands : rhi::GraphicsCommands
 {
     int begins=0, ends=0, draws=0;
-    int displays=0;
-    bool beginRendering(uint32_t,uint32_t,rhi::AttachmentLoad,const std::array<float,4>&) override { ++begins; return true; }
-    bool drawIndexed(uint32_t,uint32_t,uint32_t,std::span<const uint32_t>,const rhi::IndexedDraw&) override { ++draws; return true; }
+    int displays=0, depthOnly=0;
+    bool beginRendering(uint32_t color,uint32_t depth,rhi::AttachmentLoad,const std::array<float,4>&) override
+    { ++begins; if(color==UINT32_MAX && depth!=UINT32_MAX) { ++depthOnly; } return true; }
+    bool drawIndexed(uint32_t,uint32_t,uint32_t,std::span<const uint32_t>,const rhi::IndexedDraw&,uint32_t = UINT32_MAX) override { ++draws; return true; }
     bool endRendering() override { ++ends; return true; }
     bool displayDepth(uint32_t) override { ++displays; return true; }
 };
@@ -192,6 +194,55 @@ void managedDepthContracts()
     auto snapshot=g.compile(); (void)g.createDepthTexture("bad candidate",{0,0});
     check(snapshot && snapshot->resources().size()==2 && !g.compile(),"Candidate edit changed compiled resource descriptions");
 }
+void shadowExecution()
+{
+    graph::Graph g;
+    auto color=texture(g), depth=g.import("external depth",2,graph::Kind::Depth,graph::Use::None,false);
+    auto v=g.import("vertices",3,graph::Kind::Buffer,graph::Use::HostWrite,true);
+    auto i=g.import("indices",4,graph::Kind::Buffer,graph::Use::HostWrite,true);
+    auto program=passes::buildShadowViewGraph(g,{color,depth,v,i,{},{},640,480});
+    check(bool(program),"Shadow graph failed compilation");
+    const auto slot=program->plan.resources().size()-1;
+    check(program->plan.resources()[slot].depthTexture->width==1024,"Shadow extent follows window");
+    std::vector<graph::Use> states{graph::Use::None,graph::Use::None,graph::Use::HostWrite,graph::Use::HostWrite,graph::Use::None};
+    Commands commands; std::vector<graph::Barrier> barriers;
+    const rhi::IndexedDraw draw{};
+    auto result=program->plan.record(commands,program->parameters({},std::span(&draw,1),{}),states,[&](auto b){barriers.push_back(b);return true;});
+    check(result && commands.depthOnly==1 && commands.draws==1 && commands.displays==1,"Shadow did not render without color");
+    check(std::ranges::any_of(barriers,[&](auto b){return b.resource==slot && b.before==graph::Use::Depth && b.after==graph::Use::Sampled;}),"Shadow RAW missing");
+    barriers.clear();
+    result=program->plan.record(commands,program->parameters({},{},{}),*result,[&](auto b){barriers.push_back(b);return true;});
+    check(result && commands.draws==1 && commands.depthOnly==2,"Empty shadow skipped depth clear");
+    check(std::ranges::any_of(barriers,[&](auto b){return b.resource==slot && b.before==graph::Use::Sampled && b.after==graph::Use::Depth;}),"Shadow WAR missing");
+    graph::PassContext context({},commands);
+    check(!context.beginRendering({},{},rhi::AttachmentLoad::Clear,{}),"Attachment-less rendering accepted");
+}
+
+void shadowForwardExecution()
+{
+    graph::Graph g;
+    auto c=texture(g), d=g.import("depth",2,graph::Kind::Depth,graph::Use::None,false);
+    auto v=g.import("vertices",3,graph::Kind::Buffer,graph::Use::HostWrite,true);
+    auto i=g.import("indices",4,graph::Kind::Buffer,graph::Use::HostWrite,true);
+    auto u=g.import("frame",5,graph::Kind::Buffer,graph::Use::HostWrite,true);
+    auto program=passes::buildShadowedForwardGraph(g,{c,d,v,i,u,{},640,480});
+    check(bool(program),"Shadow/Forward graph failed");
+    rhi::IndexedDraw draw; draw.indexCount=3;
+    const std::vector<rhi::IndexedDraw> camera{draw}, shadow{draw,draw};
+    auto parameters=program->parameters({},camera,shadow);
+    check(std::any_cast<passes::ShadowPass::Parameters>(parameters[0]).draws.size()==2 &&
+        std::any_cast<passes::ForwardPass::Parameters>(parameters[2]).draws.size()==1,"Shadow/camera lists mixed");
+    std::vector<graph::Use> states{graph::Use::None,graph::Use::None,graph::Use::HostWrite,graph::Use::HostWrite,graph::Use::HostWrite,graph::Use::None};
+    Commands commands; std::vector<graph::Barrier> barriers;
+    auto result=program->plan.record(commands,parameters,states,[&](auto b){barriers.push_back(b);return true;});
+    check(result && commands.draws==3 && commands.depthOnly==1,"Shadow/Forward recording failed");
+    const auto slot=static_cast<uint32_t>(states.size()-1);
+    check(std::ranges::any_of(barriers,[&](auto b){return b.resource==slot && b.before==graph::Use::Depth && b.after==graph::Use::Sampled;}),"Shadow/Forward RAW absent");
+    graph::PassContext context(program->plan.nodes()[2].accesses,commands);
+    check(!context.require(program->plan.nodes()[0].accesses.back().resource,graph::Use::Depth),"Forward can write Shadow attachment");
+    check(!context.require(g.import("foreign",6,graph::Kind::Depth,graph::Use::Sampled,true),graph::Use::Sampled),"Undeclared shadow sampling accepted");
+}
+
 void managedDepthExecution()
 {
     graph::Graph g;
@@ -204,7 +255,7 @@ void managedDepthExecution()
     check(program->plan.resources().back().depthTexture->width==64,"Lost managed texture description");
     const auto slot=program->plan.resources().size()-1;
     const rhi::IndexedDraw draw{};
-    auto parameters=program->parameters({},std::span(&draw,1));
+    auto parameters=program->parameters({},std::span(&draw,1),{});
     std::vector<graph::Use> states{graph::Use::None,graph::Use::None,graph::Use::HostWrite,graph::Use::HostWrite,graph::Use::None};
     Commands commands; std::vector<graph::Barrier> barriers;
     auto result=program->plan.record(commands,parameters,states,[&](auto b){barriers.push_back(b); return true;});
@@ -220,6 +271,6 @@ void managedDepthExecution()
 }
 int main()
 {
-    try { versionsAndOrdering(); diagnostics(); duplicateIdentity(); executionAndFailure(); accessAndSnapshots(); forwardSynchronization(); parameterIsolation(); managedDepthContracts(); managedDepthExecution(); std::puts("Render Graph checks: 9 groups passed."); return 0; }
+    try { versionsAndOrdering(); diagnostics(); duplicateIdentity(); executionAndFailure(); accessAndSnapshots(); forwardSynchronization(); parameterIsolation(); managedDepthContracts(); managedDepthExecution(); shadowExecution(); shadowForwardExecution(); std::puts("Render Graph checks: 11 groups passed."); return 0; }
     catch(const std::exception& error) { std::fprintf(stderr,"Render Graph checks failed: %s\n",error.what()); return 1; }
 }

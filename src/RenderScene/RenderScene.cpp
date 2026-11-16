@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <string_view>
+#include <glm/ext/matrix_transform.hpp>
 
 namespace madcat::render
 {
@@ -48,18 +49,59 @@ std::expected<rhi::FrameLighting, std::string> extractLighting(const scene::Scen
 std::expected<std::vector<MeshDraw>, std::string> extractDraws(
     const scene::Scene& scene, const assets::ModelAssets& assets, ecs::Entity camera, float aspect)
 {
+    const auto view = scene::buildCameraMatrices(scene, camera, aspect);
+    if (!view) { return std::unexpected("RenderScene camera is invalid"); }
+    return extractDraws(scene, assets, view->viewProjection);
+}
+
+std::expected<glm::mat4, std::string> buildDirectionalShadowMatrix(
+    const rhi::FrameLighting& lighting, const DirectionalShadowView& settings)
+{
+    if (!lighting.valid() || !std::isfinite(settings.distance) || settings.distance <= 0 ||
+        !std::isfinite(settings.nearPlane) || !std::isfinite(settings.farPlane) ||
+        settings.nearPlane <= 0 || settings.farPlane <= settings.nearPlane)
+    { return std::unexpected("Invalid directional shadow light or depth range"); }
+    for (int i=0; i<3; ++i) { if (!std::isfinite(settings.center[i])) { return std::unexpected("Invalid shadow center"); } }
+    for (int i=0; i<2; ++i) { if (!std::isfinite(settings.halfExtent[i]) || settings.halfExtent[i]<=0) { return std::unexpected("Invalid shadow extent"); } }
+    const auto direction = glm::normalize(glm::dvec3(lighting.toLight[0],lighting.toLight[1],lighting.toLight[2]));
+    const glm::dvec3 center(settings.center);
+    // Avoid a degenerate basis for vertical lights; use direction only so a
+    // distant center cannot erase the eye-target delta through cancellation.
+    const auto up = std::abs(direction.y) < .99 ? glm::dvec3(0,1,0) : glm::dvec3(0,0,1);
+    auto view = glm::lookAtRH(glm::dvec3(0), -direction, up);
+    view = glm::translate(view, -(center + direction * double(settings.distance)));
+    glm::dmat4 projection(1);
+    projection[0][0] = 1.0/settings.halfExtent.x;
+    projection[1][1] = -1.0/settings.halfExtent.y;
+    projection[2][2] = 1.0/(double(settings.nearPlane)-settings.farPlane);
+    projection[3][2] = double(settings.nearPlane)/(double(settings.nearPlane)-settings.farPlane);
+    const auto matrix = projection * view;
+    glm::mat4 result(0);
+    for (int c=0; c<4; ++c) { for (int r=0; r<4; ++r) {
+        if (!std::isfinite(matrix[c][r]) || std::abs(matrix[c][r])>std::numeric_limits<float>::max())
+        { return std::unexpected("Shadow matrix exceeds finite float range"); }
+        result[c][r] = static_cast<float>(matrix[c][r]);
+    } }
+    if (glm::determinant(glm::dmat4(result))==0) { return std::unexpected("Shadow matrix collapsed after narrowing"); }
+    return result;
+}
+
+std::expected<std::vector<MeshDraw>, std::string> extractDraws(
+    const scene::Scene& scene, const assets::ModelAssets& assets, const glm::mat4& clipFromWorld)
+{
     try
     {
         require(!scene.isIterating() && scene.worldTransformsCurrent(), "RenderScene requires updated worlds outside queries");
-        const auto view = scene::buildCameraMatrices(scene, camera, aspect);
-        require(view.has_value(), "RenderScene camera is invalid");
+        for (int c=0; c<4; ++c) { for (int r=0; r<4; ++r) {
+            require(std::isfinite(clipFromWorld[c][r]), "RenderScene clip matrix is nonfinite");
+        } }
         std::vector<MeshDraw> result;
         scene.each<scene::MeshInstance>([&](ecs::Entity entity, const auto& instance) {
             const auto* model = assets.find(instance.model);
             require(model && instance.meshIndex < model->meshes.size(), "RenderScene has an invalid asset or Mesh reference");
             const auto* world = scene.worldTransform(entity);
             require(world != nullptr, "RenderScene world matrix is unavailable");
-            const auto matrix = glm::dmat4(view->viewProjection) * glm::dmat4(*world);
+            const auto matrix = glm::dmat4(clipFromWorld) * glm::dmat4(*world);
             rhi::DrawTransform transform{};
             transform.normalFromLocal.fill(0);
             transform.attributes = 0;

@@ -38,7 +38,7 @@ inline std::expected<graph::GraphicsGraph,std::string> buildDepthViewGraph(graph
     auto plan = graph.compile();
     if (!plan) { return std::unexpected(plan.error()); }
     auto parameters = [clearNode=clear.node, forwardNode, displayNode=display.node, presentNode=present.node,
-        count=plan->nodes().size()](const std::array<float,4>& color, std::span<const rhi::IndexedDraw> draws) {
+        count=plan->nodes().size()](const std::array<float,4>& color, std::span<const rhi::IndexedDraw> draws, std::span<const rhi::IndexedDraw>) {
         std::vector<std::any> values(count);
         values[clearNode] = ClearPass::Parameters{color};
         if (forwardNode != UINT32_MAX) { values[forwardNode] = ForwardPass::Parameters{{draws.begin(),draws.end()}}; }

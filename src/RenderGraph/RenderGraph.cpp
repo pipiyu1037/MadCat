@@ -25,7 +25,8 @@ bool PassContext::require(Resource resource, Use use)
 bool PassContext::beginRendering(Resource color, Resource depth, rhi::AttachmentLoad load, const std::array<float,4>& clearColor)
 {
     if (rendering_) { error_ = "nested rendering is unsupported"; return false; }
-    if (!require(color, Use::Color) || (depth.graph && !require(depth, Use::Depth))) { return false; }
+    if (!color.graph && !depth.graph) { error_ = "rendering requires an attachment"; return false; }
+    if ((color.graph && !require(color, Use::Color)) || (depth.graph && !require(depth, Use::Depth))) { return false; }
     for (const auto resource : {color, depth})
     {
         if (!resource.graph) { continue; }
@@ -37,7 +38,7 @@ bool PassContext::beginRendering(Resource color, Resource depth, rhi::Attachment
     if (!rendering_) { error_ = "RHI beginRendering failed"; }
     return rendering_;
 }
-bool PassContext::drawIndexed(Resource vertices, Resource indices, Resource lighting, std::span<const Resource> textures, const rhi::IndexedDraw& draw)
+bool PassContext::drawIndexed(Resource vertices, Resource indices, Resource lighting, std::span<const Resource> textures, const rhi::IndexedDraw& draw, Resource shadow)
 {
     if (!rendering_) { error_ = "Draw outside rendering"; return false; }
     if (!require(vertices, Use::Vertex) || !require(indices, Use::Index)) { return false; }
@@ -48,7 +49,8 @@ bool PassContext::drawIndexed(Resource vertices, Resource indices, Resource ligh
         if (!require(texture, Use::Sampled)) { return false; }
         slots.push_back(texture.index);
     }
-    const bool result = commands_.drawIndexed(vertices.index, indices.index, lighting.index, slots, draw);
+    if (shadow.graph && !require(shadow, Use::Sampled)) { return false; }
+    const bool result = commands_.drawIndexed(vertices.index, indices.index, lighting.index, slots, draw, shadow.index);
     if (!result) { error_ = "RHI DrawIndexed failed"; }
     return result;
 }

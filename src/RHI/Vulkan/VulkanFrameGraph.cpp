@@ -28,7 +28,7 @@ Scope scope(graph::Use use)
     if (graph::includes(use,HostWrite)) { result.stage|=VK_PIPELINE_STAGE_2_HOST_BIT; result.access|=VK_ACCESS_2_HOST_WRITE_BIT; }
     if (graph::includes(use,Vertex)) { result.stage|=VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT; result.access|=VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT; }
     if (graph::includes(use,Index)) { result.stage|=VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT; result.access|=VK_ACCESS_2_INDEX_READ_BIT; }
-    if (graph::includes(use,Uniform)) { result.stage|=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT; result.access|=VK_ACCESS_2_UNIFORM_READ_BIT; }
+    if (graph::includes(use,Uniform)) { result.stage|=VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT; result.access|=VK_ACCESS_2_UNIFORM_READ_BIT; }
     if (graph::includes(use,Sampled)) { result.stage|=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT; result.access|=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT; result.layout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; }
     if (graph::includes(use,Color)) { result.stage|=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT; result.access|=VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT; result.layout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; }
     if (graph::includes(use,Depth)) { result.stage|=VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT; result.access|=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT; result.layout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL; }
@@ -49,8 +49,12 @@ struct VulkanFrameGraph::State : GraphicsCommands
     std::vector<uint32_t> materialTextures;
     TextureRef depth;
     const VulkanTrianglePipeline* pipeline=nullptr;
+    const VulkanTrianglePipeline* shadow=nullptr;
     const VulkanDepthViewPipeline* depthView=nullptr;
     uint32_t activeDepth=UINT32_MAX;
+    bool depthOnly=false;
+    bool shadowsEnabled=false;
+    VkExtent2D renderExtent{};
     const VulkanFrameLighting* lighting=nullptr;
     VkImageView colorView=VK_NULL_HANDLE;
     VkExtent2D extent{};
@@ -93,8 +97,9 @@ struct VulkanFrameGraph::State : GraphicsCommands
     }
     bool beginRendering(uint32_t color, uint32_t depthIndex, AttachmentLoad load, const std::array<float,4>& clearColor) override
     {
-        if (color!=colorSlot || (depthIndex!=UINT32_MAX &&
+        if ((color!=colorSlot && color!=UINT32_MAX) || (depthIndex!=UINT32_MAX &&
             (depthIndex>=native.size() || native[depthIndex].aspect!=VK_IMAGE_ASPECT_DEPTH_BIT))) { return false; }
+        depthOnly=color==UINT32_MAX;
         activeDepth=depthIndex;
         VkRenderingAttachmentInfo attachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         attachment.imageView=colorView; attachment.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -103,26 +108,40 @@ struct VulkanFrameGraph::State : GraphicsCommands
         std::ranges::copy(clearColor,attachment.clearValue.color.float32);
         VkRenderingAttachmentInfo depthAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         const auto depthTarget=depthIndex==depthSlot ? depth : depthIndex==UINT32_MAX ? TextureRef{} : native[depthIndex].ownedDepth;
+        renderExtent=depthOnly ? VkExtent2D{depthTarget.width(),depthTarget.height()} : extent;
+        const auto* geometryPipeline=depthOnly ? shadow : pipeline;
+        if ((depthOnly && (!depthTarget || !shadow)) || (depthTarget &&
+            (depthTarget.width()!=renderExtent.width || depthTarget.height()!=renderExtent.height ||
+            (geometryPipeline && TextureAccess::format(depthTarget)!=geometryPipeline->depthFormat())))) { return false; }
         depthAttachment.imageView=TextureAccess::view(depthTarget); depthAttachment.imageLayout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         depthAttachment.loadOp=attachment.loadOp; depthAttachment.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
         depthAttachment.clearValue.depthStencil={1,0};
         VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
-        rendering.renderArea.extent=extent; rendering.layerCount=1; rendering.colorAttachmentCount=1;
-        rendering.pColorAttachments=&attachment; rendering.pDepthAttachment=depthIndex==UINT32_MAX ? nullptr : &depthAttachment;
+        rendering.renderArea.extent=renderExtent; rendering.layerCount=1; rendering.colorAttachmentCount=depthOnly ? 0 : 1;
+        rendering.pColorAttachments=depthOnly ? nullptr : &attachment; rendering.pDepthAttachment=depthIndex==UINT32_MAX ? nullptr : &depthAttachment;
         begin(command,&rendering); return true;
     }
     bool drawIndexed(uint32_t vertices, uint32_t indices, uint32_t uniform,
-        std::span<const uint32_t> textures, const IndexedDraw& draw) override
+        std::span<const uint32_t> textures, const IndexedDraw& draw, uint32_t shadowSlot) override
     {
-        if (!pipeline || activeDepth==UINT32_MAX || vertices!=vertexSlot || indices!=indexSlot || uniform!=lightingSlot) { return false; }
+        const auto* selected=depthOnly ? shadow : pipeline;
+        if (!selected || activeDepth==UINT32_MAX || vertices!=vertexSlot || indices!=indexSlot ||
+            uniform!=(depthOnly ? UINT32_MAX : lightingSlot)) { return false; }
         if (!materialTextures.empty() && (draw.material>=materialTextures.size() ||
             std::ranges::find(textures,materialTextures[draw.material])==textures.end())) { return false; }
-        return pipeline->recordIndexedDraw(command,extent,draw,lighting->set());
+        TextureBindingRef binding;
+        if (shadowSlot!=UINT32_MAX)
+        {
+            if (depthOnly || shadowSlot>=native.size() || native[shadowSlot].aspect!=VK_IMAGE_ASPECT_DEPTH_BIT || !native[shadowSlot].sampled) { return false; }
+            binding=native[shadowSlot].sampled;
+        }
+        if (!depthOnly && shadowsEnabled && !binding) { return false; }
+        return selected->recordIndexedDraw(command,renderExtent,draw,depthOnly ? VK_NULL_HANDLE : lighting->set(),binding);
     }
     bool endRendering() override { end(command); return true; }
     bool displayDepth(uint32_t slot) override
     {
-        return depthView && activeDepth==UINT32_MAX && slot<native.size() && native[slot].sampled &&
+        return depthView && !depthOnly && activeDepth==UINT32_MAX && slot<native.size() && native[slot].sampled &&
             depthView->record(command,extent,native[slot].sampled);
     }
 };
@@ -130,11 +149,19 @@ VulkanFrameGraph::VulkanFrameGraph()=default;
 VulkanFrameGraph::~VulkanFrameGraph()=default;
 bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkImageView view, VkExtent2D extent,
     TextureRef depth, const VulkanTrianglePipeline* pipeline, const VulkanFrameLighting& lighting,
-    const graph::GraphicsGraphFactory& factory, const VulkanDepthViewPipeline* depthView)
+    const graph::GraphicsGraphFactory& factory, const VulkanDepthViewPipeline* depthView, const VulkanTrianglePipeline* shadow)
 {
     if (state_ || !device.handle() || !image || !view || !depth || !factory) { return false; }
     if (depthView && (depthView->deviceHandle()!=device.handle() ||
         (pipeline && depthView->colorFormat()!=pipeline->colorFormat()))) { return false; }
+    if (shadow && (!pipeline || !shadow->handle() || shadow->deviceHandle()!=device.handle() ||
+        shadow->colorFormat()!=VK_FORMAT_UNDEFINED || shadow->depthFormat()!=pipeline->depthFormat() ||
+        BufferAccess::handle(shadow->vertexBuffer())!=BufferAccess::handle(pipeline->vertexBuffer()) ||
+        BufferAccess::handle(shadow->indexBuffer())!=BufferAccess::handle(pipeline->indexBuffer()) ||
+        shadow->materialBindings().size()!=pipeline->materialBindings().size())) { return false; }
+    if (shadow) { for (size_t i=0; i<shadow->materialBindings().size(); ++i) {
+        if (TextureBindingAccess::set(shadow->materialBindings()[i])!=TextureBindingAccess::set(pipeline->materialBindings()[i])) { return false; }
+    } }
     auto state=std::make_unique<State>();
     const auto getProc=loadFunction<PFN_vkGetDeviceProcAddr>(device.physicalDeviceInfo().instance,"vkGetDeviceProcAddr");
     if (!getProc) { return false; }
@@ -143,7 +170,7 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
     state->end=reinterpret_cast<PFN_vkCmdEndRendering>(getProc(device.handle(),"vkCmdEndRendering"));
     if (!state->barrier || !state->begin || !state->end) { return false; }
     state->depth=std::move(depth); state->pipeline=pipeline; state->lighting=&lighting; state->extent=extent; state->colorView=view;
-    state->depthView=depthView;
+    state->depthView=depthView; state->shadow=shadow;
     graph::Graph graph;
     const auto import=[&](std::string name, uint64_t id, graph::Kind kind, graph::Use use, bool valid, State::Native native) {
         auto resource=graph.import(std::move(name),id,kind,use,valid);
@@ -186,9 +213,6 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
         const auto& resource=program->plan.resources()[slot];
         if (!resource.depthTexture) { std::fprintf(stderr,"Render Graph error: unsupported managed resource.\n"); return false; }
         const auto desc=*resource.depthTexture;
-        // The fixed forward pipeline requires the same attachment extent/format.
-        if (desc.width!=extent.width || desc.height!=extent.height)
-        { std::fprintf(stderr,"Render Graph error: managed depth must match the current output extent.\n"); return false; }
         auto texture=createDepthTexture(device,desc.width,desc.height,desc.sampled);
         if (!texture) { return false; }
         if (pipeline && TextureAccess::format(texture)!=pipeline->depthFormat())
@@ -232,17 +256,18 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
     state_=std::move(state); return true;
 }
 bool VulkanFrameGraph::record(VkCommandBuffer command, const std::array<float,4>& color,
-    std::span<const IndexedDraw> draws, bool presented, bool depthInitialized)
+    std::span<const IndexedDraw> draws, bool presented, bool depthInitialized,
+    std::span<const IndexedDraw> shadowDraws, bool shadowsEnabled)
 {
     if (!state_ || !command) { return false; }
-    auto& state=*state_; state.command=command;
+    auto& state=*state_; state.command=command; state.shadowsEnabled=shadowsEnabled;
     state.pending.clear();
     auto initial=state.initial;
     initial[state.colorSlot]=presented ? graph::Use::Present : graph::Use::None;
     initial[state.depthSlot]=depthInitialized ? graph::Use::Depth : graph::Use::None;
     if (state.vertexSlot!=UINT32_MAX && (depthInitialized || state.geometrySubmitted))
     { initial[state.vertexSlot]=graph::Use::Vertex; initial[state.indexSlot]=graph::Use::Index; }
-    const auto parameters=state.program.parameters(color,draws);
+    const auto parameters=state.program.parameters(color,draws,shadowDraws);
     const auto result=state.program.plan.record(state,parameters,initial,[&](const auto& barrier){ return state.transition(barrier); });
     if (!result) { std::fprintf(stderr,"Render Graph error: %s\n",result.error().c_str()); return false; }
     if ((*result)[state.colorSlot]!=graph::Use::Present ||

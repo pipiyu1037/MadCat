@@ -324,7 +324,16 @@ add_custom_target(MadCatShaders
         "-DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/depth-view.slang"
         "-DOUTPUT_ROOT=${CMAKE_CURRENT_BINARY_DIR}/shaders"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CompileShaders.cmake"
+    COMMAND "${CMAKE_COMMAND}" ${MADCAT_SHADER_TOOLS}
+        -DSHADER_PACKAGE=shadow
+        "-DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/shadow.slang"
+        "-DOUTPUT_ROOT=${CMAKE_CURRENT_BINARY_DIR}/shaders"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CompileShaders.cmake"
     BYPRODUCTS
+        "${CMAKE_CURRENT_BINARY_DIR}/shaders/shadow/vertex.spv"
+        "${CMAKE_CURRENT_BINARY_DIR}/shaders/shadow/fragment.spv"
+        "${CMAKE_CURRENT_BINARY_DIR}/shaders/shadow/manifest.txt"
+        "${CMAKE_CURRENT_BINARY_DIR}/shaders/shadow/shadow.slang"
         "${CMAKE_CURRENT_BINARY_DIR}/shaders/triangle/vertex.spv"
         "${CMAKE_CURRENT_BINARY_DIR}/shaders/triangle/fragment.spv"
         "${CMAKE_CURRENT_BINARY_DIR}/shaders/triangle/manifest.txt"
@@ -333,7 +342,7 @@ add_custom_target(MadCatShaders
         "${CMAKE_CURRENT_BINARY_DIR}/shaders/depth-view/fragment.spv"
         "${CMAKE_CURRENT_BINARY_DIR}/shaders/depth-view/manifest.txt"
         "${CMAKE_CURRENT_BINARY_DIR}/shaders/depth-view/depth-view.slang"
-    SOURCES shaders/triangle.slang shaders/depth-view.slang cmake/CompileShaders.cmake
+    SOURCES shaders/triangle.slang shaders/depth-view.slang shaders/shadow.slang cmake/CompileShaders.cmake
     COMMENT "Compiling and validating Slang shaders (manual target)"
     VERBATIM
 )
@@ -348,6 +357,13 @@ add_custom_target(MadCatShaderChecks
         "-DOUTPUT_ROOT=${CMAKE_CURRENT_BINARY_DIR}/shaders"
         "-DCOMPILE_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/cmake/CompileShaders.cmake"
         "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/verification/depth-view-build"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ShaderBuildChecks.cmake"
+    COMMAND "${CMAKE_COMMAND}" ${MADCAT_SHADER_TOOLS}
+        -DSHADER_PACKAGE=shadow
+        "-DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/shadow.slang"
+        "-DOUTPUT_ROOT=${CMAKE_CURRENT_BINARY_DIR}/shaders"
+        "-DCOMPILE_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/cmake/CompileShaders.cmake"
+        "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/verification/shadow-build"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ShaderBuildChecks.cmake"
     COMMENT "Checking shader compilation and failure recovery"
     VERBATIM

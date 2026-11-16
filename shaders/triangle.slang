@@ -16,8 +16,12 @@ struct FrameLighting
 {
     float4 toLight;
     float4 irradiance;
+    column_major float4x4 shadowFromClip;
+    float4 shadow;
 };
 [[vk::binding(0, 1)]] ConstantBuffer<FrameLighting> frameLighting;
+[[vk::binding(0, 2)]] Texture2D<float> shadowTexture;
+[[vk::binding(1, 2)]] SamplerState shadowSampler;
 
 struct VertexOutput
 {
@@ -29,6 +33,7 @@ struct VertexOutput
     nointerpolation uint attributes : TEXCOORD3;
     nointerpolation float4 factor : COLOR1;
     nointerpolation float cutoff : TEXCOORD4;
+    float4 shadowClip : TEXCOORD5;
 };
 
 [shader("vertex")]
@@ -36,6 +41,7 @@ VertexOutput vertexMain(float3 position : POSITION, float3 color : COLOR0, float
 {
     VertexOutput output;
     output.position = mul(drawTransform.clipFromLocal, float4(position, 1.0));
+    output.shadowClip = mul(frameLighting.shadowFromClip, output.position);
     output.color = color;
     output.worldNormal = drawTransform.normalColumn0.xyz * normal.x + drawTransform.normalColumn1.xyz * normal.y + drawTransform.normalColumn2.xyz * normal.z;
     output.uv = uv;
@@ -44,6 +50,28 @@ VertexOutput vertexMain(float3 position : POSITION, float3 color : COLOR0, float
     output.factor = float4(drawTransform.normalColumn0.w, drawTransform.normalColumn1.w, drawTransform.normalColumn2.w, drawTransform.baseColorAlpha);
     output.cutoff = drawTransform.alphaCutoff;
     return output;
+}
+
+float shadowVisibility(float4 shadowClip, float cosine)
+{
+    if (frameLighting.shadow.z == 0 || !all(isfinite(shadowClip)) || abs(shadowClip.w) < 1e-8) return 1;
+    float3 p = shadowClip.xyz / shadowClip.w;
+    float2 uv = p.xy * 0.5 + 0.5;
+    if (any(uv < 0) || any(uv > 1) || p.z < 0 || p.z > 1) return 1;
+    float bias = frameLighting.shadow.x + frameLighting.shadow.y * (1 - saturate(cosine));
+    uint width, height;
+    shadowTexture.GetDimensions(width, height);
+    int radius = int(frameLighting.shadow.w);
+    float visible = 0;
+    for (int y = -radius; y <= radius; ++y)
+    for (int x = -radius; x <= radius; ++x)
+    {
+        float2 tap = uv + float2(x, y) / float2(width, height);
+        // Taps outside the fixed coverage are unoccluded, not clamped shadows.
+        if (any(tap < 0) || any(tap > 1)) visible += 1;
+        else visible += p.z - bias <= shadowTexture.SampleLevel(shadowSampler, tap, 0) ? 1 : 0;
+    }
+    return visible / ((2 * radius + 1) * (2 * radius + 1));
 }
 
 [shader("fragment")]
@@ -68,7 +96,8 @@ float4 fragmentMain(VertexOutput input, bool frontFace : SV_IsFrontFace) : SV_Ta
             // Mirroring changes winding. Flip only the effective back face of
             // a double-sided surface, after inverse-transpose normal transport.
             if (frontFace == mirrored) normal = -normal;
-            color.rgb *= (frameLighting.irradiance.xyz / 3.141592653589793) * max(dot(normal, frameLighting.toLight.xyz), 0.0);
+            float cosine = max(dot(normal, frameLighting.toLight.xyz), 0.0);
+            color.rgb *= (frameLighting.irradiance.xyz / 3.141592653589793) * cosine * shadowVisibility(input.shadowClip, cosine);
         }
         return float4(color.rgb, 1);
     }

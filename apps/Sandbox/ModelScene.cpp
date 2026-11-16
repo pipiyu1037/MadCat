@@ -129,9 +129,34 @@ bool ModelScene::selectLighting(int preset)
     return true;
 }
 
-std::expected<rhi::FrameLighting, std::string> ModelScene::lighting()
+std::expected<std::vector<render::MeshDraw>, std::string> ModelScene::shadowDraws()
+{
+    const auto light = lighting();
+    if (!light) { return std::unexpected(light.error()); }
+    const auto matrix = render::buildDirectionalShadowMatrix(*light);
+    if (!matrix) { return std::unexpected(matrix.error()); }
+    auto result = render::extractDraws(scene_, assets_, *matrix);
+    if (result && pose_ == 6) { std::ranges::reverse(*result); }
+    return result;
+}
+
+std::expected<rhi::FrameLighting, std::string> ModelScene::lighting(float aspect, int shadowMode)
 {
     if (!scene_.worldTransformsCurrent() && !scene_.updateWorldTransforms()) { return std::unexpected("Light world update failed"); }
-    return render::extractLighting(scene_);
+    auto result=render::extractLighting(scene_);
+    if (!result || aspect==0) { return result; }
+    if (shadowMode<0 || shadowMode>2) { return std::unexpected("Invalid shadow mode"); }
+    const auto lightMatrix=render::buildDirectionalShadowMatrix(*result);
+    const auto camera=scene::buildCameraMatrices(scene_,camera_,aspect);
+    if (!lightMatrix || !camera) { return std::unexpected("Shadow camera/light matrix extraction failed"); }
+    const auto matrix=glm::dmat4(*lightMatrix)*glm::inverse(glm::dmat4(camera->viewProjection));
+    for (int c=0;c<4;++c) { for (int r=0;r<4;++r) {
+        if (!std::isfinite(matrix[c][r]) || std::abs(matrix[c][r])>std::numeric_limits<float>::max())
+        { return std::unexpected("Shadow clip matrix exceeds float range"); }
+        result->shadowFromClip[c*4+r]=static_cast<float>(matrix[c][r]);
+    } }
+    result->shadow[2]=shadowMode==0 ? 0.f : 1.f;
+    result->shadow[3]=shadowMode==2 ? 1.f : 0.f;
+    return result;
 }
 }

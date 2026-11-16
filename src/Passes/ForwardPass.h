@@ -29,6 +29,7 @@ struct ForwardPass
         Targets targets;
         graph::Resource vertices, indices, lighting;
         std::vector<graph::Resource> textures;
+        graph::Resource shadow;
     };
     using Outputs = Targets;
     struct Declared { Inputs inputs; Outputs outputs; };
@@ -40,6 +41,7 @@ struct ForwardPass
         builder.read(input.indices, graph::Use::Index);
         if (input.lighting.graph) { builder.read(input.lighting, graph::Use::Uniform); }
         for (const auto& texture : input.textures) { builder.read(texture, graph::Use::Sampled); }
+        if (input.shadow.graph) { builder.read(input.shadow, graph::Use::Sampled); }
         return {input, {builder.write(input.targets.color, graph::Use::Color, graph::Write::Preserve),
             builder.write(input.targets.depth, graph::Use::Depth, graph::Write::Preserve)}};
     }
@@ -48,7 +50,7 @@ struct ForwardPass
         if (!context.beginRendering(declared.outputs.color, declared.outputs.depth, rhi::AttachmentLoad::Load, {})) { return false; }
         for (const auto& draw : parameters.draws)
         {
-            if (!context.drawIndexed(declared.inputs.vertices, declared.inputs.indices, declared.inputs.lighting, declared.inputs.textures, draw)) { return false; }
+            if (!context.drawIndexed(declared.inputs.vertices, declared.inputs.indices, declared.inputs.lighting, declared.inputs.textures, draw, declared.inputs.shadow)) { return false; }
         }
         return context.endRendering();
     }
@@ -83,7 +85,7 @@ inline std::expected<graph::GraphicsGraph,std::string> buildForwardGraph(graph::
     auto plan=graph.compile();
     if (!plan) { return std::unexpected(plan.error()); }
     const auto count=plan->nodes().size();
-    auto parameters=[clearNode=clear.node,forwardNode,presentNode=present.node,count](const std::array<float,4>& color,std::span<const rhi::IndexedDraw> draws) {
+    auto parameters=[clearNode=clear.node,forwardNode,presentNode=present.node,count](const std::array<float,4>& color,std::span<const rhi::IndexedDraw> draws,std::span<const rhi::IndexedDraw>) {
         std::vector<std::any> values(count);
         values[clearNode]=ClearPass::Parameters{color};
         if (forwardNode!=UINT32_MAX) { values[forwardNode]=ForwardPass::Parameters{{draws.begin(),draws.end()}}; }

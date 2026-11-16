@@ -141,7 +141,8 @@ struct VulkanClearRenderer::State
         }
     }
 
-    bool record(uint32_t imageIndex, const std::array<float, 4>& color, std::span<const IndexedDraw> draws)
+    bool record(uint32_t imageIndex, const std::array<float, 4>& color, std::span<const IndexedDraw> draws,
+        std::span<const IndexedDraw> shadowDraws, bool shadowsEnabled)
     {
         if (!detail::checkResult(resetCommandPool(device, commandPool, 0), "vkResetCommandPool")) { return false; }
         VkCommandBufferBeginInfo begin{};
@@ -150,7 +151,7 @@ struct VulkanClearRenderer::State
         if (!detail::checkResult(beginCommandBuffer(commandBuffer, &begin), "vkBeginCommandBuffer")) { return false; }
 
         const auto& image = images[imageIndex];
-        if (!image.graph->record(commandBuffer, color, draws, image.presented, depthInitialized)) { return false; }
+        if (!image.graph->record(commandBuffer, color, draws, image.presented, depthInitialized, shadowDraws, shadowsEnabled)) { return false; }
         return detail::checkResult(endCommandBuffer(commandBuffer), "vkEndCommandBuffer");
     }
 };
@@ -168,7 +169,8 @@ VulkanClearRenderer::~VulkanClearRenderer()
 }
 
 bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwapchain& swapchain, TextureRef depth,
-    const graph::GraphicsGraphFactory& graphFactory, const VulkanTrianglePipeline* triangle, const VulkanDepthViewPipeline* depthView)
+    const graph::GraphicsGraphFactory& graphFactory, const VulkanTrianglePipeline* triangle, const VulkanDepthViewPipeline* depthView,
+    const VulkanTrianglePipeline* shadow)
 {
     if (state_)
     {
@@ -228,7 +230,7 @@ bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwa
         if (!detail::checkResult(created->createImageView(created->device, &view, nullptr, &imageView), "vkCreateImageView")) { return false; }
         image.view = imageView;
         image.graph = std::make_unique<detail::VulkanFrameGraph>();
-        if (!image.graph->initialize(device, image.handle, image.view, created->extent, created->depth, triangle, created->lighting, graphFactory, depthView)) { return false; }
+        if (!image.graph->initialize(device, image.handle, image.view, created->extent, created->depth, triangle, created->lighting, graphFactory, depthView, shadow)) { return false; }
     }
     VkCommandPoolCreateInfo pool{};
     pool.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -282,12 +284,13 @@ ClearFrameResult VulkanClearRenderer::draw(const std::array<float, 4>& color, st
     return drawIndexed(color, draws);
 }
 
-ClearFrameResult VulkanClearRenderer::drawIndexed(const std::array<float, 4>& color, std::span<const IndexedDraw> draws, const FrameLighting& lighting)
+ClearFrameResult VulkanClearRenderer::drawIndexed(const std::array<float, 4>& color, std::span<const IndexedDraw> draws, const FrameLighting& lighting,
+    std::span<const IndexedDraw> shadowDraws)
 {
     if (!state_ || !lighting.valid()) { return ClearFrameResult::Failed; }
     auto& frame = *state_;
-    if (!frame.triangle && !draws.empty()) { return ClearFrameResult::Failed; }
-    for (const auto& draw : draws)
+    if (!frame.triangle && (!draws.empty() || !shadowDraws.empty())) { return ClearFrameResult::Failed; }
+    for (const auto list : {draws,shadowDraws}) { for (const auto& draw : list)
     {
         if (draw.indexCount == 0 || draw.indexCount % 3 != 0 || draw.firstIndex > frame.triangle->indexCount() ||
             draw.indexCount > frame.triangle->indexCount() - draw.firstIndex ||
@@ -296,6 +299,7 @@ ClearFrameResult VulkanClearRenderer::drawIndexed(const std::array<float, 4>& co
             std::fprintf(stderr, "Vulkan error: invalid indexed Draw snapshot before acquisition.\n");
             return ClearFrameResult::Failed;
         }
+    }
     }
     if (frame.status != ClearFrameResult::Presented) { return frame.status; }
     frame.status = ClearFrameResult::Failed;
@@ -330,7 +334,7 @@ ClearFrameResult VulkanClearRenderer::drawIndexed(const std::array<float, 4>& co
         std::fprintf(stderr, "Vulkan error: acquired image index is outside the Swapchain image array.\n");
         return frame.status;
     }
-    if (!frame.record(imageIndex, color, draws) ||
+    if (!frame.record(imageIndex, color, draws, shadowDraws, lighting.shadow[2]!=0) ||
         !detail::checkResult(frame.resetFences(frame.device, 1, &frame.submitFence), "vkResetFences(submit)")) { return frame.status; }
     VkSemaphoreSubmitInfo wait{};
     wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;

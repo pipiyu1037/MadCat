@@ -39,7 +39,7 @@ public:
     [[nodiscard]] bool beginRendering(Resource color, Resource depth, rhi::AttachmentLoad load,
         const std::array<float, 4>& clearColor);
     [[nodiscard]] bool drawIndexed(Resource vertices, Resource indices, Resource lighting,
-        std::span<const Resource> textures, const rhi::IndexedDraw& draw);
+        std::span<const Resource> textures, const rhi::IndexedDraw& draw, Resource shadow = {});
     [[nodiscard]] bool endRendering();
     [[nodiscard]] bool displayDepth(Resource depth);
     [[nodiscard]] const std::string& error() const { return error_; }

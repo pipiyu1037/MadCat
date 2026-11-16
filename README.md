@@ -1,6 +1,6 @@
 # MadCat
 
-使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前可绘制彩色三角形，并通过 `--gltf` 显示共享 GPU 几何的双实例 glTF／GLB 场景。支持图内深度纹理与灰度查看、基础色材质／贴图、方向光漫反射、Scene／相机矩阵、深度遮挡、单帧同步、resize／最小化恢复，以及 Shader 手动编译、SPIR-V 验证和 Vulkan 资源的 RAII 管理。
+使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前可绘制彩色三角形，并通过 `--gltf` 显示共享 GPU 几何的双实例 glTF／GLB 场景。支持主相机深度和方向光阴影图查看、基础色材质／贴图、方向光漫反射及投射阴影、Scene／相机矩阵、深度遮挡、单帧同步、resize／最小化恢复，以及 Shader 手动编译、SPIR-V 验证和 Vulkan 资源的 RAII 管理。
 
 文档：[开发范围、进度与验收](docs/project-development.md) · [架构设计](docs/architecture-design.md)。
 
@@ -271,7 +271,7 @@ cmake --build build --config Debug --target MadCatCameraChecks
 cmake --build build --config Release --target MadCatCameraChecks
 ```
 
-[相机检查](tests/CameraChecks.cpp) 共 10 组，覆盖视锥边缘、深度、宽高比、正高度视口映射、位姿与父子继承、完整逆矩阵、句柄与快照、无效输入及数值边界。相机组件继续仅保存 CPU 场景事实；Sandbox 从它派生绘制矩阵并传给 Shader，见下节。目前没有自由移动控制器、正交投影或 reversed-Z。
+[相机检查](tests/CameraChecks.cpp) 共 10 组，覆盖视锥边缘、深度、宽高比、正高度视口映射、位姿与父子继承、完整逆矩阵、句柄与快照、无效输入及数值边界。相机组件继续仅保存 CPU 场景事实；Sandbox 从它派生绘制矩阵并传给 Shader，见下节。相机组件目前没有自由移动控制器、正交投影或 reversed-Z；方向光的独立正交视图见后文。
 
 ## Scene 与相机绘制
 
@@ -498,11 +498,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.p
 
 [DirectionalLight](src/Scene/Light.h) 是 Entity 上的 CPU 组件，保存线性 RGB 和辐照度缩放；局部 −Z 为光传播方向，继承父子世界变换。[RenderScene](src/RenderScene/RenderScene.h)提取指向光源的单位方向和 RGB 辐照度；本版支持零或一盏方向光，多盏返回诊断。Sandbox 的光源颜色为 `(1,.8,.6)`、辐照度缩放 π，父节点绕 Y 为 −35°／55°，子节点绕 X 为 −25°。
 
-L 模式在线性空间计算 `基础色 × 辐照度 × max(dot(N,L),0) / π`，交换链执行 sRGB 显示编码。法线按世界逆转置传递、插值后归一化；双面材质有效背面的法线翻转，镜像补偿绕序，MASK 保留透明裁剪。缺失法线、奇异法线变换或零插值法线显示洋红色。无环境光，关灯后的有效表面为黑色。本版没有阴影、HDR／色调映射、PBR 或更多灯型；输出超出 SDR 范围时截断。
+L 模式在线性空间计算 `基础色 × 辐照度 × max(dot(N,L),0) / π`，交换链执行 sRGB 显示编码。法线按世界逆转置传递、插值后归一化；双面材质有效背面的法线翻转，镜像补偿绕序，MASK 保留透明裁剪。缺失法线、奇异法线变换或零插值法线显示洋红色。无环境光，关灯后的有效表面为黑色。投射阴影需使用后文的 `--shadows`；当前仍无 HDR／色调映射、PBR 或更多灯型，输出超出 SDR 范围时截断。
 
-光照数据使用独立的 [32 字节帧 Uniform Buffer](src/RHI/FrameLighting.h)，set 1／binding 0、仅片元可见；Draw 常量仍为 128 字节。每个帧上下文独立拥有 UBO 和不可变 Descriptor，等待上一帧提交完成后才更新，GPU／呈现退役并释放命令后销毁。C++ 与 Shader 必须一起更新，重新编译前先关闭旧程序。
+光照数据使用独立的 [112 字节帧 Uniform Buffer](src/RHI/FrameLighting.h)，set 1／binding 0、顶点和片元可见；原 32 字节灯光数据后附加阴影矩阵及参数，Draw 常量仍为 128 字节。每个帧上下文独立拥有 UBO 和不可变 Descriptor，等待上一帧提交完成后才更新，GPU／呈现退役并释放命令后销毁。C++ 与 Shader 必须一起更新，重新编译前先关闭旧程序。
 
-Debug／Release 的 RenderScene 10 组、管线 66 项与材质 3 组检查通过，Slang 编译／SPIR-V 验证及 12 项编译失败恢复通过。原创 [LightingProbe](assets/models/README.md#方向光参考资产)的八次采样每次 54 个独立解析像素均通过，覆盖灯光旋转／关闭、非均匀缩放、镜像、反序、resize 和最小化恢复；Debug 同步验证无 warning／error，Release 未主动启用验证层。另通过 Debug 原材质五次采样及 Suzanne 光照八次可见性冒烟；Suzanne 没有逐像素参考。最小图执行见下节，后续补图内纹理与深度采样，再接方向光阴影。
+2026-11-06 光照增量的 Debug／Release RenderScene 10 组、管线 66 项与材质 3 组检查通过，Slang 编译／SPIR-V 验证及 12 项编译失败恢复通过。原创 [LightingProbe](assets/models/README.md#方向光参考资产)的八次采样每次 54 个独立解析像素均通过，覆盖灯光旋转／关闭、非均匀缩放、镜像、反序、resize 和最小化恢复；Debug 同步验证无 warning／error，Release 未主动启用验证层。另通过 Debug 原材质五次采样及 Suzanne 光照八次可见性冒烟；Suzanne 没有逐像素参考。后续图内深度和光源深度绘制进展见下文。
 
 ## 最小 C++ Pass 与 Render Graph
 
@@ -540,13 +540,49 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.p
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario model -DepthView
 ```
 
-`Graph::createDepthTexture(name, {width, height, true})` 返回未初始化版本，必须先清除／写入才能读取；`sampled=false` 禁止声明采样。相同名字不合并资源。编译计划保存描述，[RHI 适配器](src/RHI/Vulkan/VulkanFrameGraph.cpp)为每个交换链图像的计划分别分配并保活纹理及不可变采样绑定。尺寸随输出重建，格式查询同时覆盖深度附件和采样用途；只支持一个 mip／层、nearest 采样和与当前 Forward 管线相容的格式／输出尺寸。当前不做内存别名或临时资源池。
+`Graph::createDepthTexture(name, {width, height, true})` 返回未初始化版本，必须先清除／写入才能读取；`sampled=false` 禁止声明采样。相同名字不合并资源。编译计划保存描述，[RHI 适配器](src/RHI/Vulkan/VulkanFrameGraph.cpp)为每个交换链图像的计划分别分配并保活纹理及不可变采样绑定。格式查询同时覆盖深度附件和采样用途；只支持一个 mip／层、nearest 采样及与准备好的几何管线相容的格式。Forward 颜色／深度尺寸匹配窗口；深度专用路径可使用独立尺寸。当前不做内存别名或临时资源池。
 
 图自动处理深度写入到 Fragment sampled-read 的依赖，以及下一次使用该纹理时采样到深度写入的依赖。内部状态仅在队列提交成功后登记；每帧 UBO 的 HostWrite 仍显式交接。销毁前等待 GPU／呈现退役并释放命令，再释放图内纹理、Descriptor 和借用的管线。
 
 Debug／Release 各九组图检查、32 项深度与 66 项管线检查通过；Shader 两个包各 12 项编译失败恢复检查通过。两种配置均通过八次三角形深度参考采样；Debug 另通过材质五次每次 54 点、模型十一次（含空场景／恢复）、最小化退出及原方向光八次参考回归。所有 Debug 场景的同步验证无 warning／error；Release 未主动启用验证层。截图和日志在 `build/verification/triangle/`，深度查看器文件名含 `depth-view`。
 
-该链路仍复用写颜色和深度的 Forward 管线，之后覆盖颜色显示深度；尚无专用只写深度的几何管线或光源视角阴影。下一步实现方向光阴影，并补齐所需的专用深度绘制与绑定。
+该主相机链路仍复用写颜色和深度的 Forward 管线，之后覆盖颜色显示深度；方向光使用下节的独立深度管线。
+
+## 方向光阴影图查看
+
+`--gltf <模型路径> --shadow-view` 选择 [Shadow → DepthView → Present](src/Passes/ShadowPass.h)。Shadow 仅绑定深度附件，按光源视角绘制，保留 OPAQUE／MASK、单双面和镜像面向规则；查看器显示 `1-deviceDepth` 灰度。该选项要求 glTF 模型，不能与 `--depth-view` 同用。
+
+```powershell
+cmake --build build --config Debug --target MadCatShaders MadCat MadCatRenderSceneChecks MadCatRenderGraphChecks MadCatTriangleChecks
+./build/Debug/MadCat.exe --gltf assets/models/MaterialProbe.gltf --shadow-view
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario shadow
+```
+
+阴影图固定为 1024×1024。默认世界中心 `(0,0,0)`、正交半宽高 `(2,2)`、光源视点距离 4、near/far 为 `.1/8`；使用与 Lambert 相同的世界方向，朝中心观察。矩阵采用右手系、近处 0／远处 1，并翻转 Y 配合正高度 viewport。垂直光源使用备用 up 轴。范围由 [DirectionalShadowView](src/RenderScene/RenderScene.h) 显式给定，暂不自动适配场景；范围外几何会裁剪。主相机移动不影响阴影图。
+
+按 `J` 切换灯光方向／关灯，方向变化更新深度图；关灯仅改变辐照度，仍可检查几何深度。模型姿态按键继续有效，`3` 移动主相机，`4`／`5` 删除至空，`6` 恢复，`7` 反序，`9` 非均匀缩放，`0` 镜像。独立深度图会拉伸到窗口显示，窗口宽高比不改变光源覆盖范围。
+
+2026-11-16 Debug／Release 构建、各 11 组 RenderScene、10 组图和 68 项管线模拟检查通过。三个 Shader 包编译／SPIR-V 验证及各 12 项失败恢复通过。两种配置各通过 13 次阴影图解析像素采样，覆盖 MASK 孔洞、光源方向、相机独立性、模型变换、删除至空／恢复、反序、resize 和最小化恢复；Debug 另通过最小化直接退出、原光照八次与主相机深度八次回归，同步验证无 warning／error。Release 未主动启用验证层。实际 GPU 为 RTX 5060 Ti／D32_SFLOAT，截图已检查；日志与截图在 `build/verification/triangle/`，阴影图文件名含 `shadow-view`。
+
+该选项只显示阴影深度；主画面的投射阴影使用下节的 `--shadows`。没有级联阴影、自动范围适配或通用管线准备。
+
+## 方向光投射阴影
+
+`--gltf <路径> --shadows` 使用 [Shadow → Clear → Forward → Present](src/Passes/ShadowPass.h)，默认显示 L 光照模式。Shadow 和 Forward 使用同一帧、相同场景的独立光源／相机绘制快照；Forward 显式声明并采样阴影深度。新增参数与 Shader ABI 后，先关闭旧程序并重新构建 C++ 和 Shader。
+
+```powershell
+cmake --build build --config Debug --target MadCatShaders MadCat MadCatRenderSceneChecks MadCatRenderGraphChecks MadCatTriangleChecks
+./build/Debug/MadCat.exe --gltf assets/models/ShadowProbe.gltf --shadows
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario shadow-lighting
+```
+
+按 `K` 循环关闭／硬阴影／3×3 PCF（默认 PCF），`J` 改变光源方向／关灯，`M` 查看基础色、`L` 返回光照，原姿态按键继续有效。模式切换只改帧参数，不重新编图或创建管线；关闭时仍生成阴影图，便于在固定图中比较采样结果。`--shadows` 要求 glTF，不能与两个深度查看选项同用。
+
+阴影覆盖仍为上节固定的 1024×1024 正交范围。默认接收端深度偏移为 `.001 + .003 × (1−max(dot(N,L),0))`，在深度 0～1 空间中应用；默认对 3×3 nearest 深度比较结果取平均，使用显式 mip 0，不依赖深度线性过滤。阴影范围外及范围外滤波 tap 按无遮挡处理。这是基础偏移／过滤，参数通过 FrameLighting 设置，尚无调参面板或自动范围适配。
+
+原创 [ShadowProbe](assets/models/README.md#投射阴影参考资产) 使用接收平面和带 MASK 孔洞的遮挡板。Debug／Release 各通过 15 组 GPU 解析像素检查：默认帧 227 点包含亮区、完全阴影和 33 个 PCF 过渡点，硬阴影过渡计数为零，关闭时接收面全部受光；同时覆盖方向／关灯、相机变化、非均匀缩放、镜像、删除至空／恢复、反序、resize 与最小化恢复。Debug 原光照八组、主相机深度八组、原阴影查看与投射阴影最小化直接退出回归通过，同步验证无 warning／error。Release 未主动启用验证层。两种配置各 11 组 RenderScene、11 组图和 68 项管线模拟检查、三个 Shader 包编译／验证及各 12 项失败恢复通过。
+
+实际 GPU 为 RTX 5060 Ti、D32_SFLOAT；截图已检查，日志／截图在 `build/verification/triangle/`，文件名包含 `shadow-lighting-shadows-ShadowProbe`。未测性能或验证其他 GPU／驱动。当前只有单方向光和固定范围阴影，无级联、接触硬化或透明混合投影；仍直接输出 SDR，HDR／显示转换是下一候选增量，PBR 和路径追踪尚未实现。
 
 ## 手动编译 Shader
 
@@ -559,9 +595,9 @@ cmake --build build --config Debug --target MadCatShaders
 cmake --build build --config Debug --target MadCatShaderChecks
 ```
 
-`MadCatShaders` 每次手动调用依次编译 triangle 与 depth-view 两个包，每包含顶点和片元两个阶段，Debug／Release 使用同一套参数和产物目录。源码为 [triangle.slang](shaders/triangle.slang)，顶点入口为 `vertexMain`，片元入口为 `fragmentMain`；保留入口名称，直接生成 SPIR-V 1.6，使用 `-O0`，将警告视为错误，再执行 `spirv-val --target-env vulkan1.3`。当前顶点输入为 location 0／1／2 的 float3 位置／颜色／法线及 location 3 的 float2 UV；片元使用 set 0 的基础色图像／采样器，并声明 `Shader` 和 `DemoteToHelperInvocation` capability。布局与设备要求见前述材质工作流。[Slang 命令行参考](https://docs.shader-slang.org/en/stable/external/slang/docs/command-line-slangc-reference.html)
+`MadCatShaders` 每次手动调用依次编译 triangle、depth-view 与 shadow 三个包，每包含顶点和片元两个阶段，Debug／Release 使用同一套参数和产物目录。源码为 [triangle.slang](shaders/triangle.slang)，顶点入口为 `vertexMain`，片元入口为 `fragmentMain`；保留入口名称，直接生成 SPIR-V 1.6，使用 `-O0`，将警告视为错误，再执行 `spirv-val --target-env vulkan1.3`。当前顶点输入为 location 0／1／2 的 float3 位置／颜色／法线及 location 3 的 float2 UV；片元使用 set 0 的基础色图像／采样器，并声明 `Shader` 和 `DemoteToHelperInvocation` capability。布局与设备要求见前述材质工作流。[Slang 命令行参考](https://docs.shader-slang.org/en/stable/external/slang/docs/command-line-slangc-reference.html)
 
-triangle 产物位于 `build/shaders/triangle/`；depth-view 产物位于同级 `depth-view/`，文件结构相同，源码快照为 `depth-view.slang`：
+triangle 产物位于 `build/shaders/triangle/`；depth-view 产物位于同级 `depth-view/`，shadow 产物位于同级 `shadow/`。三个包文件结构相同，源码快照分别采用包名：
 
 | 文件 | 内容 |
 |---|---|
@@ -571,7 +607,7 @@ triangle 产物位于 `build/shaders/triangle/`；depth-view 产物位于同级 
 
 [编译脚本](cmake/CompileShaders.cmake) 先在候选目录编译并验证，两个阶段全部成功后才替换整组产物；编译／验证失败时保留上一组，清理候选文件并返回非零状态。目录发布中断时，下一次构建会先恢复已备份的上一组；同一输出目录使用进程锁避免并发发布。该流程属于离线构建，不是运行期热更新协议。
 
-[检查目标](tests/ShaderBuildChecks.cmake) 对两个包分别运行 12 个真实编译与故障场景，使用独立的 `build/verification/shader-build/` 与 `build/verification/depth-view-build/`，核对失败前后的四个文件哈希。当前仅处理一个自包含 `.slang` 文件，尚未建立 include／import 依赖记录或反射。
+[检查目标](tests/ShaderBuildChecks.cmake) 对三个包分别运行 12 个真实编译与故障场景，使用独立的 `build/verification/shader-build/`、`build/verification/depth-view-build/` 与 `build/verification/shadow-build/`，核对失败前后的四个文件哈希。当前仅处理一个自包含 `.slang` 文件，尚未建立 include／import 依赖记录或反射。
 
 ## Ray Query 编译探针
 

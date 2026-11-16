@@ -7,7 +7,7 @@
 
 namespace madcat::rhi
 {
-// Fixed set 1, binding 0, fragment Uniform Buffer. Two float4 values, no GLM ABI.
+// Fixed set 1, binding 0, vertex/fragment UBO. No GLM ABI.
 // Unit world direction points toward the light (opposite photon travel).
 // Irradiance is linear RGB; Lambert outgoing radiance = albedo * E * NdotL / pi.
 // No light is represented by zero irradiance, with a valid default direction.
@@ -15,6 +15,10 @@ struct alignas(16) FrameLighting
 {
     std::array<float, 4> toLight{0, 0, 1, 0};
     std::array<float, 4> irradiance{0, 0, 0, 0};
+    // lightClipFromWorld * inverse(cameraClipFromWorld), column-major.
+    std::array<float, 16> shadowFromClip{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    // Depth-space constant bias, slope bias, enabled (0/1), PCF radius (0/1).
+    std::array<float, 4> shadow{.001f, .003f, 0, 1};
 
     [[nodiscard]] bool valid() const noexcept
     {
@@ -24,10 +28,14 @@ struct alignas(16) FrameLighting
             if (!std::isfinite(toLight[axis]) || !std::isfinite(irradiance[axis]) || irradiance[axis] < 0) { return false; }
             lengthSquared += double(toLight[axis]) * toLight[axis];
         }
-        return std::abs(lengthSquared - 1) < 1e-4 && toLight[3] == 0 && irradiance[3] == 0;
+        for (const auto value : shadowFromClip) { if (!std::isfinite(value)) { return false; } }
+        return std::abs(lengthSquared - 1) < 1e-4 && toLight[3] == 0 && irradiance[3] == 0 &&
+            std::isfinite(shadow[0]) && shadow[0]>=0 && std::isfinite(shadow[1]) && shadow[1]>=0 &&
+            (shadow[2]==0 || shadow[2]==1) && (shadow[3]==0 || shadow[3]==1);
     }
 };
-static_assert(sizeof(FrameLighting) == 32 && alignof(FrameLighting) == 16 &&
-    offsetof(FrameLighting, irradiance) == 16 && std::is_standard_layout_v<FrameLighting> &&
+static_assert(sizeof(FrameLighting) == 112 && alignof(FrameLighting) == 16 &&
+    offsetof(FrameLighting, irradiance) == 16 && offsetof(FrameLighting, shadowFromClip)==32 &&
+    offsetof(FrameLighting, shadow)==96 && std::is_standard_layout_v<FrameLighting> &&
     std::is_trivially_copyable_v<FrameLighting>);
 }

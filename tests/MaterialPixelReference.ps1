@@ -54,6 +54,16 @@ function Get-MaterialTriangles([double]$Aspect) {
                 $p=Rotate-Y @((.48*$local[0]*$scale[0]),(.48*$local[1]*$scale[1]),(.48*($local[2]-.3)*$scale[2])) $angle
                 if($moved){$p[0]+=$(if($instance-eq 0){.15}else{-.15});$p[1]+=.25;$p[2]-=.25}
                 $p[0]+=$(if($instance-eq 0){-.75}else{.75})
+                if($ShadowView){
+                    $yaw=$(if($script:referenceLighting-eq 1){55}else{-35})*[Math]::PI/180
+                    $pitch=25*[Math]::PI/180
+                    $sy=[Math]::Sin($yaw);$cy=[Math]::Cos($yaw);$sp=[Math]::Sin($pitch);$cp=[Math]::Cos($pitch)
+                    $right=$cy*$p[0]-$sy*$p[2]
+                    $up=-$sy*$sp*$p[0]+$cp*$p[1]-$cy*$sp*$p[2]
+                    $toward=$sy*$cp*$p[0]+$sp*$p[1]+$cy*$cp*$p[2]
+                    $vertices+=[pscustomobject]@{U=.5+$right/4;V=.5-$up/4;W=1;Z=(3.9-$toward)/7.9;Color=$uvs[$primitive*3+$vertex]}
+                    continue
+                }
                 if($script:referencePose-eq 2){$p[0]-=.25;$p[1]-=.15;$p[2]-=.2}
                 $w=3-$p[2]
                 $color=$uvs[$primitive*3+$vertex]

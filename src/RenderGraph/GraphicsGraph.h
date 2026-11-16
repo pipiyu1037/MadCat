@@ -15,7 +15,8 @@ struct GraphicsImports
 struct GraphicsGraph
 {
     Plan plan;
-    std::function<std::vector<std::any>(const std::array<float,4>&,std::span<const rhi::IndexedDraw>)> parameters;
+    // Camera and light draw lists are separate value snapshots, fixed by record.
+    std::function<std::vector<std::any>(const std::array<float,4>&,std::span<const rhi::IndexedDraw>,std::span<const rhi::IndexedDraw>)> parameters;
 };
 using GraphicsGraphFactory = std::function<std::expected<GraphicsGraph,std::string>(Graph&,const GraphicsImports&)>;
 }

@@ -1,6 +1,6 @@
 # MadCat 架构设计
 
-更新日期：2026-11-08。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
+更新日期：2026-11-16。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
 
 ## 文档职责与设计状态
 
@@ -760,11 +760,11 @@ M 输出线性因子乘 sRGB 图像采样，交换链执行显示编码；MASK �
 
 `extractLighting(const Scene&)` 要求查询外、世界矩阵已更新；返回拥有数据的 [FrameLighting](../src/RHI/FrameLighting.h) 值快照，无组件指针或 GPU 对象。第一版支持零或一盏方向光：零盏得到零辐照度，多盏返回错误，不静默丢弃。负值、非有限参数和 RGB 乘缩放溢出 float 均返回诊断。
 
-上传 ABI 为两个 float4、32 字节／16 字节对齐：offset 0 为单位 `toLight.xyz`，offset 16 为线性 RGB `irradiance.xyz`，两个 w 均为零。固定 set 1／binding 0、UNIFORM_BUFFER、Fragment 可见；set 0 的材质绑定和 128 字节顶点 Push Constant 不变。管线拥有布局；[帧上下文](../src/RHI/Vulkan/VulkanClearRenderer.cpp)独立拥有 [coherent 映射 UBO 与 DescriptorPool／Set](../src/RHI/Vulkan/VulkanFrameLighting.h)，不同上下文不共享可变内存。Descriptor 在创建后不更新，逐帧只修改缓冲内容。
+当前上传 ABI 为 112 字节／16 字节对齐：offset 0 为单位 `toLight.xyz`，offset 16 为线性 RGB `irradiance.xyz`，两个 w 均为零；后附矩阵／参数见 Forward 阴影小节。固定 set 1／binding 0、UNIFORM_BUFFER、Vertex／Fragment 可见；set 0 的材质绑定和 128 字节顶点 Push Constant 不变。管线拥有布局；[帧上下文](../src/RHI/Vulkan/VulkanClearRenderer.cpp)独立拥有 [coherent 映射 UBO 与 DescriptorPool／Set](../src/RHI/Vulkan/VulkanFrameLighting.h)，不同上下文不共享可变内存。Descriptor 在创建后不更新，逐帧只修改缓冲内容。
 
 `drawIndexed(..., const FrameLighting&)` 在 acquire 前校验数据，在上一帧提交和呈现等待完成后写入自己的缓冲，随后记录并提交；调用后不借用 CPU 快照。HOST_COHERENT 写入发生于队列提交前，提交提供 host→device 内存域操作；不需要额外 transfer 命令。销毁时等待 GPU／呈现完成，释放命令池后销毁 Descriptor 和缓冲，管线布局与 Device 保持有效。相关规则见 [Vulkan 同步规范](https://docs.vulkan.org/spec/latest/chapters/synchronization.html#synchronization-submission-host-writes)。当前最小图显式声明该 Uniform 读取，不把它视为隐藏的场景访问。
 
-L 模式计算 `albedo × irradiance × max(dot(N,L),0) / π`，法线在透视插值后归一化；MASK 先按基础色 alpha 裁剪。负世界行列式补偿有效面向，双面有效背面的法线翻转，符合 [glTF 双面材质约定](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#double-sided)。缺失／奇异／零法线显示洋红色。没有环境光、阴影、HDR／色调映射或 PBR，直接输出当前 sRGB 交换链，超范围值截断。J 仅修改示例灯光的 CPU 组件与 Transform，不重建管线；M 和诊断视图保持原有语义。
+L 模式计算 `albedo × irradiance × max(dot(N,L),0) / π`，法线在透视插值后归一化；MASK 先按基础色 alpha 裁剪。负世界行列式补偿有效面向，双面有效背面的法线翻转，符合 [glTF 双面材质约定](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#double-sided)。缺失／奇异／零法线显示洋红色。没有环境光、HDR／色调映射或 PBR，直接输出当前 sRGB 交换链，超范围值截断；投射阴影由 `--shadows` 图启用。J 仅修改示例灯光的 CPU 组件与 Transform，不重建管线；M 和诊断视图保持原有语义。
 
 ## 最小图与图形执行接口（当前实现）
 
@@ -792,7 +792,7 @@ L 模式计算 `albedo × irradiance × max(dot(N,L),0) / π`，法线在透视�
 
 `Graph::createDepthTexture(name, DepthTextureDesc{width, height, true})` 只保存描述并返回未初始化版本，非零尺寸、先写后读及用途能力由 CPU 图校验；相同名称不合并资源。Plan 拥有描述副本，候选图修改不改变已编译计划。当前沿用资源表 `Imported` 的名字，内部纹理由可选描述区分，native identity 为零；不将该零值用于资源身份去重。
 
-VulkanFrameGraph 在编译成功后为内部描述创建专用 TextureRef，每个交换链图像各有独立分配／状态，使用一个 mip／层。格式查询覆盖 DepthAttachment 与 Sampled 的组合，按 D32_SFLOAT、D16_UNORM 尝试；当前要求与已有 Forward 管线的深度格式、输出尺寸相容，失败明确诊断。nearest／Clamp 绑定不依赖深度格式的线性滤波能力；未支持的线性采样请求被拒绝。
+VulkanFrameGraph 在编译成功后为内部描述创建专用 TextureRef，每个交换链图像各有独立分配／状态，使用一个 mip／层。格式查询覆盖 DepthAttachment 与 Sampled 的组合，按 D32_SFLOAT、D16_UNORM 尝试；要求与准备好的几何管线深度格式相容，失败明确诊断。Forward 附件尺寸须匹配窗口，深度专用路径使用深度图自身尺寸。nearest／Clamp 绑定不依赖深度格式的线性滤波能力；未支持的线性采样请求被拒绝。
 
 图推导 Depth→Sampled 的 RAW 以及后续 Sampled→Depth 的 WAR，RHI 分别映射为早／晚深度测试读写和 Fragment sampled-read，使用深度 aspect 与对应布局。每次记录先清除待提交状态，只有整图成功才产生候选最终状态；`submitted()` 仅由 queue submit 成功路径调用，更新图内资源并返回外部深度实际是否初始化。记录／结束命令／提交失败均不发布候选内部状态。图外每帧 UBO 的 HostWrite 不沿用上帧 Uniform 状态。
 
@@ -800,7 +800,27 @@ Native 表保留图内纹理和不可变 Descriptor；渲染器等待提交／�
 
 [查看 Shader](../shaders/depth-view.slang) 通过 nearest SampleLevel 读取深度并输出 `1-deviceDepth`，交换链做一次 sRGB 编码，不将它解释为线性距离。全屏顶点使用 `SV_VulkanVertexID`；固定编译器下 `SV_VertexID` 会产生未启用的 DrawParameters capability，实际验证已发现并修正。[Slang SPIR-V 语义](https://shader-slang.org/slang/user-guide/spirv-target-specific)
 
-CPU 九组图检查覆盖内部尺寸／用途／未初始化、描述快照、独立身份、Depth→Sampled→Depth 和记录失败；32 项深度模拟覆盖组合用途查询、无采样 feature、D16 回退及失败清理。实际三角形、材质 MASK、模型层级／空帧及生命周期证据见开发文档；D16 仍仅模拟验证。阴影与通用 Prepare 未实现。
+CPU 九组图检查覆盖内部尺寸／用途／未初始化、描述快照、独立身份、Depth→Sampled→Depth 和记录失败；32 项深度模拟覆盖组合用途查询、无采样 feature、D16 回退及失败清理。实际三角形、材质 MASK、模型层级／空帧及生命周期证据见开发文档；D16 仍仅模拟验证。后续光源深度绘制见下节；Forward 接收阴影与通用 Prepare 未实现。
+
+### 方向光深度绘制（当前实现）
+
+2026-11-16 新增 [ShadowPass](../src/Passes/ShadowPass.h)。Sandbox 的 `--shadow-view` 选择 `Shadow → DepthView → Present`，Shadow 声明顶点／索引、全部可绑定材质采样图像和深度覆盖写入，不声明未使用的帧光照 UBO。零 Draw 时仍清除深度，避免残留旧几何。PassContext 允许省略颜色附件，要求至少一个附件，保持访问与 Load 语义校验；RHI 以当前是否绑定颜色选择预先准备好的 Forward 或 Shadow 管线。
+
+[DirectionalShadowView／buildDirectionalShadowMatrix](../src/RenderScene/RenderScene.h) 使用现有 FrameLighting 世界方向和值参数，返回拥有数据的正交 `clipFromWorld`。默认中心为原点、半宽高 2、视点距离 4、near/far 为 .1/8；构造朝中心观察的右手视图，垂直方向使用备用 up，投影深度为 0～1 并翻转 Y。非法参数、非有限或缩窄后坍缩矩阵返回错误。方向光平移、辐照度和主相机不改变矩阵；灯光层级变更通过已有方向提取生效。`extractDraws(scene,assets,clipFromWorld)` 复用资产、世界变换、法线和材质契约，普通相机提取也委托该路径；组件没有 GPU 对象。
+
+深度图由图声明为固定 1024×1024，独立于窗口；后端按实际深度尺寸设置 renderArea、viewport 和 scissor。Forward 仍要求颜色／深度尺寸匹配，格式须与所选管线兼容。[VulkanTrianglePipeline](../src/RHI/Vulkan/VulkanTrianglePipeline.h) 的 `depthOnly` 准备独立管线对象，使用 [shadow.slang](../shaders/shadow.slang)、位置／UV 两个输入、零颜色输出与相同 128 字节 Draw ABI。材质 set 0 保持，省略 set 1 光照布局和绑定。Fragment 保留 MASK 及单双面／镜像裁剪。Shadow 和 Forward 必须共享同设备、相同几何和材质绑定，后端初始化时验证。
+
+帧图继续持有纹理和 Descriptor，借用 Shadow 管线到命令退役；销毁顺序为等待 GPU／呈现、释放命令、图内绑定／纹理、管线。深度写→采样及下一次采样→写入由图推导，内部状态仅在成功提交后发布。resize 同步重建图资源，阴影尺寸保持固定。该接口仍服务准备好的三个管线，没有通用 Prepare；后续 Forward 深度比较、偏移和滤波见下节。验证证据与运行方法见 [README](../README.md#方向光阴影图查看)。
+
+### Forward 接收方向光阴影（当前实现）
+
+2026-11-16 增加 `--shadows`，由 [buildShadowedForwardGraph](../src/Passes/ShadowPass.h) 连接 `Shadow → Clear → Forward → Present`。帧参数工厂接收两组独立 `IndexedDraw` 快照，Shadow 使用光源裁剪矩阵，Forward 使用相机裁剪矩阵；两组均在 acquire 前检查并在记录时固定，空帧仍清除深度。Forward 输入含明确的 shadow 资源／版本，声明 Sampled 并由 PassContext 校验；未声明／旧版本不能作为阴影绑定。图安排 Depth→Sampled 和后续 Sampled→Depth 依赖。
+
+[FrameLighting](../src/RHI/FrameLighting.h) 当前为 112 字节／16 对齐：原 toLight、irradiance 仍在 0／16，offset 32 为列主序 `shadowFromClip`，offset 96 为常量 bias、斜率 bias、enabled 和 PCF radius。Sandbox 计算 `lightClipFromWorld × inverse(cameraClipFromWorld)`，顶点 Shader 将当前相机 clip 位置变换到 light clip，片元透视插值后除 w；无需扩大 128 字节 Draw ABI。CPU 的矩阵关系检查覆盖相机变化和非均匀缩放。所有浮点参数必须有限，bias 非负，enabled 为 0／1，radius 为 0／1。
+
+UBO 的 set 1／binding 0 和图 Uniform 同步范围均扩展到 Vertex／Fragment。Forward 新增 set 2 图像／采样器，复用固定采样绑定布局；每个交换链图像的图内阴影 Descriptor 创建后不更新，保活到该图命令退役。禁用阴影或未使用阴影图的 Forward 路径仍将保活的材质绑定作为静态 set 2 回退，Shader 在 enabled=0 时不采样它；材质图像已经由 Forward 声明。Shadow 管线继续省略 UBO 和 set 2。启用阴影却未提供图声明的深度绑定时，后端拒绝 Draw，不猜测资源。
+
+[triangle.slang](../shaders/triangle.slang) 使用偏移 `constant + slope × (1−max(dot(N,L),0))` 和 mip 0 nearest 深度比较，半径 0 为硬阴影，半径 1 为九次比较平均；不使用硬件比较 sampler 或深度线性过滤。投影范围外和范围外 tap 返回可见，不拉伸边缘阴影；MASK、单双面及镜像规则由 Shadow 与 Forward 一致执行。K 只改 enabled／radius，图仍生成阴影图；M／诊断视图保持各自显示语义。固定覆盖、单方向光、单队列与 GPU 完成后回收的约束保持；尚无通用准备、自动覆盖、级联、HDR 或 PBR。验证证据见 [README](../README.md#方向光投射阴影)。
 
 ## 实现参考建议
 

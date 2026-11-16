@@ -1,13 +1,20 @@
 param(
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug',
     [string]$BuildDirectory = 'build',
-    [ValidateSet('resize', 'close-minimized', 'modal', 'stress', 'scene', 'depth', 'model', 'attributes', 'materials', 'lighting')][string]$Scenario = 'resize',
+    [ValidateSet('resize', 'close-minimized', 'modal', 'stress', 'scene', 'depth', 'model', 'attributes', 'materials', 'lighting', 'shadow', 'shadow-lighting')][string]$Scenario = 'resize',
     [string]$ModelPath = '',
-    [switch]$DepthView
+    [switch]$DepthView,
+    [switch]$ShadowView,
+    [switch]$Shadows
 )
 $ErrorActionPreference = 'Stop'
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $probePath = Join-Path $workspace 'assets/models/TransformProbe.gltf'
+if ($Scenario -eq 'shadow') { $ShadowView = $true }
+if ($Scenario -eq 'shadow-lighting') { $Shadows = $true }
+if ($Shadows -and -not $ModelPath) { $ModelPath = Join-Path $workspace 'assets/models/ShadowProbe.gltf' }
+if ($ShadowView -and $DepthView) { throw 'Choose one depth viewer' }
+if ($ShadowView -and -not $ModelPath) { $ModelPath = Join-Path $workspace 'assets/models/MaterialProbe.gltf' }
 if ($Scenario -eq 'model' -and -not $ModelPath) { $ModelPath = $probePath }
 if ($Scenario -eq 'attributes' -and -not $ModelPath) { $ModelPath = Join-Path $workspace 'assets/models/AttributeProbe.gltf' }
 if ($Scenario -eq 'materials' -and -not $ModelPath) { $ModelPath = Join-Path $workspace 'assets/models/MaterialProbe.gltf' }
@@ -23,6 +30,15 @@ $materialProbe = Join-Path $workspace 'assets/models/MaterialProbe.gltf'
 $lightingProbe = Join-Path $workspace 'assets/models/LightingProbe.gltf'
 $referenceMaterials = $hasModel -and ((Get-FileHash -LiteralPath $ModelPath).Hash -in @((Get-FileHash -LiteralPath $materialProbe).Hash,(Get-FileHash -LiteralPath $lightingProbe).Hash))
 if ($referenceMaterials) { . (Join-Path $PSScriptRoot 'MaterialPixelReference.ps1') }
+if ($Shadows) {
+    if ((Get-FileHash $ModelPath).Hash -ne (Get-FileHash (Join-Path $workspace 'assets/models/ShadowProbe.gltf')).Hash) { throw 'Shadow lighting reference requires ShadowProbe' }
+    . (Join-Path $PSScriptRoot 'MaterialPixelReference.ps1')
+    . (Join-Path $PSScriptRoot 'ShadowLightingReference.ps1')
+}
+if ($ShadowView) {
+    if (-not $referenceMaterials) { throw 'Shadow pixel checks require MaterialProbe or LightingProbe' }
+    . (Join-Path $PSScriptRoot 'ShadowPixelReference.ps1')
+}
 if ($Scenario -eq 'lighting') { . (Join-Path $PSScriptRoot 'LightingPixelReference.ps1') }
 $buildPath = if ([IO.Path]::IsPathRooted($BuildDirectory)) { $BuildDirectory } else { Join-Path $workspace $BuildDirectory }
 $buildPath = (Resolve-Path -LiteralPath $buildPath).Path
@@ -55,6 +71,8 @@ public static class TriangleWindowCheck {
 '@
 $name = "$($Configuration.ToLower())-$Scenario"
 if ($DepthView) { $name += '-depth-view' }
+if ($ShadowView) { $name += '-shadow-view' }
+if ($Shadows) { $name += '-shadows' }
 if ($hasModel) { $name += '-' + [IO.Path]::GetFileNameWithoutExtension($ModelPath) }
 $errorPath = Join-Path $outputRoot "$name.stderr.log"
 $outPath = Join-Path $outputRoot "$name.stdout.log"
@@ -66,6 +84,8 @@ try {
         WindowStyle = 'Hidden'; PassThru = $true; RedirectStandardOutput = $outPath; RedirectStandardError = $errorPath }
     if ($hasModel) { $launch.ArgumentList = @('--gltf', ('"' + $ModelPath + '"')) }
     if ($DepthView) { $launch.ArgumentList = $(if ($hasModel) { @($launch.ArgumentList) + '--depth-view' } else { @('--depth-view') }) }
+    if ($ShadowView) { $launch.ArgumentList = @($launch.ArgumentList) + '--shadow-view' }
+    if ($Shadows) { $launch.ArgumentList = @($launch.ArgumentList) + '--shadows' }
     $appProcess = Start-Process @launch
     $null = $appProcess.Handle
 } finally { $env:VK_LAYER_VALIDATE_SYNC = $previousSync }
@@ -106,6 +126,7 @@ function Convert-Srgb([double]$Value) {
 $referencePose = 0
 $referenceView = $(if ($Scenario -eq 'materials') { 3 } else { 0 })
 $referenceLighting = 0
+$script:referenceShadows = 2
 $script:modelDeleted = @($false, $false)
 function Rotate-Y([double[]]$Vector, [double]$Degrees) {
     $angle = $Degrees * [Math]::PI / 180
@@ -233,6 +254,8 @@ function Check-Pixels([string]$Label) {
         # Reference values apply to the current Slang triangle and SDR sRGB output.
         if ((Read-Log) -notmatch 'Swapchain created; [^\r\n]*format (43|50),') { throw 'Pixel reference requires an sRGB R8/B8 Swapchain' }
         $aspect = $size[0] / [double]$size[1]
+        if ($Shadows) { Check-ShadowLightingPixels $bitmap $aspect $Label; return }
+        if ($ShadowView) { Check-ShadowPixels $bitmap $Label; return }
         if ($referenceMaterials) { Check-MaterialPixels $bitmap $aspect $Label; return }
         if ($referenceAttributes) { Check-AttributePixels $bitmap $aspect $Label; return }
         if ($hasModel) { Check-ModelPixels $bitmap $aspect $Label; return }
@@ -304,11 +327,57 @@ try {
     [void][TriangleWindowCheck]::SetWindowPos($windowState.Handle, [IntPtr](-1), 30, 30, 1100, 760, 0x10)
     Wait-Presentation 0
     if ($hasModel -and $Scenario -ne 'materials') { Select-View 0 }
-    if ($Scenario -eq 'lighting') { Select-View 4 }
+    if ($Scenario -eq 'lighting' -or $Shadows) { Select-View 4 }
     Check-Pixels 'initial'
     if ($Scenario -eq 'close-minimized') {
         [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 6)
         Wait-Condition { (Read-Log) -match 'rendering paused;' } 'minimize'
+    } elseif ($Scenario -eq 'shadow-lighting') {
+        $pipelineCount = [regex]::Matches((Read-Log), 'Shadow pipeline created;').Count
+        Cycle-Shadows; Check-Pixels 'off'
+        Cycle-Shadows; Check-Pixels 'hard'
+        Cycle-Shadows; Check-Pixels 'pcf'
+        Cycle-Lighting; Check-Pixels 'rotated'
+        Cycle-Lighting; Check-Pixels 'light-off'
+        Cycle-Lighting
+        Select-Pose 2; Check-Pixels 'camera'
+        Select-Pose 8; Check-Pixels 'nonuniform'
+        Select-Pose 9; Check-Pixels 'mirrored'
+        Select-Pose 3; Check-Pixels 'delete-first'
+        Select-Pose 4; Check-Pixels 'empty'
+        Select-Pose 5; Check-Pixels 'respawn'
+        Select-Pose 6; Check-Pixels 'reverse'
+        if ([regex]::Matches((Read-Log), 'Shadow pipeline created;').Count -ne $pipelineCount) { throw 'Shadow parameters rebuilt pipeline' }
+        Resize-To 800 580 'shadow-resized'
+        $before = Get-ReadyCount
+        [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 6)
+        Wait-Condition { (Read-Log) -match 'rendering paused;' } 'shadow minimize'
+        [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 9)
+        Wait-Presentation $before
+        Check-Pixels 'shadow-restored'
+    } elseif ($Scenario -eq 'shadow') {
+        $pipelineCount = [regex]::Matches((Read-Log), 'Shadow pipeline created;').Count
+        Select-Pose 2; Check-Pixels 'camera-independent'
+        Cycle-Lighting; Check-Pixels 'light-rotated'
+        Cycle-Lighting; Check-Pixels 'light-off'
+        Cycle-Lighting
+        Select-Pose 1; Check-Pixels 'parent-moved'
+        Select-Pose 8; Check-Pixels 'nonuniform'
+        Select-Pose 9; Check-Pixels 'mirrored'
+        Select-Pose 3; Check-Pixels 'delete-first'
+        Select-Pose 4; Check-Pixels 'empty'
+        Select-Pose 5; Check-Pixels 'respawn'
+        Select-Pose 6; Check-Pixels 'reverse'
+        if ((Get-FileHash (Join-Path $outputRoot "$name-respawn.png")).Hash -ne
+            (Get-FileHash (Join-Path $outputRoot "$name-reverse.png")).Hash) { throw 'Reverse order changed shadow depth' }
+        if ([regex]::Matches((Read-Log), 'Shadow pipeline created;').Count -ne $pipelineCount) { throw 'Shadow edits rebuilt pipeline' }
+        Resize-To 800 580 'shadow-resized'
+        $before = Get-ReadyCount
+        [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 6)
+        Wait-Condition { (Read-Log) -match 'rendering paused;' } 'shadow minimize'
+        [void][TriangleWindowCheck]::ShowWindow($windowState.Handle, 9)
+        Wait-Presentation $before
+        Check-Pixels 'shadow-restored'
     } elseif ($Scenario -eq 'lighting') {
         $pipelineCount = [regex]::Matches((Read-Log), 'Triangle pipeline created;').Count
         Cycle-Lighting; Check-Pixels 'light-rotated'
@@ -442,7 +511,7 @@ try {
     $pipelines = [regex]::Matches($log, 'Triangle pipeline created;').Count
     $expectedGraphs = 0
     foreach ($swap in [regex]::Matches($log, 'Swapchain created; [^\r\n]*, (\d+) images')) { $expectedGraphs += [int]$swap.Groups[1].Value }
-    $graphPattern = if ($DepthView) { 'Render Graph: compiled 4 Passes, (\d+) imported resources; Clear -> Forward -> DepthView -> Present\.' } else { 'Render Graph: compiled 3 Passes, (\d+) imported resources; Clear -> Forward -> Present\.' }
+    $graphPattern = if ($Shadows) { 'Render Graph: compiled 4 Passes, (\d+) imported resources; Shadow -> Clear -> Forward -> Present\.' } elseif ($ShadowView) { 'Render Graph: compiled 3 Passes, (\d+) imported resources; Shadow -> DepthView -> Present\.' } elseif ($DepthView) { 'Render Graph: compiled 4 Passes, (\d+) imported resources; Clear -> Forward -> DepthView -> Present\.' } else { 'Render Graph: compiled 3 Passes, (\d+) imported resources; Clear -> Forward -> Present\.' }
     $graphs = [regex]::Matches($log, $graphPattern)
     if ($expectedGraphs -lt 1 -or $graphs.Count -ne $expectedGraphs) { throw 'Acquired-image graph count/order mismatch or graph rebuilt for parameters' }
     if ($referenceMaterials) { foreach ($graph in $graphs) { if ([int]$graph.Groups[1].Value -ne 8) { throw 'RenderScene resources missing from graph imports or shared image identity lost' } } }
@@ -450,9 +519,9 @@ try {
     if ($sampled -lt 1 -or $sampled -ne [regex]::Matches($log, 'Sampled texture destroyed\.').Count -or
         [regex]::Matches($log,'Texture binding created\.').Count -ne [regex]::Matches($log,'Texture binding destroyed\.').Count -or
         $log -notmatch '(?s)Clear renderer destroyed.*Triangle pipeline destroyed.*Swapchain destroyed.*Texture binding destroyed.*Sampled texture destroyed.*Device destroyed') { throw 'Sampled image/descriptor lifetime mismatch' }
-    $managed = if ($DepthView) { $expectedGraphs } else { 0 }
+    $managed = if ($DepthView -or $ShadowView -or $Shadows) { $expectedGraphs } else { 0 }
     if ($referenceMaterials -and ($sampled -ne 3 -or [regex]::Matches($log,'Texture binding created\.').Count -ne (4 + $managed))) { throw 'Shared image/texture upload was duplicated' }
-    if ($DepthView -and (
+    if (($DepthView -or $ShadowView) -and (
         [regex]::Matches($log,'Sampled depth texture created;').Count -ne $expectedGraphs -or
         [regex]::Matches($log,'Sampled depth texture destroyed\.').Count -ne $expectedGraphs -or
         [regex]::Matches($log,'Render Graph: allocated 1 managed depth texture').Count -ne $expectedGraphs -or
@@ -462,7 +531,14 @@ try {
     if ($pipelines -lt 1 -or $pipelines -ne [regex]::Matches($log, 'Triangle pipeline destroyed\.').Count -or
         $pipelines -ne [regex]::Matches($log, 'Swapchain created;').Count -or $pipelines -ne [regex]::Matches($log, 'Swapchain destroyed\.').Count -or
         $pipelines -ne [regex]::Matches($log, '(?s)Clear renderer destroyed.*?Triangle pipeline destroyed.*?Swapchain destroyed').Count) { throw 'Pipeline/Swapchain lifetime count or order mismatch' }
-    $moduleCount = if ($DepthView) { 4 } else { 2 }
+    if (($ShadowView -or $Shadows) -and (
+        [regex]::Matches($log,'Shadow pipeline created;').Count -ne $pipelines -or
+        [regex]::Matches($log,'Shadow pipeline destroyed\.').Count -ne $pipelines -or
+        [regex]::Matches($log,'Sampled depth texture created; 1024 x 1024,').Count -ne $expectedGraphs -or
+        [regex]::Matches($log,'(?s)Clear renderer destroyed.*?Shadow pipeline destroyed.*?Triangle pipeline destroyed').Count -ne $pipelines)) { throw 'Shadow extent or pipeline lifetime mismatch' }
+    if ($Shadows -and ([regex]::Matches($log,'Sampled depth texture destroyed\.').Count -ne $expectedGraphs -or
+        [regex]::Matches($log,'Render Graph: allocated 1 managed depth texture').Count -ne $expectedGraphs)) { throw 'Shadow resource retirement mismatch' }
+    $moduleCount = if ($ShadowView) { 6 } elseif ($DepthView -or $Shadows) { 4 } else { 2 }
     if ([regex]::Matches($log, 'Shader Module created;').Count -ne $moduleCount -or [regex]::Matches($log, 'Shader Module destroyed\.').Count -ne $moduleCount -or
         $log -notmatch '(?s)Triangle pipeline destroyed.*Swapchain destroyed.*Shader Module destroyed.*Shader Module destroyed.*Device destroyed.*Surface destroyed.*Instance destroyed') { throw 'Module/Device destruction count or order mismatch' }
     $vertexBytes = 176; $indexBytes = 36; $indexCount = 9

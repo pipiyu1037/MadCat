@@ -22,6 +22,7 @@ struct VulkanTrianglePipeline::State
     VkDevice device = VK_NULL_HANDLE;
     VkFormat format = VK_FORMAT_UNDEFINED;
     VkFormat depthFormat = VK_FORMAT_UNDEFINED;
+    bool depthOnly = false;
     VkPipelineLayout layout = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkDescriptorSetLayout lightingLayout = VK_NULL_HANDLE;
@@ -71,14 +72,15 @@ VulkanTrianglePipeline::~VulkanTrianglePipeline()
 {
     if (state_)
     {
+        const auto* name = state_->depthOnly ? "Shadow" : "Triangle";
         state_.reset();
-        std::fprintf(stderr, "Vulkan: Triangle pipeline destroyed.\n");
+        std::fprintf(stderr, "Vulkan: %s pipeline destroyed.\n", name);
     }
 }
 
 bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat colorFormat,
     const VulkanShaderModule& vertex, const VulkanShaderModule& fragment, BufferRef vertices, BufferRef indices, VkFormat depthFormat,
-    std::span<const TextureBindingRef> materials)
+    std::span<const TextureBindingRef> materials, bool depthOnly)
 {
     if (state_)
     {
@@ -86,7 +88,8 @@ bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat col
         return false;
     }
     if (!device.handle() || !vertex.handle() || !fragment.handle() ||
-        vertex.deviceHandle() != device.handle() || fragment.deviceHandle() != device.handle() || colorFormat == VK_FORMAT_UNDEFINED ||
+        vertex.deviceHandle() != device.handle() || fragment.deviceHandle() != device.handle() ||
+        (depthOnly ? colorFormat != VK_FORMAT_UNDEFINED : colorFormat == VK_FORMAT_UNDEFINED) ||
         detail::BufferAccess::device(vertices) != device.handle() || detail::BufferAccess::usage(vertices) != VK_BUFFER_USAGE_VERTEX_BUFFER_BIT ||
         vertices.sizeBytes() % sizeof(ColoredVertex) != 0 || vertices.sizeBytes() / sizeof(ColoredVertex) < 3 ||
         vertices.sizeBytes() / sizeof(ColoredVertex) > UINT32_MAX ||
@@ -107,19 +110,23 @@ bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat col
     created->indices = std::move(indices);
     created->format = colorFormat;
     created->depthFormat = depthFormat;
+    created->depthOnly = depthOnly;
     if (!created->loadFunctions(device.physicalDeviceInfo().instance)) { return false; }
     if (!materials.empty())
     {
         const auto getProc = detail::loadFunction<PFN_vkGetDeviceProcAddr>(device.physicalDeviceInfo().instance, "vkGetDeviceProcAddr");
         created->bindSets = reinterpret_cast<PFN_vkCmdBindDescriptorSets>(getProc(device.handle(), "vkCmdBindDescriptorSets"));
         if (!created->bindSets) { return false; }
-        const auto createSetLayout = reinterpret_cast<PFN_vkCreateDescriptorSetLayout>(getProc(device.handle(), "vkCreateDescriptorSetLayout"));
-        created->destroySetLayout = reinterpret_cast<PFN_vkDestroyDescriptorSetLayout>(getProc(device.handle(), "vkDestroyDescriptorSetLayout"));
-        if (!createSetLayout || !created->destroySetLayout) { return false; }
-        const VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-        VkDescriptorSetLayoutCreateInfo lighting{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        lighting.bindingCount = 1; lighting.pBindings = &binding;
-        if (!detail::checkResult(createSetLayout(device.handle(), &lighting, nullptr, &created->lightingLayout), "vkCreateDescriptorSetLayout(lighting)")) { return false; }
+        if (!depthOnly)
+        {
+            const auto createSetLayout = reinterpret_cast<PFN_vkCreateDescriptorSetLayout>(getProc(device.handle(), "vkCreateDescriptorSetLayout"));
+            created->destroySetLayout = reinterpret_cast<PFN_vkDestroyDescriptorSetLayout>(getProc(device.handle(), "vkDestroyDescriptorSetLayout"));
+            if (!createSetLayout || !created->destroySetLayout) { return false; }
+            const VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+            VkDescriptorSetLayoutCreateInfo lighting{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+            lighting.bindingCount = 1; lighting.pBindings = &binding;
+            if (!detail::checkResult(createSetLayout(device.handle(), &lighting, nullptr, &created->lightingLayout), "vkCreateDescriptorSetLayout(lighting)")) { return false; }
+        }
     }
     VkPipelineLayoutCreateInfo layout{};
     layout.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -128,8 +135,8 @@ bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat col
     layout.pushConstantRangeCount = 1;
     layout.pPushConstantRanges = &transformRange;
     const auto materialLayout = materials.empty() ? VK_NULL_HANDLE : detail::TextureBindingAccess::layout(materials.front());
-    const VkDescriptorSetLayout setLayouts[]{materialLayout, created->lightingLayout};
-    layout.setLayoutCount = materials.empty() ? 0 : 2; layout.pSetLayouts = materialLayout ? setLayouts : nullptr;
+    const VkDescriptorSetLayout setLayouts[]{materialLayout, created->lightingLayout, materialLayout};
+    layout.setLayoutCount = materials.empty() ? 0 : depthOnly ? 1 : 3; layout.pSetLayouts = materialLayout ? setLayouts : nullptr;
     VkPipelineLayout createdLayout = VK_NULL_HANDLE;
     if (!detail::checkResult(created->createLayout(created->device, &layout, nullptr, &createdLayout), "vkCreatePipelineLayout")) { return false; }
     created->layout = createdLayout;
@@ -154,8 +161,9 @@ bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat col
     };
     vertexInput.vertexBindingDescriptionCount = 1;
     vertexInput.pVertexBindingDescriptions = &binding;
-    vertexInput.vertexAttributeDescriptionCount = 4;
-    vertexInput.pVertexAttributeDescriptions = attributes;
+    const VkVertexInputAttributeDescription shadowAttributes[]{attributes[0],attributes[3]};
+    vertexInput.vertexAttributeDescriptionCount = depthOnly ? 2 : 4;
+    vertexInput.pVertexAttributeDescriptions = depthOnly ? shadowAttributes : attributes;
     VkPipelineInputAssemblyStateCreateInfo assembly{};
     assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -180,8 +188,8 @@ bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat col
     color.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     VkPipelineColorBlendStateCreateInfo blend{};
     blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    blend.attachmentCount = 1;
-    blend.pAttachments = &color;
+    blend.attachmentCount = depthOnly ? 0 : 1;
+    blend.pAttachments = depthOnly ? nullptr : &color;
     constexpr VkDynamicState states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dynamic{};
     dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
@@ -189,8 +197,8 @@ bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat col
     dynamic.pDynamicStates = states;
     VkPipelineRenderingCreateInfo rendering{};
     rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    rendering.colorAttachmentCount = 1;
-    rendering.pColorAttachmentFormats = &created->format;
+    rendering.colorAttachmentCount = depthOnly ? 0 : 1;
+    rendering.pColorAttachmentFormats = depthOnly ? nullptr : &created->format;
     rendering.depthAttachmentFormat = depthFormat;
     VkGraphicsPipelineCreateInfo pipeline{};
     pipeline.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -215,7 +223,7 @@ bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat col
         return false;
     }
     state_ = std::move(created);
-    std::fprintf(stderr, "Vulkan: Triangle pipeline created; vertexMain / fragmentMain, color format %d, dynamic viewport/scissor.\n", static_cast<int>(colorFormat));
+    std::fprintf(stderr, "Vulkan: %s pipeline created; vertexMain / fragmentMain, color format %d, dynamic viewport/scissor.\n", depthOnly ? "Shadow" : "Triangle", static_cast<int>(colorFormat));
     return true;
 }
 
@@ -234,7 +242,7 @@ bool VulkanTrianglePipeline::recordDraw(VkCommandBuffer commandBuffer, VkExtent2
     return recordIndexedDraw(commandBuffer, extent, {transform, 0, indexCount()}, lighting);
 }
 
-bool VulkanTrianglePipeline::recordIndexedDraw(VkCommandBuffer commandBuffer, VkExtent2D extent, const IndexedDraw& draw, VkDescriptorSet lighting) const
+bool VulkanTrianglePipeline::recordIndexedDraw(VkCommandBuffer commandBuffer, VkExtent2D extent, const IndexedDraw& draw, VkDescriptorSet lighting, TextureBindingRef shadow) const
 {
     if (!state_ || !commandBuffer || extent.width == 0 || extent.height == 0)
     {
@@ -252,8 +260,10 @@ bool VulkanTrianglePipeline::recordIndexedDraw(VkCommandBuffer commandBuffer, Vk
         std::fprintf(stderr, "Vulkan error: Draw constants contain an invalid matrix, view or attribute flags.\n");
         return false;
     }
-    if ((!state_->materials.empty() && (draw.material >= state_->materials.size() || !lighting)) ||
-        (state_->materials.empty() && (draw.material != 0 || draw.transform.view == GeometryView::Material || draw.transform.view == GeometryView::Lit))) { return false; }
+    if (shadow && (state_->depthOnly || detail::TextureBindingAccess::device(shadow)!=state_->device)) { return false; }
+    if ((!state_->materials.empty() && (draw.material >= state_->materials.size() || (!state_->depthOnly && !lighting))) ||
+        (state_->materials.empty() && (draw.material != 0 || (!state_->depthOnly &&
+            (draw.transform.view == GeometryView::Material || draw.transform.view == GeometryView::Lit))))) { return false; }
     const auto& state = *state_;
     VkViewport viewport{};
     viewport.width = static_cast<float>(extent.width);
@@ -271,7 +281,13 @@ bool VulkanTrianglePipeline::recordIndexedDraw(VkCommandBuffer commandBuffer, Vk
     {
         const auto set = detail::TextureBindingAccess::set(state.materials[draw.material]);
         state.bindSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, state.layout, MaterialTextureSet, 1, &set, 0, nullptr);
-        state.bindSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, state.layout, 1, 1, &lighting, 0, nullptr);
+        if (!state.depthOnly) { state.bindSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, state.layout, 1, 1, &lighting, 0, nullptr); }
+        if (!state.depthOnly)
+        {
+            // The disabled Shader path still has a statically used set 2.
+            const auto shadowSet=detail::TextureBindingAccess::set(shadow ? shadow : state.materials.front());
+            state.bindSets(commandBuffer,VK_PIPELINE_BIND_POINT_GRAPHICS,state.layout,2,1,&shadowSet,0,nullptr);
+        }
     }
     state.pushConstants(commandBuffer, state.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(DrawTransform), &draw.transform);
     state.drawIndexed(commandBuffer, draw.indexCount, 1, draw.firstIndex, 0, 0);

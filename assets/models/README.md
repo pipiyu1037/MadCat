@@ -45,6 +45,12 @@ AABB 为 `[-1,-1,0]..[1,1,.5]`，居中点 `(0,0,.25)`，预览适配缩放 `.6`
 
 [光照解析参考](../../tests/LightingPixelReference.ps1)复用材质采样和投影插值辅助函数，以独立逆缩放、旋转、法线归一化、背面修正及 Lambert 公式计算预期值。灯光颜色 `(1,.8,.6)`，辐照度缩放 π，父 Y 旋转 −35°／55°、子 X 旋转 −25°；关闭时缩放为零。Debug／Release 八次采样每次 54 点通过；同时检查帧 UBO 创建／释放数量、释放顺序和灯光切换不重建管线。Debug 开启同步验证，无 warning／error；Release 未主动启用验证层。复现命令见 [基础方向光](../../README.md#基础方向光)。
 
+## 投射阴影参考资产
+
+[ShadowProbe.gltf](ShadowProbe.gltf) 是本仓库原创内嵌参考场景，复用 MaterialProbe 的原创 2×2 RGBA PNG，无第三方资产。一个 Mesh、两个 indexed quad：接收平面 `[-1,-1,0]..[1,1,0]`、基础色 `(.7,.7,.7,1)`；遮挡板 `[-.35,-.35,.5]..[.35,.35,.5]`、UV `[0,1]`、nearest／Clamp、MASK cutoff .5、doubleSided。两者法线均为 +Z，每个 quad 使用 `0,1,2,2,3,0` 索引。启动居中点 `(0,0,.25)`、适配缩放 .6，两个实例共享 8 顶点／12 索引和两个材质绑定。
+
+[独立投射阴影参考](../../tests/ShadowLightingReference.ps1) 使用上述解析常量与固定灯光／相机参数计算遮挡图 texel 深度、MASK 孔洞、接收点深度比较、偏移和九点 PCF，不读取程序矩阵／UBO 或 GPU 上传数据。参考包含稳定内点和滤波边缘点，检查亮区、全阴影及部分可见度。运行 `tests/TriangleWindowChecks.ps1 -Configuration Debug -Scenario shadow-lighting`，Release 替换配置；各 15 组场景通过，完整记录与限制见[方向光投射阴影](../../README.md#方向光投射阴影)。这不是 PBR／路径追踪验证。
+
 ## 外部开源模型
 
 [Suzanne](Suzanne/README.md) 是从 Khronos 官方 glTF Sample Assets 固定提交原样下载的经典猴头模型，采用 CC0 许可。目录保留 `.gltf`、外部 `.bin`、两张贴图及许可；没有格式转换。已通过 Debug／Release 导入和静态绘制、模型／相机变换、resize 与最小化恢复检查。来源、文件哈希、命令和验证边界见模型说明。

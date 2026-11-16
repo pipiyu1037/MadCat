@@ -53,6 +53,7 @@ madcat::rhi::DrawTransform expectedTransform;
 madcat::rhi::DrawTransform recordedTransform;
 VkFormat expectedFormat = VK_FORMAT_B8G8R8A8_SRGB;
 VkFormat expectedDepthFormat = VK_FORMAT_D32_SFLOAT;
+bool expectedDepthOnly = false;
 VkShaderModule expectedVertex = VK_NULL_HANDLE;
 VkShaderModule expectedFragment = VK_NULL_HANDLE;
 int layoutCreates = 0, pipelineCreates = 0;
@@ -325,9 +326,20 @@ VKAPI_ATTR VkResult VKAPI_CALL createPipelines(VkDevice device, VkPipelineCache 
         fragment.stage == VK_SHADER_STAGE_FRAGMENT_BIT && fragment.module == expectedFragment && std::strcmp(fragment.pName, "fragmentMain") == 0, "Wrong entry, stage or module");
     const auto* rendering = static_cast<const VkPipelineRenderingCreateInfo*>(info->pNext);
     check(rendering && rendering->sType == VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO && rendering->pNext == nullptr &&
-        rendering->viewMask == 0 && rendering->colorAttachmentCount == 1 && *rendering->pColorAttachmentFormats == expectedFormat &&
+        rendering->viewMask == 0 && (expectedDepthOnly ?
+            rendering->colorAttachmentCount == 0 && rendering->pColorAttachmentFormats == nullptr :
+            rendering->colorAttachmentCount == 1 && *rendering->pColorAttachmentFormats == expectedFormat) &&
         rendering->depthAttachmentFormat == expectedDepthFormat && rendering->stencilAttachmentFormat == VK_FORMAT_UNDEFINED, "Wrong dynamic-rendering formats");
     const auto& input = *info->pVertexInputState;
+    if (expectedDepthOnly)
+    {
+        check(input.vertexBindingDescriptionCount==1 && input.pVertexBindingDescriptions[0].stride==44 &&
+            input.vertexAttributeDescriptionCount==2 && input.pVertexAttributeDescriptions[0].location==0 &&
+            input.pVertexAttributeDescriptions[0].offset==0 && input.pVertexAttributeDescriptions[1].location==3 &&
+            input.pVertexAttributeDescriptions[1].offset==36, "Wrong shadow position/UV layout");
+    }
+    else
+    {
     check(input.vertexBindingDescriptionCount == 1 && input.vertexAttributeDescriptionCount == 4 &&
         input.pVertexBindingDescriptions[0].binding == 0 && input.pVertexBindingDescriptions[0].stride == 44 &&
         input.pVertexBindingDescriptions[0].inputRate == VK_VERTEX_INPUT_RATE_VERTEX &&
@@ -340,14 +352,16 @@ VKAPI_ATTR VkResult VKAPI_CALL createPipelines(VkDevice device, VkPipelineCache 
         input.pVertexAttributeDescriptions[3].location == 3 && input.pVertexAttributeDescriptions[3].binding == 0 &&
         input.pVertexAttributeDescriptions[3].format == VK_FORMAT_R32G32_SFLOAT && input.pVertexAttributeDescriptions[3].offset == 36,
         "Wrong vertex buffer layout");
+    }
     check(info->pInputAssemblyState->topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST && info->pInputAssemblyState->primitiveRestartEnable == VK_FALSE &&
         info->pRasterizationState->polygonMode == VK_POLYGON_MODE_FILL && info->pRasterizationState->cullMode == VK_CULL_MODE_NONE &&
         info->pRasterizationState->lineWidth == 1.0f && info->pRasterizationState->rasterizerDiscardEnable == VK_FALSE &&
         info->pMultisampleState->rasterizationSamples == VK_SAMPLE_COUNT_1_BIT && info->pDepthStencilState->depthTestEnable == VK_TRUE &&
         info->pDepthStencilState->depthWriteEnable == VK_TRUE && info->pDepthStencilState->depthCompareOp == VK_COMPARE_OP_LESS &&
         info->pDepthStencilState->stencilTestEnable == VK_FALSE, "Unexpected triangle fixed-function state");
-    check(info->pColorBlendState->attachmentCount == 1 && info->pColorBlendState->pAttachments[0].blendEnable == VK_FALSE &&
-        info->pColorBlendState->pAttachments[0].colorWriteMask == 15 && info->pDynamicState->dynamicStateCount == 2 &&
+    check((expectedDepthOnly ? info->pColorBlendState->attachmentCount==0 && info->pColorBlendState->pAttachments==nullptr :
+        info->pColorBlendState->attachmentCount == 1 && info->pColorBlendState->pAttachments[0].blendEnable == VK_FALSE &&
+        info->pColorBlendState->pAttachments[0].colorWriteMask == 15) && info->pDynamicState->dynamicStateCount == 2 &&
         info->pDynamicState->pDynamicStates[0] == VK_DYNAMIC_STATE_VIEWPORT && info->pDynamicState->pDynamicStates[1] == VK_DYNAMIC_STATE_SCISSOR &&
         info->pViewportState->viewportCount == 1 && info->pViewportState->scissorCount == 1, "Wrong blend/viewport/scissor state");
     *pipeline = VK_NULL_HANDLE;
@@ -923,6 +937,23 @@ void triangleChecks(const std::filesystem::path& root)
         }
         check(livePipelines.empty() && liveLayouts.empty(), "Pipeline/layout destruction leaked resources");
     }
+    expectedDepthOnly = true;
+    for (const auto* operation : {"pipeline", ""})
+    {
+        VulkanTrianglePipeline pipeline;
+        failingPipelineOperation = operation;
+        const bool success = pipeline.initialize(device, VK_FORMAT_UNDEFINED, vertex, fragment, vertices, indices, expectedDepthFormat, {}, true);
+        check(success == (operation[0]=='\0'), "Shadow creation/failure result wrong");
+        if (success)
+        {
+            recorded.clear();
+            check(pipeline.recordDraw(commandToken, expectedExtent, expectedTransform) && recorded=="BVSGIPD", "Shadow draw sequence wrong");
+        }
+        else { check(liveLayouts.empty() && livePipelines.empty(), "Shadow failure leaked objects"); }
+        ++cases;
+    }
+    failingPipelineOperation = {};
+    expectedDepthOnly = false;
     expectedFormat = VK_FORMAT_R8G8B8A8_UNORM;
     expectedDepthFormat = VK_FORMAT_D16_UNORM;
     {

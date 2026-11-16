@@ -13,8 +13,9 @@ public:
     ModelScene(const assets::ModelAssets& assets, assets::ModelAssetId model);
     [[nodiscard]] bool selectPose(int pose);
     [[nodiscard]] std::expected<std::vector<render::MeshDraw>, std::string> draws(float aspect);
+    [[nodiscard]] std::expected<std::vector<render::MeshDraw>, std::string> shadowDraws();
     [[nodiscard]] bool selectLighting(int preset);
-    [[nodiscard]] std::expected<rhi::FrameLighting, std::string> lighting();
+    [[nodiscard]] std::expected<rhi::FrameLighting, std::string> lighting(float aspect = 0, int shadowMode = 0);
 
 private:
     void spawn(size_t index);

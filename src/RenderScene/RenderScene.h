@@ -15,6 +15,16 @@ namespace madcat::render
 // Returned values own their data; no component or GPU objects are borrowed.
 [[nodiscard]] std::expected<rhi::FrameLighting, std::string> extractLighting(const scene::Scene& scene);
 
+// Explicit world-space coverage. Independent of camera and light translation.
+struct DirectionalShadowView
+{
+    glm::vec3 center{0};
+    glm::vec2 halfExtent{2};
+    float distance = 4, nearPlane = .1f, farPlane = 8;
+};
+[[nodiscard]] std::expected<glm::mat4, std::string> buildDirectionalShadowMatrix(
+    const rhi::FrameLighting& lighting, const DirectionalShadowView& view = {});
+
 struct PrimitiveId
 {
     assets::ModelAssetId model;
@@ -40,6 +50,9 @@ struct MeshDraw
 // flag, leaving color/UV draws available; fragment visualization marks magenta.
 [[nodiscard]] std::expected<std::vector<MeshDraw>, std::string> extractDraws(
     const scene::Scene& scene, const assets::ModelAssets& assets, ecs::Entity camera, float aspect);
+// Same extraction and material/normal contracts with an explicit clip matrix.
+[[nodiscard]] std::expected<std::vector<MeshDraw>, std::string> extractDraws(
+    const scene::Scene& scene, const assets::ModelAssets& assets, const glm::mat4& clipFromWorld);
 
 struct PrimitiveRange
 {

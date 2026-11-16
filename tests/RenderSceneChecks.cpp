@@ -259,6 +259,61 @@ void directionalLighting()
     check(empty && empty->valid() && empty->irradiance == rhi::FrameLighting{}.irradiance, "No-light Scene did not produce black lighting");
 }
 
+void shadowViews()
+{
+    rhi::FrameLighting light;
+    const auto matrix = render::buildDirectionalShadowMatrix(light);
+    check(bool(matrix), "Shadow view failed");
+    const auto p = *matrix * glm::vec4(2,2,3.9f,1);
+    near(p.x,1); near(p.y,-1); near(p.z,0); near(p.w,1);
+    near((*matrix * glm::vec4(0,0,-4,1)).z,1);
+    near((*matrix * glm::vec4(0,0,0,1)).z,3.9f/7.9f);
+    light.toLight={0,1,0,0};
+    const auto vertical = render::buildDirectionalShadowMatrix(light);
+    check(bool(vertical), "Vertical light produced degenerate basis");
+    near((*vertical * glm::vec4(0,3.9f,0,1)).z,0);
+    for (int mode=0; mode<5; ++mode)
+    {
+        render::DirectionalShadowView view;
+        if (mode==0) view.halfExtent.x=0;
+        if (mode==1) view.farPlane=view.nearPlane;
+        if (mode==2) view.distance=0;
+        if (mode==3) view.center.x=std::numeric_limits<float>::infinity();
+        if (mode==4) light.toLight={0,0,0,0};
+        check(!render::buildDirectionalShadowMatrix(light,view), "Invalid shadow view accepted");
+    }
+    auto imported=assets::importGltfGeometry(directory/"MaterialProbe.gltf");
+    check(bool(imported), "Shadow fixture import failed");
+    assets::ModelAssets assets; auto id=assets.add(std::move(*imported)); sandbox::ModelScene scene(assets,id);
+    const auto first=scene.shadowDraws(); check(first && !first->empty(), "Shadow extraction failed");
+    for (const int pose : {0,2,8})
+    {
+        check(scene.selectPose(pose),"Shadow camera pose failed");
+        const auto frame=scene.lighting(1.5f,2);
+        const auto camera=scene.draws(1.5f), shadow=scene.shadowDraws();
+        check(frame && frame->valid() && camera && shadow,"Shadow frame extraction failed");
+        const auto unpack=[](const auto& data) { glm::mat4 m(0); for(int c=0;c<4;++c)for(int r=0;r<4;++r)m[c][r]=data[c*4+r];return m; };
+        const glm::vec4 localPoint(.1f,.2f,0,1);
+        const auto actual=unpack(frame->shadowFromClip)*unpack(camera->front().transform.clipFromLocal)*localPoint;
+        const auto expected=unpack(shadow->front().transform.clipFromLocal)*localPoint;
+        for(int i=0;i<4;++i) { near(actual[i],expected[i]); }
+    }
+    check(scene.selectPose(0),"Shadow camera reset failed");
+    auto invalid=rhi::FrameLighting{}; invalid.shadow[0]=-1;
+    check(!invalid.valid(),"Negative shadow bias accepted");
+    invalid={}; invalid.shadowFromClip[2]=std::numeric_limits<float>::infinity();
+    check(!invalid.valid(),"Nonfinite shadow matrix accepted");
+    check(scene.selectPose(2), "Camera edit failed");
+    const auto cameraMoved=scene.shadowDraws();
+    check(cameraMoved && first->front().transform.clipFromLocal==cameraMoved->front().transform.clipFromLocal, "Shadow follows camera");
+    check(scene.selectLighting(1), "Light edit failed");
+    const auto rotated=scene.shadowDraws();
+    check(rotated && rotated->front().transform.clipFromLocal!=first->front().transform.clipFromLocal, "Shadow ignores light hierarchy");
+    check(scene.selectLighting(2), "Light off failed");
+    check(scene.shadowDraws()->front().transform.clipFromLocal==first->front().transform.clipFromLocal, "Irradiance changes depth geometry");
+    check(scene.selectPose(3) && scene.selectPose(4) && scene.shadowDraws()->empty(), "Empty shadow scene failed");
+}
+
 void lightingBoundaries()
 {
     scene::Scene scene;
@@ -294,8 +349,8 @@ int main(int argc, char** argv)
         directory = argv[1];
         extractionAndSharing(); editsAndSnapshots(); invalidInputs(); invalidGeometry(); assetIdentity(); realModels();
         attributesAndNormalTransforms(); invalidAttributes();
-        directionalLighting(); lightingBoundaries();
-        std::printf("RenderScene checks: 10 groups passed.\n"); return 0;
+        directionalLighting(); lightingBoundaries(); shadowViews();
+        std::printf("RenderScene checks: 11 groups passed.\n"); return 0;
     }
     catch (const std::exception& error) { std::fprintf(stderr, "RenderScene checks failed: %s\n", error.what()); return 1; }
 }

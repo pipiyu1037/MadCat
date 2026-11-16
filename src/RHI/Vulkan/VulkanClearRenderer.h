@@ -26,8 +26,8 @@ enum class ClearFrameResult
 };
 
 // Single-frame Vulkan presenter executing caller-provided graphics graph plans.
-// Borrows Device, Swapchain and optional prebuilt triangle
-// pipeline, which must outlive it. Retains the matching depth texture and waits
+// Borrows Device, Swapchain and optional prebuilt forward/shadow/viewer
+// pipelines, which must outlive it. Retains the matching depth texture and waits
 // for GPU completion before releasing
 // recorded commands, allowing the caller to destroy the pipeline afterwards.
 // Single-threaded use; owns one frame of command and synchronization resources.
@@ -46,7 +46,8 @@ public:
     // and permits retry; repeated successful initialization is rejected.
     [[nodiscard]] bool initialize(const VulkanDevice& device, const VulkanSwapchain& swapchain,
         TextureRef depth, const graph::GraphicsGraphFactory& graphFactory,
-        const VulkanTrianglePipeline* triangle = nullptr, const VulkanDepthViewPipeline* depthView = nullptr);
+        const VulkanTrianglePipeline* triangle = nullptr, const VulkanDepthViewPipeline* depthView = nullptr,
+        const VulkanTrianglePipeline* shadow = nullptr);
     // Clears color and depth (1.0), then draws the supplied matrix snapshots.
     // Retry means no image acquired (finite acquire timeout).
     // Unavailable/Failed are terminal: no further acquire or submit until rebuilt.
@@ -55,9 +56,10 @@ public:
     // Range/matrix validation occurs before acquisition. Parameters are copied
     // into commands; no caller-owned snapshots are borrowed after this call.
     // Lighting is validated before acquire and copied into this frame's coherent
-    // UBO after its previous submit completes. No caller memory is retained.
+    // UBO after its previous submit completes. Light draws receive the same
+    // pre-acquire validation and snapshot ownership. No caller memory is retained.
     [[nodiscard]] ClearFrameResult drawIndexed(const std::array<float, 4>& color, std::span<const IndexedDraw> draws,
-        const FrameLighting& lighting = {});
+        const FrameLighting& lighting = {}, std::span<const IndexedDraw> shadowDraws = {});
     // Waits for acquisition, command submission and present-resource retirement.
     // Also called on destruction, before releasing views or synchronization.
     [[nodiscard]] bool waitIdle();

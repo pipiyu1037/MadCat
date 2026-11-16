@@ -101,7 +101,7 @@ bool VulkanFrameLighting::initialize(const VulkanDevice& device, VkDescriptorSet
     write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; write.pBufferInfo = &bufferInfo;
     updateSets(created->device, 1, &write, 0, nullptr);
     state_ = std::move(created);
-    std::fprintf(stderr, "Vulkan: Frame lighting buffer created; 32 bytes, coherent memory type %u.\n", memoryType);
+    std::fprintf(stderr, "Vulkan: Frame lighting buffer created; %zu bytes, coherent memory type %u.\n", sizeof(FrameLighting), memoryType);
     return true;
 }
 void VulkanFrameLighting::write(const FrameLighting& lighting) { std::memcpy(state_->mapped, &lighting, sizeof(lighting)); }

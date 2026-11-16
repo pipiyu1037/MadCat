@@ -14,10 +14,11 @@ class GraphicsCommands
 {
 public:
     virtual ~GraphicsCommands() = default;
+    // UINT32_MAX omits an attachment; at least one attachment is required.
     virtual bool beginRendering(uint32_t color, uint32_t depth, AttachmentLoad load,
         const std::array<float, 4>& clearColor) = 0;
     virtual bool drawIndexed(uint32_t vertices, uint32_t indices, uint32_t lighting,
-        std::span<const uint32_t> textures, const IndexedDraw& draw) = 0;
+        std::span<const uint32_t> textures, const IndexedDraw& draw, uint32_t shadow = UINT32_MAX) = 0;
     virtual bool endRendering() = 0;
     // Fullscreen depth visualization with a color-only rendering instance.
     virtual bool displayDepth(uint32_t) { return false; }
