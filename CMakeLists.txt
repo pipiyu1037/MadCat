@@ -239,11 +239,7 @@ add_custom_target(MadCatRenderGraphChecks
     VERBATIM
 )
 
-add_executable(MadCat
-    apps/Sandbox/main.cpp
-    apps/Sandbox/TriangleScene.cpp
-    apps/Sandbox/ModelScene.cpp
-    apps/Sandbox/ModelMaterials.cpp
+add_library(MadCatRHI STATIC
     src/RHI/Vulkan/VulkanBuffer.cpp
     src/RHI/Vulkan/VulkanDepthTexture.cpp
     src/RHI/Vulkan/VulkanSampledTexture.cpp
@@ -260,17 +256,40 @@ add_executable(MadCat
     src/RHI/Vulkan/VulkanTrianglePipeline.cpp
     src/Shader/Spirv.cpp
 )
-target_compile_features(MadCat PRIVATE cxx_std_23)
-set_target_properties(MadCat PROPERTIES CXX_EXTENSIONS OFF)
-target_include_directories(MadCat PRIVATE src)
-target_compile_definitions(MadCat PRIVATE
+target_compile_features(MadCatRHI PUBLIC cxx_std_23)
+target_include_directories(MadCatRHI PUBLIC src)
+target_compile_definitions(MadCatRHI PRIVATE VK_NO_PROTOTYPES)
+target_link_libraries(MadCatRHI PUBLIC MadCatRenderGraph PRIVATE glfw Vulkan::Headers)
+set_target_properties(MadCatRHI PROPERTIES CXX_EXTENSIONS OFF)
+
+add_library(MadCatRuntime STATIC
+    src/Runtime/Application.cpp
+    src/Runtime/SceneApplication.cpp
+    src/RenderScene/VulkanMaterials.cpp
+)
+target_compile_features(MadCatRuntime PUBLIC cxx_std_23)
+target_compile_definitions(MadCatRuntime PRIVATE
     VK_NO_PROTOTYPES
     MADCAT_SHADER_DIRECTORY="${CMAKE_CURRENT_BINARY_DIR}/shaders/triangle"
 )
-target_link_libraries(MadCat PRIVATE glfw Vulkan::Headers MadCatRenderScene MadCatRenderGraph)
+target_link_libraries(MadCatRuntime PUBLIC MadCatRenderScene MadCatRenderGraph PRIVATE MadCatRHI glfw Vulkan::Headers)
+set_target_properties(MadCatRuntime PROPERTIES CXX_EXTENSIONS OFF)
 
+add_executable(MadCat apps/Sandbox/main.cpp apps/Sandbox/TriangleScene.cpp apps/Sandbox/ModelScene.cpp)
+target_link_libraries(MadCat PRIVATE MadCatRuntime)
+set_target_properties(MadCat PROPERTIES CXX_EXTENSIONS OFF)
 if(MSVC)
-    target_compile_options(MadCat PRIVATE /W4 /permissive- /utf-8)
+    foreach(target MadCatRHI MadCatRuntime MadCat)
+        target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8)
+    endforeach()
+endif()
+
+add_subdirectory(examples/BasicScene)
+
+add_executable(ApplicationChecks EXCLUDE_FROM_ALL tests/ApplicationChecks.cpp)
+target_link_libraries(ApplicationChecks PRIVATE MadCatRuntime)
+if(MSVC)
+    target_compile_options(ApplicationChecks PRIVATE /W4 /permissive- /utf-8)
 endif()
 
 add_executable(StaticModelChecks EXCLUDE_FROM_ALL tests/StaticModelChecks.cpp apps/Sandbox/StaticModel.cpp)

@@ -1,8 +1,8 @@
-#include "ModelMaterials.h"
+#include "VulkanMaterials.h"
 
 #include <algorithm>
 
-namespace madcat::sandbox
+namespace madcat::render
 {
 std::expected<std::vector<rhi::TextureBindingRef>, std::string> prepareMaterialBindings(
     const rhi::VulkanDevice& device, const assets::ModelAssets& assets, std::span<const render::MaterialData> materials)

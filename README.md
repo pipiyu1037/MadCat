@@ -2,7 +2,26 @@
 
 使用自研 ECS、Vulkan 和 Slang 的渲染引擎，目前可绘制彩色三角形，并通过 `--gltf` 显示共享 GPU 几何的双实例 glTF／GLB 场景。支持主相机深度和方向光阴影图查看、基础色材质／贴图、方向光漫反射及投射阴影、Scene／相机矩阵、深度遮挡、单帧同步、resize／最小化恢复，以及 Shader 手动编译、SPIR-V 验证和 Vulkan 资源的 RAII 管理。
 
-文档：[开发范围、进度与验收](docs/project-development.md) · [架构设计](docs/architecture-design.md)。
+文档：[Hello World：用 C++ 写第一个实验](docs/hello-world.md) · [开发范围、进度与验收](docs/project-development.md) · [架构设计](docs/architecture-design.md)。
+
+## 从这里开始
+
+最小用户示例已实现于 [BasicScene/main.cpp](examples/BasicScene/main.cpp)：加载一个模型，创建 Entity 场景、相机和方向光，选择前向渲染图，再调用共享运行入口。示例包含完整用户代码及模型／相机／灯光更新，[Hello World](docs/hello-world.md)按源码顺序解释如何使用引擎。下面保留现有构建说明、模块用法和验证记录，供按需查阅。
+
+第一版的主要使用方式已确定为：在仓库中新建 C++ 渲染实验，加载场景，编写或组合自己的 Pass。BasicScene 与 Sandbox 现已复用 `MadCatRuntime`，新实验可参考 [BasicScene 的构建登记](examples/BasicScene/CMakeLists.txt)链接该目标；CustomPass 尚待实现。目标用法见[用户入口设计](docs/architecture-design.md#用户入口与-c-实验工作流)，下一步见[近期实施顺序](docs/project-development.md#用户使用方式与近期实施顺序)。
+
+## 最小 C++ 用户示例
+
+从 [BasicScene/main.cpp](examples/BasicScene/main.cpp)查看完整用户代码：导入模型、实例化 Scene、设置相机和方向光、选择 Clear → Forward → Present 图，最后调用 [runtime::run](src/Runtime/Application.h)。`SceneCallbacks::update` 展示用户修改 Transform 和光照的位置；窗口、设备、世界变换更新、GPU 上传与呈现由引擎执行。示例和 Sandbox 不相互依赖。
+
+按下节完成首次 CMake 配置后，可构建和检查此示例：
+
+```powershell
+cmake --build build --config Debug --target BasicScene MadCatShaders
+.\build\Debug\BasicScene.exe
+```
+
+默认显示一个 Suzanne 模型；也可用位置参数传入自己的 glTF／GLB 路径。按 1 恢复、2 移动模型、3 移动相机、4 关灯，这些操作由示例中的用户回调实现。默认资产与 Shader 路径来自构建配置，可从其他工作目录启动；尚无安装包资源定位。当前 Scene 入口支持固定启动几何和无投射阴影 Lambert，通用自定义管线与 HDR 将由后续 CustomPass 增量补充。
 
 ## 构建与运行
 
@@ -582,7 +601,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.p
 
 原创 [ShadowProbe](assets/models/README.md#投射阴影参考资产) 使用接收平面和带 MASK 孔洞的遮挡板。Debug／Release 各通过 15 组 GPU 解析像素检查：默认帧 227 点包含亮区、完全阴影和 33 个 PCF 过渡点，硬阴影过渡计数为零，关闭时接收面全部受光；同时覆盖方向／关灯、相机变化、非均匀缩放、镜像、删除至空／恢复、反序、resize 与最小化恢复。Debug 原光照八组、主相机深度八组、原阴影查看与投射阴影最小化直接退出回归通过，同步验证无 warning／error。Release 未主动启用验证层。两种配置各 11 组 RenderScene、11 组图和 68 项管线模拟检查、三个 Shader 包编译／验证及各 12 项失败恢复通过。
 
-实际 GPU 为 RTX 5060 Ti、D32_SFLOAT；截图已检查，日志／截图在 `build/verification/triangle/`，文件名包含 `shadow-lighting-shadows-ShadowProbe`。未测性能或验证其他 GPU／驱动。当前只有单方向光和固定范围阴影，无级联、接触硬化或透明混合投影；仍直接输出 SDR，HDR／显示转换是下一候选增量，PBR 和路径追踪尚未实现。
+实际 GPU 为 RTX 5060 Ti、D32_SFLOAT；截图已检查，日志／截图在 `build/verification/triangle/`，文件名包含 `shadow-lighting-shadows-ShadowProbe`。未测性能或验证其他 GPU／驱动。当前只有单方向光和固定范围阴影，无级联、接触硬化或透明混合投影；仍直接输出 SDR，PBR 和路径追踪尚未实现。可复用运行层与 BasicScene 已实现，后续以 HDR／显示转换检验 CustomPass 工作流，见[近期实施顺序](docs/project-development.md#用户使用方式与近期实施顺序)。
 
 ## 手动编译 Shader
 
@@ -731,7 +750,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.p
 
 `VulkanSwapchain::initialize(device, surface, framebufferExtent)` 要求 Device 和 Surface 已初始化且属于同一个 Instance，尺寸以像素为单位。刷新 Surface 支持后再次确认所用队列能够呈现，并创建交换链、枚举图像；`VK_INCOMPLETE` 会重试枚举。失败及图像枚举期间的异常会清理部分创建的交换链，所有者保持空状态，支持重试；重复初始化被拒绝且保留原交换链。`images()` 返回的 span 和其中的图像句柄在交换链销毁后失效；图像由交换链管理，不单独销毁。[图像枚举](https://docs.vulkan.org/refpages/latest/refpages/source/vkGetSwapchainImagesKHR.html)
 
-组装顺序见 [`Sandbox`](apps/Sandbox/main.cpp)：Instance、Surface、Device、Shader Module 先创建，`SandboxApplication` 随后拥有可替换的 `Presentation`，后者按 Swapchain、管线、帧渲染器的顺序声明成员，保证先完成等待并释放命令资源。重建策略与窗口回调在应用层，Vulkan 资源和实际等待仍由后端执行。帧渲染器的 `waitIdle()` 和析构在释放自身资源前等待 acquisition、提交和呈现资源退役；管线与 Swapchain 析构不自动等待 GPU。应用销毁前注销回调并清除窗口用户指针。窗口须活到 Surface 释放后，Instance 须活到 Device／Surface 释放后；Device 最后的析构等待不能保护此前已释放的子资源。[Device 销毁要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroyDevice.html)、[Swapchain 销毁要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroySwapchainKHR.html)
+组装顺序见 [运行层](src/Runtime/Application.cpp)：Instance、Surface、Device、Shader Module 先创建，内部 GraphicsLoop 随后拥有可替换的 Presentation，后者按 Swapchain、管线、帧渲染器的顺序声明成员，保证先完成等待并释放命令资源。BasicScene 和 Sandbox 复用此流程。重建策略与窗口回调在运行层，Vulkan 资源和实际等待仍由后端执行。帧渲染器的 `waitIdle()` 和析构在释放自身资源前等待 acquisition、提交和呈现资源退役；管线与 Swapchain 析构不自动等待 GPU。应用销毁前注销回调并清除窗口用户指针。窗口须活到 Surface 释放后，Instance 须活到 Device／Surface 释放后；Device 最后的析构等待不能保护此前已释放的子资源。[Device 销毁要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroyDevice.html)、[Swapchain 销毁要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroySwapchainKHR.html)
 
 每帧等待上一帧三个完成条件后复用资源；acquire 使用 50 ms 超时，无可用图像时返回 `Retry`，不重置提交 Fence。成功后记录 `UNDEFINED`／`PRESENT_SRC_KHR` → `COLOR_ATTACHMENT_OPTIMAL` → `PRESENT_SRC_KHR` 转换；提交等待阶段为颜色附件输出，完成信号覆盖全部命令。只等待确实已发起的工作；录制／提交失败仍等待已发起的 acquisition，present 的 out-of-date／surface-lost 与内存不足排队语义分开处理。[acquire 要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkAcquireNextImageKHR.html)、[present 错误语义](https://docs.vulkan.org/refpages/latest/refpages/source/vkQueuePresentKHR.html)
 

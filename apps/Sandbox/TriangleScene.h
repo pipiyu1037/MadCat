@@ -16,7 +16,7 @@ struct TriangleDraws
     size_t count = 1;
 };
 
-// CPU-only example scene. GPU geometry stays in SandboxApplication, not ECS.
+// CPU-only example scene. GPU geometry stays in the runtime, not ECS.
 // Explicit model/camera selection belongs to this exercise; this is not a
 // general RenderScene extractor, asset model or camera controller.
 class TriangleScene

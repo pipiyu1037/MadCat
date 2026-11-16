@@ -29,7 +29,8 @@
 
 | 决定 | 约定 | 取舍与状态 |
 |---|---|---|
-| 场景对象 | 所有场景 Object 统一由 Entity 管理，通过 Transform、Mesh、Material 等组件组合表达 | 2026-10-29 用户确认；组件保存场景数据与资产标识，RenderScene 提取渲染数据；自动渲染链路待实现 |
+| 场景对象 | 所有场景 Object 统一由 Entity 管理，通过 Transform、Mesh、Material 等组件组合表达 | 2026-10-29 用户确认；CPU 模型实例与 RenderScene／共享 GPU 几何绘制已接通，实例材质覆盖等仍待实现 |
+| 首版用户入口 | 在仓库中新建 C++ 渲染实验，加载场景并编写、组合自己的 Pass | 2026-11-16 用户确认；可复用运行层及 BasicScene 已实现，CustomPass 待实现 |
 | Pass 分阶段 | 声明、准备、执行；界面通过参数入口提交修改 | 生命周期清楚，作者需表达三个阶段 |
 | Pass 阶段数据流 | 声明结果随具体图保存，准备结果由算法模块管理，执行显式接收二者及本帧参数 | 首版使用普通 C++ 类型和函数约定，不要求共同基类；活动图与候选图分别保存声明数据 |
 | C++ 输入输出 | 明确的输入／输出结构和图资源句柄直接连接 | 编译器检查字段及基本资源类型，格式、尺寸和依赖仍由图检查 |
@@ -47,6 +48,57 @@
 
 算法模块表示可以保留参数及长期状态、组合图节点的算法单元；图节点表示一段有明确资源访问声明的 GPU 工作。下文的 Pass 编写示例围绕节点的声明／准备／执行展开，不要求一个完整效果对应一次 Draw 或 Dispatch。
 
+## 用户入口与 C++ 实验工作流
+
+2026-11-16 用户确认首版首先服务于“在仓库中新建 C++ 实验”的用法。用户从一个最小 C++ 示例开始，学习创建应用与场景、连接渲染流程并得到画面，再选择或编写算法、连接 Pass 和检查结果。先实现并验证示例代码，再围绕实际接口编写入门文档。交付顺序与验收见[项目开发文档](project-development.md#用户使用方式与近期实施顺序)。当前入口见 [Application.h](../src/Runtime/Application.h)，完整用户程序见 [BasicScene](../examples/BasicScene/main.cpp)，逐段讲解见 [Hello World](hello-world.md)；通用 Pass 准备、工具和更新流程仍是后续目标。
+
+### 用户代码与引擎职责（目标）
+
+| 用户的工作 | 用户编辑的位置 | 引擎承担的工作 |
+|---|---|---|
+| 新建实验并运行 | 实验目录、程序入口及构建登记 | 提供可链接的运行目标，复用窗口、设备、事件循环和呈现流程 |
+| 加载模型、创建相机和灯光 | 场景初始化代码 | 通过 Assets、Scene 与 RenderScene 完成导入、实例化和 GPU 数据准备 |
+| 移动物体、修改算法参数 | 每帧更新与参数入口 | 组织更新阶段、世界变换与渲染提取，固定本帧参数 |
+| 选择或实现算法 | 建图代码、C++ Pass 与 Slang 文件 | 提供 RHI 命令、图资源、依赖分析和同步，统一提交 |
+| 检查结果、更新 Shader | 参数与查看入口、显式编译操作 | 显示所选图资源，在安全边界应用成功候选并保留失败诊断 |
+
+普通实验从基础前向渲染流程起步，随后可以显式连接自定义 Pass。用户保留对场景和算法的控制；窗口重建、GPU 完成跟踪及呈现细节集中在运行层和 RHI。当前 [BasicScene 构建登记](../examples/BasicScene/CMakeLists.txt)只声明用户源文件、链接 MadCatRuntime 并配置资产根目录，产物进入 `build/<配置>`；Shader 继续使用显式 MadCatShaders 目标。任意 Shader 包登记与通用管线准备待 CustomPass 增量完成。
+
+### 实验入口与生命周期（当前实现）
+
+2026-11-16 实现 [runtime::run](../src/Runtime/Application.h)：用户先以现有 Assets／Scene API 创建数据，再传入应用配置、场景、资产库及相机 Entity。运行入口为阻塞函数，不要求实验继承基类。下列片段展示已创建场景后的实际调用，完整程序见 [BasicScene/main.cpp](../examples/BasicScene/main.cpp)。
+
+```cpp
+madcat::runtime::ApplicationOptions application;
+application.graphFactory = madcat::passes::buildForwardGraph;
+madcat::runtime::SceneCallbacks callbacks;
+callbacks.update = [&](const madcat::runtime::FrameInfo& frame) {
+    // 在这里修改 scene；随后由运行层更新世界变换并提取渲染数据。
+};
+return madcat::runtime::run(application, scene, assets, camera, callbacks);
+```
+
+| 入口 | 调用时机与约束 |
+|---|---|
+| 场景初始化 | 用户在调用 run 前导入资产并创建 Scene／相机／灯光；run 更新初始世界变换、打包和上传启动几何，首次缺少几何或有效相机则诊断失败 |
+| 每帧更新 | keyPressed 提供数字／大写字母输入；update 在世界变换更新和 RenderScene 提取前执行。结构性修改遵守现有查询边界，纯数值变化不重建图。FrameInfo 提供输出宽高比及距上次渲染尝试的时间，暂停等待时间计入间隔 |
+| 建图 | ApplicationOptions.graphFactory 在创建或重建呈现资源时，为每个交换链图像构建计划；计划不随数值参数重建。当前运行期图切换及 Shader 版本发布未实现 |
+
+这里的实验入口与 Pass 的声明／准备／执行是两个层次。实验负责场景与算法组合，具体 Pass 记录 GPU 工作；graphFactory 不替代 Pass 的准备阶段，也不将建图变为每帧必做的操作。当前仍准备固定的 Forward 和可选 Shadow／DepthView 管线，没有通用 Prepared 接口。
+
+Scene 入口自动提取无投射阴影的 Lambert 绘制和光照。进阶入口 `runGraphics` 接收启动 GeometryBatch 与逐帧 RenderFrame 回调，供 Sandbox 保留独立相机／阴影绘制和参考场景。启动几何／材质集合固定，支持 Transform／相机／光照修改及已上传几何的实例变化；引入新几何或更新资产材质需重新启动。默认 Shader 路径来自构建配置，ApplicationOptions 可显式覆盖；尚无安装包资源定位。
+
+两条入口均返回 0 表示正常关闭，非零表示失败。回调异常不越过窗口 C 回调；帧数据失败发生在 acquire 前，准备失败与提交后回调异常均走受控清理。presented 仅表示呈现请求成功，不能当作 GPU／呈现完成信号。运行层为单线程、单应用使用，调用方配置、场景、资产及回调捕获须覆盖整个 run 调用。
+
+### 所有权与演进边界
+
+- 用户实验持有 CPU 场景、资产及算法模块的长期状态。运行层组织它们的调用，RenderScene 管理派生 GPU 场景数据，图管理执行计划和中间资源；导入图不转移逻辑所有权。
+- 实验对象覆盖完整运行期；运行结束时停止提交，完成相关 GPU 工作及呈现资源退役，再释放被借用的实验和算法状态。记录与提交所用的准备版本、绑定、上传内存和资源引用仍由 RHI 按完成条件保活。
+- 应用运行层负责窗口与事件、设备、帧循环和呈现，通过既有 Scene、RenderScene、RenderGraph 和 RHI 接口组织工作。候选版本安全应用仍是后续职责，当前未实现运行期替换。
+- 普通 Pass 通过显式管线、绑定和 Draw／Dispatch 表达工作。现有 `displayDepth()`、按附件选择 Forward／Shadow 管线及固定帧参数工厂是当前验证路径的限制；后续用自定义 Pass 场景驱动接口收敛，避免继续按算法名称扩充通用执行器。
+
+BasicScene 与 Sandbox 现已共用运行层，分别消费 Scene 入口和帧数据入口。CMake 将原先直接编入 MadCat 的后端提取为 MadCatRHI，将运行组织及 RenderScene 材质适配编入 MadCatRuntime，CPU Scene／RenderScene／图检查目标继续独立。随后计划建立 `examples/CustomPass`，以 HDR 颜色及显示转换验证自定义 Shader、显式管线／绑定、图内颜色资源与参数传递；该目录尚不存在。完整参数面板、运行期 Shader 更新与通用查看器按已有目标逐步接入。
+
 ## 模块边界和数据流
 
 建议采用单进程、按职责拆分的 C++ 模块。目录和接口按当前实际需求逐步建立，不一次性生成全部框架。
@@ -55,6 +107,7 @@
 |---|---|---|
 | Core | 日志、错误、基础标识和通用工具 | 标准库 |
 | Platform | 窗口、输入和平台事件 | Core、窗口库 |
+| 应用运行层 | `MadCatRuntime` 提供实验入口，组织窗口／设备、帧循环和呈现；候选版本安全更新仍待实现 | 窗口库、Scene、RenderScene、RenderGraph、RHI |
 | ECS | Entity、组件存储、查询和结构性修改 | Core |
 | Scene | 场景组件、层级、Transform 更新和场景版本 | ECS、数学库 |
 | Assets | CPU 模型、材质、图片及资源标识 | Core、模型与图片库 |
@@ -64,7 +117,7 @@
 | RenderGraph | Pass 声明、依赖分析、图资源和同步计划 | Core、RHI |
 | Passes | 阴影、基础光照、PBR、后处理、路径追踪等算法 | RenderGraph、RenderScene、RHI |
 | Tools | 调参、Pass 开关、资源查看和编译操作 | 相应模块的公开接口 |
-| Sandbox | 组装程序、示例场景和默认渲染图 | 上述模块 |
+| Sandbox／实验示例 | 用户侧的场景、参数与渲染图组合；BasicScene 和 Sandbox 共用运行入口 | 应用运行层及相应模块 |
 
 ECS 保存场景事实，例如局部 Transform、模型资源标识和灯光参数。世界矩阵由 Scene 计算，GPU 缓冲、材质表和光追实例表由 RenderScene 派生。ECS 不保存 `VkBuffer`、`VkImage`、Descriptor Set 或 Command Buffer。
 
@@ -746,7 +799,7 @@ Sandbox 模型默认 M 基础材质模式，无模型默认颜色模式；N／U�
 
 [Image](../src/Assets/Image.h)为无 GPU 类型的 RGBA8、顶行优先、非预乘数组。[GltfImages](../src/Assets/GltfImages.cpp)读取外部相对 URI、base64 或 bufferView，复用 cgltf 的 URI／base64 接口；[Image.cpp](../src/Assets/Image.cpp)仅包装开源 stb_image 的 PNG／JPEG 内存解码，不执行 ICC 或方向变换。[GltfMaterials](../src/Assets/GltfMaterials.cpp)单独转换材质和采样器引用，Gltf.cpp 统一组织各阶段与失败发布边界。stb_image 2.30 固定提交，实现在单独私有 C 翻译单元编译，不依赖系统图片解码或 COM。输入与输出各限 256 MiB，尺寸 1～16384；检查 MIME／格式／范围，失败不发布模型，分配异常可传播。公共 API 不暴露 stb_image／cgltf 对象。
 
-RenderScene 为启动几何去重材质键 `(ModelAssetId, optional materialIndex)`，PrimitiveRange 保存材质槽，resolveDraws 复制基础因子／裁剪／双面／镜像标志与槽号；快照不借用资产对象。法线列的 xyz 与 offset 不变，w 复用为 RGB 因子，120／124 为 alpha／cutoff，仍满足固定 128 字节布局。[ModelMaterials](../apps/Sandbox/ModelMaterials.h)是 Sandbox 的启动桥接：模型／图片键只上传一次，同一纹理键共享绑定，不作为通用资产缓存。
+RenderScene 为启动几何去重材质键 `(ModelAssetId, optional materialIndex)`，PrimitiveRange 保存材质槽，resolveDraws 复制基础因子／裁剪／双面／镜像标志与槽号；快照不借用资产对象。法线列的 xyz 与 offset 不变，w 复用为 RGB 因子，120／124 为 alpha／cutoff，仍满足固定 128 字节布局。[VulkanMaterials](../src/RenderScene/VulkanMaterials.h)是由运行层调用的 RenderScene GPU 材质适配：模型／图片键只上传一次，同一纹理键共享绑定，不作为通用资产缓存。
 
 [RHI 采样上传](../src/RHI/Vulkan/VulkanSampledTexture.h)查询 RGBA8 sRGB 的 sampled／linear／blit 能力和尺寸，coherent staging 复制 mip 0，逐级线性 blit，再转为 `SHADER_READ_ONLY_OPTIMAL`、Fragment sampled-read；每次启动上传使用专用命令池和 fence，完成后才发布并释放上传区。返回资源只读，队列为当前 Graphics／Compute／Present 队列，未来图导入必须声明这一外部状态。图像、视图和内存由 TextureRef 共享拥有；深度和采样图像复用私有资源记录，不混淆其用途或初始状态。
 
@@ -772,7 +825,7 @@ L 模式计算 `albedo × irradiance × max(dot(N,L),0) / π`，法线在透视�
 
 [Graph／Builder／Plan](../src/RenderGraph/RenderGraph.h) 不依赖 Vulkan，`Resource` 持有图身份、逻辑资源索引与版本。导入以底层对象的类型和实际身份去重，初始内容有效性和访问状态必须显式交接；冲突导入返回诊断。写入返回新版本，区分 Overwrite 完整初始化与 Preserve 保留修改。一个版本最多有一个写入后继；读取依赖其生产者，后继写入还依赖旧版本的所有读取者。图编译检查初始化、资源种类、跨图引用、写入分叉和环，不做自动裁剪或资源复制。
 
-`addPass` 按值保存 Pass 与 `Declared`，返回节点索引和类型化 Outputs，编译计划拥有声明数据。每个 Pass 的 Parameters 由调用方按节点提供，Plan 在记录开始时复制为本帧数据；参数类型不符或命令失败返回带节点名称的错误。候选 Graph 后续失败不修改已经编译的 Plan。当前尚未实现通用 `PrepareInfo／Prepared`：Sandbox 仍先创建匹配的固定 Vulkan 管线，帧上下文借用它并保留全部实际资源；不能把当前固定管线用法推广为任意 Shader 更新支持。
+`addPass` 按值保存 Pass 与 `Declared`，返回节点索引和类型化 Outputs，编译计划拥有声明数据。每个 Pass 的 Parameters 由调用方按节点提供，Plan 在记录开始时复制为本帧数据；参数类型不符或命令失败返回带节点名称的错误。候选 Graph 后续失败不修改已经编译的 Plan。当前尚未实现通用 `PrepareInfo／Prepared`：运行层仍先创建匹配的固定 Vulkan 管线，帧上下文借用它并保留全部实际资源；不能把当前固定管线用法推广为任意 Shader 更新支持。
 
 [GraphicsGraphFactory](../src/RenderGraph/GraphicsGraph.h) 是当前图形执行的窄入口，接收已有 Graph 与导入句柄，返回编译计划及帧参数构造函数。Sandbox 显式传入 [buildForwardGraph](../src/Passes/ForwardPass.h)。建图策略归 C++ Pass 层；[VulkanFrameGraph](../src/RHI/Vulkan/VulkanFrameGraph.h) 只提供实际导入、命令和屏障转换，不依赖具体 Pass 类型。此接口当前服务现有绘制，不承诺通用 Compute、离屏资源准备或任意参数编辑。
 
