@@ -1,18 +1,19 @@
 cmake_minimum_required(VERSION 3.25)
 
-# Only these self-contained exercises are supported; this is not a general
-# shader package format. Keep the existing triangle invocation compatible.
+# Self-contained graphics packages use vertexMain/fragmentMain. Ray Query has
+# its own compute contract. Package names cannot escape the output directory.
 if(NOT DEFINED SHADER_PACKAGE)
     set(SHADER_PACKAGE triangle)
 endif()
 set(required_tools SLANGC SPIRV_VAL)
-if(SHADER_PACKAGE STREQUAL "triangle" OR SHADER_PACKAGE STREQUAL "depth-view" OR SHADER_PACKAGE STREQUAL "shadow")
-    set(stages vertex fragment)
-elseif(SHADER_PACKAGE STREQUAL "ray-query")
+if(NOT SHADER_PACKAGE MATCHES "^[A-Za-z0-9][A-Za-z0-9_-]*$")
+    message(FATAL_ERROR "Invalid shader package name: ${SHADER_PACKAGE}")
+endif()
+if(SHADER_PACKAGE STREQUAL "ray-query")
     set(stages compute)
     list(APPEND required_tools SPIRV_DIS)
 else()
-    message(FATAL_ERROR "Unsupported shader package: ${SHADER_PACKAGE}")
+    set(stages vertex fragment)
 endif()
 foreach(required SLANGC SPIRV_VAL EXPECTED_SLANG_VERSION SOURCE_FILE OUTPUT_ROOT)
     if(NOT DEFINED ${required} OR "${${required}}" STREQUAL "")

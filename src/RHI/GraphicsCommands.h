@@ -1,6 +1,7 @@
 #pragma once
 
 #include "IndexedDraw.h"
+#include "GraphicsPipeline.h"
 #include <array>
 #include <cstdint>
 #include <span>
@@ -22,5 +23,9 @@ public:
     virtual bool endRendering() = 0;
     // Fullscreen depth visualization with a color-only rendering instance.
     virtual bool displayDepth(uint32_t) { return false; }
+    virtual bool bindPipeline(const GraphicsPipelineRef&) { return false; }
+    virtual bool bindSampledTexture(uint32_t, uint32_t) { return false; }
+    virtual bool pushConstants(std::span<const std::byte>) { return false; }
+    virtual bool draw(uint32_t) { return false; }
 };
 }

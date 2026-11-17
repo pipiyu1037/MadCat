@@ -141,6 +141,6 @@ cmake --build build --config Debug --target BasicScene MadCatShaders
 
 ## 本例的边界
 
-当前 Scene 入口使用启动时固定的几何和材质，支持场景 Transform、相机和光照更新；加入启动集合之外的几何或更改资产材质需要重新启动。它提供无投射阴影的 Lambert 前向渲染，尚无通用 Shader／管线准备、HDR、自定义后处理和运行期 Shader 更新。自定义 Pass 的后续工作见[近期实施顺序](project-development.md#用户使用方式与近期实施顺序)。
+当前 Scene 入口使用启动时固定的几何和材质，支持场景 Transform、相机和光照更新；加入启动集合之外的几何或更改资产材质需要重新启动。本例选择无投射阴影的 Lambert 前向渲染。下一篇 [CustomPass](custom-pass.md)已实现独立 Shader／受限图形管线准备、图内 HDR 与自定义显示 Pass；运行期 Shader 更新仍待实现。
 
 本例已通过 Debug／Release 构建和解析平面场景的模型／相机／光照变化、resize／最小化恢复检查；默认 Suzanne 已通过可见性冒烟及截图检查。另一个复制示例的独立消费目标也完成了构建和相关窗口验证。具体范围与限制见[当前实现进度](project-development.md#当前实现进度)。

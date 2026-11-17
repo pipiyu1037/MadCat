@@ -15,6 +15,7 @@ struct ApplicationOptions
     graph::GraphicsGraphFactory graphFactory;
     std::filesystem::path shaderDirectory; // empty: configured build/shaders/triangle
     bool prepareDepthView = false, prepareShadow = false;
+    rhi::ColorFormat forwardColorFormat = rhi::ColorFormat::Presentation;
 };
 struct FrameInfo { float aspect; double deltaSeconds; };
 struct RenderFrame

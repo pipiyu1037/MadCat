@@ -1,6 +1,6 @@
 # MadCat 架构设计
 
-更新日期：2026-11-16。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
+更新日期：2026-11-17。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
 
 ## 文档职责与设计状态
 
@@ -30,7 +30,7 @@
 | 决定 | 约定 | 取舍与状态 |
 |---|---|---|
 | 场景对象 | 所有场景 Object 统一由 Entity 管理，通过 Transform、Mesh、Material 等组件组合表达 | 2026-10-29 用户确认；CPU 模型实例与 RenderScene／共享 GPU 几何绘制已接通，实例材质覆盖等仍待实现 |
-| 首版用户入口 | 在仓库中新建 C++ 渲染实验，加载场景并编写、组合自己的 Pass | 2026-11-16 用户确认；可复用运行层及 BasicScene 已实现，CustomPass 待实现 |
+| 首版用户入口 | 在仓库中新建 C++ 渲染实验，加载场景并编写、组合自己的 Pass | 可复用运行层、BasicScene 及 CustomPass 图形／HDR 示例已实现；工具与运行期更新待实现 |
 | Pass 分阶段 | 声明、准备、执行；界面通过参数入口提交修改 | 生命周期清楚，作者需表达三个阶段 |
 | Pass 阶段数据流 | 声明结果随具体图保存，准备结果由算法模块管理，执行显式接收二者及本帧参数 | 首版使用普通 C++ 类型和函数约定，不要求共同基类；活动图与候选图分别保存声明数据 |
 | C++ 输入输出 | 明确的输入／输出结构和图资源句柄直接连接 | 编译器检查字段及基本资源类型，格式、尺寸和依赖仍由图检查 |
@@ -62,7 +62,7 @@
 | 选择或实现算法 | 建图代码、C++ Pass 与 Slang 文件 | 提供 RHI 命令、图资源、依赖分析和同步，统一提交 |
 | 检查结果、更新 Shader | 参数与查看入口、显式编译操作 | 显示所选图资源，在安全边界应用成功候选并保留失败诊断 |
 
-普通实验从基础前向渲染流程起步，随后可以显式连接自定义 Pass。用户保留对场景和算法的控制；窗口重建、GPU 完成跟踪及呈现细节集中在运行层和 RHI。当前 [BasicScene 构建登记](../examples/BasicScene/CMakeLists.txt)只声明用户源文件、链接 MadCatRuntime 并配置资产根目录，产物进入 `build/<配置>`；Shader 继续使用显式 MadCatShaders 目标。任意 Shader 包登记与通用管线准备待 CustomPass 增量完成。
+普通实验从基础前向渲染流程起步，随后可以显式连接自定义 Pass。用户保留对场景和算法的控制；窗口重建、GPU 完成跟踪及呈现细节集中在运行层和 RHI。[BasicScene 构建登记](../examples/BasicScene/CMakeLists.txt)声明用户源文件、链接 MadCatRuntime 并配置资产根目录；[CustomPass](../examples/CustomPass/CMakeLists.txt)另登记自包含图形 Shader 手动编译目标。产物进入 `build/<配置>` 和 `build/shaders/<包名>`。自定义图形管线的范围见下文，不代表任意布局或 Compute 已实现。
 
 ### 实验入口与生命周期（当前实现）
 
@@ -84,7 +84,7 @@ return madcat::runtime::run(application, scene, assets, camera, callbacks);
 | 每帧更新 | keyPressed 提供数字／大写字母输入；update 在世界变换更新和 RenderScene 提取前执行。结构性修改遵守现有查询边界，纯数值变化不重建图。FrameInfo 提供输出宽高比及距上次渲染尝试的时间，暂停等待时间计入间隔 |
 | 建图 | ApplicationOptions.graphFactory 在创建或重建呈现资源时，为每个交换链图像构建计划；计划不随数值参数重建。当前运行期图切换及 Shader 版本发布未实现 |
 
-这里的实验入口与 Pass 的声明／准备／执行是两个层次。实验负责场景与算法组合，具体 Pass 记录 GPU 工作；graphFactory 不替代 Pass 的准备阶段，也不将建图变为每帧必做的操作。当前仍准备固定的 Forward 和可选 Shadow／DepthView 管线，没有通用 Prepared 接口。
+这里的实验入口与 Pass 的声明／准备／执行是两个层次。实验负责场景与算法组合，具体 Pass 记录 GPU 工作；graphFactory 中可显式调用 Pass 的准备函数，建图不必每帧进行。场景几何仍准备固定的 Forward 和可选 Shadow／DepthView 管线；CustomPass 另通过 RHI 工厂准备图形管线，并把 Prepared 显式交给节点执行。
 
 Scene 入口自动提取无投射阴影的 Lambert 绘制和光照。进阶入口 `runGraphics` 接收启动 GeometryBatch 与逐帧 RenderFrame 回调，供 Sandbox 保留独立相机／阴影绘制和参考场景。启动几何／材质集合固定，支持 Transform／相机／光照修改及已上传几何的实例变化；引入新几何或更新资产材质需重新启动。默认 Shader 路径来自构建配置，ApplicationOptions 可显式覆盖；尚无安装包资源定位。
 
@@ -97,7 +97,7 @@ Scene 入口自动提取无投射阴影的 Lambert 绘制和光照。进阶入�
 - 应用运行层负责窗口与事件、设备、帧循环和呈现，通过既有 Scene、RenderScene、RenderGraph 和 RHI 接口组织工作。候选版本安全应用仍是后续职责，当前未实现运行期替换。
 - 普通 Pass 通过显式管线、绑定和 Draw／Dispatch 表达工作。现有 `displayDepth()`、按附件选择 Forward／Shadow 管线及固定帧参数工厂是当前验证路径的限制；后续用自定义 Pass 场景驱动接口收敛，避免继续按算法名称扩充通用执行器。
 
-BasicScene 与 Sandbox 现已共用运行层，分别消费 Scene 入口和帧数据入口。CMake 将原先直接编入 MadCat 的后端提取为 MadCatRHI，将运行组织及 RenderScene 材质适配编入 MadCatRuntime，CPU Scene／RenderScene／图检查目标继续独立。随后计划建立 `examples/CustomPass`，以 HDR 颜色及显示转换验证自定义 Shader、显式管线／绑定、图内颜色资源与参数传递；该目录尚不存在。完整参数面板、运行期 Shader 更新与通用查看器按已有目标逐步接入。
+BasicScene、CustomPass 与 Sandbox 共用运行层，前两者消费 Scene 入口，Sandbox 消费帧数据入口。CMake 将后端编入 MadCatRHI，将运行组织及 RenderScene 材质适配编入 MadCatRuntime，CPU Scene／RenderScene／图检查目标继续独立。[CustomPass](../examples/CustomPass/main.cpp)已以 HDR／显示转换验证自定义 Shader、显式管线／绑定、图内颜色资源与参数传递；完整参数面板、运行期 Shader 更新与通用查看器按已有目标逐步接入。
 
 ## 模块边界和数据流
 
@@ -825,7 +825,7 @@ L 模式计算 `albedo × irradiance × max(dot(N,L),0) / π`，法线在透视�
 
 [Graph／Builder／Plan](../src/RenderGraph/RenderGraph.h) 不依赖 Vulkan，`Resource` 持有图身份、逻辑资源索引与版本。导入以底层对象的类型和实际身份去重，初始内容有效性和访问状态必须显式交接；冲突导入返回诊断。写入返回新版本，区分 Overwrite 完整初始化与 Preserve 保留修改。一个版本最多有一个写入后继；读取依赖其生产者，后继写入还依赖旧版本的所有读取者。图编译检查初始化、资源种类、跨图引用、写入分叉和环，不做自动裁剪或资源复制。
 
-`addPass` 按值保存 Pass 与 `Declared`，返回节点索引和类型化 Outputs，编译计划拥有声明数据。每个 Pass 的 Parameters 由调用方按节点提供，Plan 在记录开始时复制为本帧数据；参数类型不符或命令失败返回带节点名称的错误。候选 Graph 后续失败不修改已经编译的 Plan。当前尚未实现通用 `PrepareInfo／Prepared`：运行层仍先创建匹配的固定 Vulkan 管线，帧上下文借用它并保留全部实际资源；不能把当前固定管线用法推广为任意 Shader 更新支持。
+`addPass` 按值保存 Pass 与 `Declared`，返回节点索引和类型化 Outputs，编译计划拥有声明数据。每个 Pass 的 Parameters 由调用方按节点提供，Plan 在记录开始时复制为本帧数据；参数类型不符或命令失败返回带节点名称的错误。候选 Graph 后续失败不修改已经编译的 Plan。这里的场景几何仍由运行层先创建匹配的固定 Vulkan 管线，帧上下文借用并保留实际资源；CustomPass 的显式 Prepared 扩展见本节后文，尚无任意 Shader 更新支持。
 
 [GraphicsGraphFactory](../src/RenderGraph/GraphicsGraph.h) 是当前图形执行的窄入口，接收已有 Graph 与导入句柄，返回编译计划及帧参数构造函数。Sandbox 显式传入 [buildForwardGraph](../src/Passes/ForwardPass.h)。建图策略归 C++ Pass 层；[VulkanFrameGraph](../src/RHI/Vulkan/VulkanFrameGraph.h) 只提供实际导入、命令和屏障转换，不依赖具体 Pass 类型。此接口当前服务现有绘制，不承诺通用 Compute、离屏资源准备或任意参数编辑。
 
@@ -873,7 +873,19 @@ CPU 九组图检查覆盖内部尺寸／用途／未初始化、描述快照、�
 
 UBO 的 set 1／binding 0 和图 Uniform 同步范围均扩展到 Vertex／Fragment。Forward 新增 set 2 图像／采样器，复用固定采样绑定布局；每个交换链图像的图内阴影 Descriptor 创建后不更新，保活到该图命令退役。禁用阴影或未使用阴影图的 Forward 路径仍将保活的材质绑定作为静态 set 2 回退，Shader 在 enabled=0 时不采样它；材质图像已经由 Forward 声明。Shadow 管线继续省略 UBO 和 set 2。启用阴影却未提供图声明的深度绑定时，后端拒绝 Draw，不猜测资源。
 
-[triangle.slang](../shaders/triangle.slang) 使用偏移 `constant + slope × (1−max(dot(N,L),0))` 和 mip 0 nearest 深度比较，半径 0 为硬阴影，半径 1 为九次比较平均；不使用硬件比较 sampler 或深度线性过滤。投影范围外和范围外 tap 返回可见，不拉伸边缘阴影；MASK、单双面及镜像规则由 Shadow 与 Forward 一致执行。K 只改 enabled／radius，图仍生成阴影图；M／诊断视图保持各自显示语义。固定覆盖、单方向光、单队列与 GPU 完成后回收的约束保持；尚无通用准备、自动覆盖、级联、HDR 或 PBR。验证证据见 [README](../README.md#方向光投射阴影)。
+[triangle.slang](../shaders/triangle.slang) 使用偏移 `constant + slope × (1−max(dot(N,L),0))` 和 mip 0 nearest 深度比较，半径 0 为硬阴影，半径 1 为九次比较平均；不使用硬件比较 sampler 或深度线性过滤。投影范围外和范围外 tap 返回可见，不拉伸边缘阴影；MASK、单双面及镜像规则由 Shadow 与 Forward 一致执行。K 只改 enabled／radius，图仍生成阴影图；M／诊断视图保持各自显示语义。固定覆盖、单方向光、单队列与 GPU 完成后回收的约束保持；该阴影路径尚无通用几何准备、自动覆盖、级联或 PBR；HDR 显示示例见下一节。验证证据见 [README](../README.md#方向光投射阴影)。
+
+### CustomPass、图内 HDR 与显式图形管线（当前实现）
+
+2026-11-17 增加 [CustomPass](../examples/CustomPass/main.cpp)。用户选择 RGBA16F Forward 并连接 `ClearHDR → ForwardHDR → ToneMap → Present`，自定义 [ToneMapPass](../examples/CustomPass/ToneMapPass.h) 不出现 Vulkan 类型。场景几何沿用固定 ABI；显示步骤使用显式 RHI 管线、采样绑定、Push Constants 和 Draw。使用流程与验证见 [CustomPass 教程](custom-pass.md)。
+
+- `GraphicsImports::prepareGraphics` 只在建图函数调用内借用 Device／呈现格式，接收普通 `GraphicsPipelineDesc` 并返回不可变强引用；本例的 prepare 返回 Prepared，带 Prepared 的 addPass 按值保存它与 Declared，执行显式接收只读的声明、准备值和帧参数。后端不根据用户 Pass 类型或名字选择显示算法。
+- 可编程管线限一个颜色附件、顶点 ID 生成的三角形列表、无深度／混合，可选片元 set 0 的图像 binding 0／采样器 binding 1；Push Constants 为 4 字节对齐的 0～128 字节，Vertex／Fragment 可见。入口固定 vertexMain／fragmentMain。绑定前要求本节点实际声明采样读取；后端检查 Device、附件格式、槽位、必需绑定、参数大小和绘制数量，失败取消记录、不提交。布局显式成对维护，无任意 Shader 反射验证。
+- `createColorTexture` 保存 RGBA16F 尺寸与 sampled 描述，初始化时查询该格式的组合用途和尺寸支持，为每个交换链图像独立分配单 mip／层颜色纹理。与深度纹理共用附件分配流程；Descriptor 为 nearest／Clamp，创建后不修改。beginRendering 从实际附件取得视图、尺寸与格式，场景绘制检查固定管线是否兼容。
+- 图管理 Color→Sampled 和下次 Sampled→Color，同样只在提交成功后发布内部状态。图计划持有 Prepared，帧图持有纹理与 Descriptor；先等待 acquire／submit／present 完成、释放命令，再释放引用。Device 为借用，工厂及其 GPU 引用不可越过所属 runtime::run 的寿命；不能在外部长期缓存。
+- `forwardColorFormat` 只选择场景输出格式，用户图决定资源与显示算法。`presentationSrgb` 让实验明确检查呈现编码；本例要求 sRGB 附件，Reinhard 后输出线性颜色，由附件编码一次。HDR 指内部颜色范围，未实现 HDR 显示器输出模式。
+
+当前随每张交换链图的创建／resize 同步准备并持有管线，没有缓存、运行期 Prepared 候选发布、失败保留旧呈现资源或多帧并行。单文件图形 Shader 包通过 `madcat_add_graphics_shaders` 登记并手动编译，原有验证／发布失败恢复流程保持。Compute、任意绑定布局及运行期更新仍为后续目标；下文的计算 Tone Mapping、候选版本管理和绑定集合示例继续作为目标设计。
 
 ## 实现参考建议
 

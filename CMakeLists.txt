@@ -247,6 +247,7 @@ add_library(MadCatRHI STATIC
     src/RHI/Vulkan/VulkanFrameLighting.cpp
     src/RHI/Vulkan/VulkanFrameGraph.cpp
     src/RHI/Vulkan/VulkanDepthViewPipeline.cpp
+    src/RHI/Vulkan/VulkanGraphicsPipeline.cpp
     src/RHI/Vulkan/VulkanDevice.cpp
     src/RHI/Vulkan/VulkanInstance.cpp
     src/RHI/Vulkan/VulkanPhysicalDevice.cpp
@@ -335,6 +336,8 @@ set(MADCAT_SHADER_ARGUMENTS
     "-DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle.slang"
     "-DOUTPUT_ROOT=${CMAKE_CURRENT_BINARY_DIR}/shaders"
 )
+include(cmake/GraphicsShaders.cmake)
+add_subdirectory(examples/CustomPass)
 add_custom_target(MadCatShaders
     COMMAND "${CMAKE_COMMAND}" ${MADCAT_SHADER_ARGUMENTS}
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CompileShaders.cmake"

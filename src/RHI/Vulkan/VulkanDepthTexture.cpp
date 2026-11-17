@@ -17,11 +17,13 @@ VkImage detail::TextureAccess::image(const TextureRef& texture) noexcept { retur
 VkImageView detail::TextureAccess::view(const TextureRef& texture) noexcept { return texture.state_ ? texture.state_->view : VK_NULL_HANDLE; }
 VkFormat detail::TextureAccess::format(const TextureRef& texture) noexcept { return texture.state_ ? texture.state_->format : VK_FORMAT_UNDEFINED; }
 
-TextureRef createDepthTexture(const VulkanDevice& device, uint32_t width, uint32_t height, bool sampled)
+namespace
+{
+std::shared_ptr<detail::TextureState> createAttachmentTexture(const VulkanDevice& device, uint32_t width, uint32_t height, bool sampled, bool color)
 {
     if (!device.handle() || width == 0 || height == 0)
     {
-        std::fprintf(stderr, "Vulkan error: depth texture requires an initialized Device and nonzero extent.\n");
+        std::fprintf(stderr, "Vulkan error: attachment texture requires an initialized Device and nonzero extent.\n");
         return {};
     }
     const auto instance = device.physicalDeviceInfo().instance;
@@ -35,7 +37,7 @@ TextureRef createDepthTexture(const VulkanDevice& device, uint32_t width, uint32
     state->width = width;
     state->height = height;
     state->sampled = sampled;
-    const VkImageUsageFlags usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | (sampled ? VK_IMAGE_USAGE_SAMPLED_BIT : 0);
+    const VkImageUsageFlags usage = (color ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) | (sampled ? VK_IMAGE_USAGE_SAMPLED_BIT : 0);
     PFN_vkCreateImage createImage = nullptr;
     PFN_vkGetImageMemoryRequirements getRequirements = nullptr;
     PFN_vkAllocateMemory allocateMemory = nullptr;
@@ -51,11 +53,13 @@ TextureRef createDepthTexture(const VulkanDevice& device, uint32_t width, uint32
         !load(state->freeMemory, "vkFreeMemory") || !load(bindMemory, "vkBindImageMemory") ||
         !load(createView, "vkCreateImageView") || !load(state->destroyView, "vkDestroyImageView")) { return {}; }
 
-    for (const auto format : {VK_FORMAT_D32_SFLOAT, VK_FORMAT_D16_UNORM})
+    const VkFormat colorFormats[]{VK_FORMAT_R16G16B16A16_SFLOAT};
+    const VkFormat depthFormats[]{VK_FORMAT_D32_SFLOAT, VK_FORMAT_D16_UNORM};
+    for (const auto format : color ? std::span<const VkFormat>(colorFormats) : std::span<const VkFormat>(depthFormats))
     {
         VkFormatProperties properties{};
         getFormats(device.physicalDevice(), format, &properties);
-        const VkFormatFeatureFlags required = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | (sampled ? VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT : 0);
+        const VkFormatFeatureFlags required = (color ? VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT : VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) | (sampled ? VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT : 0);
         if ((properties.optimalTilingFeatures & required) != required) { continue; }
         VkImageFormatProperties imageProperties{};
         const auto result = getImageFormats(device.physicalDevice(), format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
@@ -70,7 +74,7 @@ TextureRef createDepthTexture(const VulkanDevice& device, uint32_t width, uint32
     }
     if (state->format == VK_FORMAT_UNDEFINED)
     {
-        std::fprintf(stderr, "Vulkan error: no D32_SFLOAT/D16_UNORM depth attachment supports %u x %u.\n", width, height);
+        std::fprintf(stderr, "Vulkan error: no %s attachment supports %u x %u.\n", color ? "RGBA16F" : "D32_SFLOAT/D16_UNORM depth", width, height);
         return {};
     }
     VkImageCreateInfo imageInfo{};
@@ -123,13 +127,24 @@ TextureRef createDepthTexture(const VulkanDevice& device, uint32_t width, uint32
     viewInfo.image = image;
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.format = state->format;
-    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    viewInfo.subresourceRange = {VkImageAspectFlags(color ? VK_IMAGE_ASPECT_COLOR_BIT : VK_IMAGE_ASPECT_DEPTH_BIT), 0, 1, 0, 1};
     VkImageView view = VK_NULL_HANDLE;
     if (!detail::checkResult(createView(state->device, &viewInfo, nullptr, &view), "vkCreateImageView(depth)")) { return {}; }
     state->view = view;
-    std::fprintf(stderr, "Vulkan: %s texture created; %u x %u, format %d, memory type %u.\n", sampled ? "Sampled depth" : "Depth", width, height, static_cast<int>(state->format), memoryType);
+    std::fprintf(stderr, "Vulkan: %s texture created; %u x %u, format %d, memory type %u.\n", color ? "HDR color" : sampled ? "Sampled depth" : "Depth", width, height, static_cast<int>(state->format), memoryType);
+    return state;
+}
+}
+TextureRef createDepthTexture(const VulkanDevice& device, uint32_t width, uint32_t height, bool sampled)
+{
     TextureRef result;
-    result.state_ = std::move(state);
+    result.state_ = createAttachmentTexture(device,width,height,sampled,false);
+    return result;
+}
+TextureRef createColorTexture(const VulkanDevice& device, uint32_t width, uint32_t height, bool sampled)
+{
+    TextureRef result;
+    result.state_ = createAttachmentTexture(device,width,height,sampled,true);
     return result;
 }
 }

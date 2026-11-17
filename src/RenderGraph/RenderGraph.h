@@ -20,6 +20,12 @@ enum class Kind { Color, Depth, Buffer };
 enum class Write { Overwrite, Preserve };
 // First managed texture: one depth mip/layer, with optional fragment sampling.
 struct DepthTextureDesc { uint32_t width, height; bool sampled = true; };
+struct ColorTextureDesc
+{
+    uint32_t width, height;
+    rhi::ColorFormat format = rhi::ColorFormat::Rgba16Float;
+    bool sampled = true;
+};
 struct Identity {};
 struct Resource
 {
@@ -42,6 +48,10 @@ public:
         std::span<const Resource> textures, const rhi::IndexedDraw& draw, Resource shadow = {});
     [[nodiscard]] bool endRendering();
     [[nodiscard]] bool displayDepth(Resource depth);
+    [[nodiscard]] bool bindPipeline(const rhi::GraphicsPipelineRef& pipeline);
+    [[nodiscard]] bool bindSampledTexture(uint32_t set, Resource texture);
+    [[nodiscard]] bool pushConstants(std::span<const std::byte> bytes);
+    [[nodiscard]] bool draw(uint32_t vertexCount);
     [[nodiscard]] const std::string& error() const { return error_; }
     [[nodiscard]] bool finished() const { return !rendering_; }
 private:
@@ -65,6 +75,7 @@ struct Imported
     Use initial;
     std::vector<Version> versions;
     std::optional<DepthTextureDesc> depthTexture;
+    std::optional<ColorTextureDesc> colorTexture;
 };
 class Plan
 {
@@ -94,12 +105,17 @@ public:
     // alias the same logical resource; conflicting initial contracts are errors.
     [[nodiscard]] Resource import(std::string name, uint64_t identity, Kind kind, Use initial, bool valid);
     [[nodiscard]] Resource createDepthTexture(std::string name, DepthTextureDesc description);
+    [[nodiscard]] Resource createColorTexture(std::string name, ColorTextureDesc description);
     [[nodiscard]] uint32_t addNode(std::string name);
     [[nodiscard]] Builder builder(uint32_t node);
     void dependsOn(uint32_t node, uint32_t prerequisite);
     template<class Pass> struct Added { uint32_t node; typename Pass::Outputs outputs; };
     template<class Pass>
     [[nodiscard]] Added<Pass> addPass(std::string name, Pass pass, const typename Pass::Inputs& inputs);
+    // Freeze the prepared version alongside this graph's declaration. execute
+    // receives both explicitly; replacing a caller's Prepared never changes it.
+    template<class Pass, class Prepared>
+    [[nodiscard]] Added<Pass> addPass(std::string name, Pass pass, const typename Pass::Inputs& inputs, Prepared prepared);
     [[nodiscard]] std::expected<Plan, std::string> compile() const;
 private:
     friend class Builder;
@@ -132,6 +148,19 @@ Graph::Added<Pass> Graph::addPass(std::string name, Pass pass, const typename Pa
     nodes_[node].execute = [pass=std::move(pass), declared=std::move(declared)](PassContext& context, const std::any& data) {
         const auto* parameters = std::any_cast<typename Pass::Parameters>(&data);
         return parameters && pass.execute(context, declared, *parameters);
+    };
+    return {node, outputs};
+}
+template<class Pass, class Prepared>
+Graph::Added<Pass> Graph::addPass(std::string name, Pass pass, const typename Pass::Inputs& inputs, Prepared prepared)
+{
+    const auto node = addNode(std::move(name));
+    auto build = builder(node);
+    auto declared = pass.declare(build, inputs);
+    const auto outputs = declared.outputs;
+    nodes_[node].execute = [pass=std::move(pass), declared=std::move(declared), prepared=std::move(prepared)](PassContext& context, const std::any& data) {
+        const auto* parameters = std::any_cast<typename Pass::Parameters>(&data);
+        return parameters && pass.execute(context, declared, prepared, *parameters);
     };
     return {node, outputs};
 }

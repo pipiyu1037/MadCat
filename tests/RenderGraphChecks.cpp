@@ -19,6 +19,10 @@ struct Commands : rhi::GraphicsCommands
     bool drawIndexed(uint32_t,uint32_t,uint32_t,std::span<const uint32_t>,const rhi::IndexedDraw&,uint32_t = UINT32_MAX) override { ++draws; return true; }
     bool endRendering() override { ++ends; return true; }
     bool displayDepth(uint32_t) override { ++displays; return true; }
+    bool bindPipeline(const rhi::GraphicsPipelineRef&) override { return true; }
+    bool bindSampledTexture(uint32_t set,uint32_t) override { return set==0; }
+    bool pushConstants(std::span<const std::byte> bytes) override { return bytes.size()==sizeof(float); }
+    bool draw(uint32_t count) override { ++draws; return count==3; }
 };
 void versionsAndOrdering()
 {
@@ -243,6 +247,69 @@ void shadowForwardExecution()
     check(!context.require(g.import("foreign",6,graph::Kind::Depth,graph::Use::Sampled,true),graph::Use::Sampled),"Undeclared shadow sampling accepted");
 }
 
+void managedColorContracts()
+{
+    for (const auto desc : {graph::ColorTextureDesc{0,32},graph::ColorTextureDesc{32,0},
+        graph::ColorTextureDesc{32,32,rhi::ColorFormat::Presentation}})
+    {
+        graph::Graph g; (void)g.createColorTexture("bad color",desc);
+        check(!g.compile(),"Invalid managed color extent/format accepted");
+    }
+    for (const auto use : {graph::Use::Sampled,graph::Use::Present})
+    {
+        graph::Graph g; auto image=g.createColorTexture("attachment only",{32,32,rhi::ColorFormat::Rgba16Float,false});
+        image=g.builder(g.addNode("writer")).write(image,graph::Use::Color,graph::Write::Overwrite);
+        g.builder(g.addNode("reader")).read(image,use);
+        check(!g.compile(),"Managed color sampled/present contract ignored");
+    }
+    graph::Graph g; auto image=g.createColorTexture("unwritten",{32,32});
+    g.builder(g.addNode("reader")).read(image,graph::Use::Sampled);
+    check(!g.compile(),"Unwritten managed color read accepted");
+}
+struct PreparedDisplay
+{
+    struct Inputs { graph::Resource hdr,display; };
+    struct Outputs { graph::Resource color; };
+    struct Declared { Inputs inputs; Outputs outputs; };
+    struct Prepared { int version; };
+    using Parameters=float;
+    Declared declare(graph::Builder& builder,const Inputs& input) const
+    {
+        builder.read(input.hdr,graph::Use::Sampled);
+        return {input,{builder.write(input.display,graph::Use::Color,graph::Write::Overwrite)}};
+    }
+    bool execute(graph::PassContext& context,const Declared& d,const Prepared& prepared,const Parameters& value) const
+    {
+        return prepared.version==7 && context.beginRendering(d.outputs.color,{},rhi::AttachmentLoad::Clear,{}) &&
+            context.bindPipeline({}) && context.bindSampledTexture(0,d.inputs.hdr) &&
+            context.pushConstants(std::as_bytes(std::span(&value,1))) && context.draw(3) && context.endRendering();
+    }
+};
+void preparedColorExecution()
+{
+    graph::Graph g;
+    auto display=texture(g);
+    auto hdr=g.createColorTexture("HDR",{64,48});
+    auto depth=g.createDepthTexture("depth",{64,48,false});
+    const auto clear=g.addPass("ClearHDR",passes::ClearPass{},passes::Targets{hdr,depth});
+    PreparedDisplay::Prepared prepared{7};
+    const auto tone=g.addPass("custom",PreparedDisplay{},PreparedDisplay::Inputs{clear.outputs.color,display},prepared);
+    prepared.version=999;
+    auto plan=g.compile(); check(bool(plan),"Prepared color graph failed");
+    Commands commands; std::vector<graph::Barrier> barriers;
+    std::vector<std::any> params{passes::ClearPass::Parameters{{0,0,0,1}},1.f};
+    std::vector<graph::Use> initial(3,graph::Use::None);
+    auto record=[&](const auto& states) { return plan->record(commands,params,states,[&](auto b){barriers.push_back(b);return true;}); };
+    auto result=record(initial);
+    check(result && commands.draws==1,"Prepared snapshot or generic graphics execution failed");
+    check(std::ranges::any_of(barriers,[&](auto b){return b.resource==hdr.index && b.before==graph::Use::Color && b.after==graph::Use::Sampled;}),"HDR RAW missing");
+    barriers.clear(); check(bool(record(*result)),"Second HDR frame failed");
+    check(std::ranges::any_of(barriers,[&](auto b){return b.resource==hdr.index && b.before==graph::Use::Sampled && b.after==graph::Use::Color;}),"HDR WAR missing");
+    graph::PassContext context(plan->nodes()[tone.node].accesses,commands);
+    check(context.beginRendering(tone.outputs.color,{},rhi::AttachmentLoad::Clear,{}) &&
+        !context.bindSampledTexture(0,hdr),"Old/undeclared resource version bound");
+    check(initial[hdr.index]==graph::Use::None,"Recording changed external state");
+}
 void managedDepthExecution()
 {
     graph::Graph g;
@@ -271,6 +338,6 @@ void managedDepthExecution()
 }
 int main()
 {
-    try { versionsAndOrdering(); diagnostics(); duplicateIdentity(); executionAndFailure(); accessAndSnapshots(); forwardSynchronization(); parameterIsolation(); managedDepthContracts(); managedDepthExecution(); shadowExecution(); shadowForwardExecution(); std::puts("Render Graph checks: 11 groups passed."); return 0; }
+    try { versionsAndOrdering(); diagnostics(); duplicateIdentity(); executionAndFailure(); accessAndSnapshots(); forwardSynchronization(); parameterIsolation(); managedDepthContracts(); managedDepthExecution(); shadowExecution(); shadowForwardExecution(); managedColorContracts(); preparedColorExecution(); std::puts("Render Graph checks: 13 groups passed."); return 0; }
     catch(const std::exception& error) { std::fprintf(stderr,"Render Graph checks failed: %s\n",error.what()); return 1; }
 }

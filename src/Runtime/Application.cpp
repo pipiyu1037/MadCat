@@ -171,7 +171,8 @@ private:
             auto candidate = std::make_unique<Presentation>();
             if (!candidate->swapchain.initialize(device_, surface_, {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}) ||
                 !(candidate->depth = madcat::rhi::createDepthTexture(device_, candidate->swapchain.extent().width, candidate->swapchain.extent().height)) ||
-                !candidate->triangle.initialize(device_, candidate->swapchain.surfaceFormat().format, vertex_, fragment_, vertices_, indices_, madcat::rhi::detail::TextureAccess::format(candidate->depth), materials_) ||
+                !candidate->triangle.initialize(device_, options_.forwardColorFormat==rhi::ColorFormat::Rgba16Float ? VK_FORMAT_R16G16B16A16_SFLOAT :
+                    candidate->swapchain.surfaceFormat().format, vertex_, fragment_, vertices_, indices_, madcat::rhi::detail::TextureAccess::format(candidate->depth), materials_) ||
                 (depthVertex_ && !candidate->depthView.initialize(device_, candidate->swapchain.surfaceFormat().format, *depthVertex_, *depthFragment_)) ||
                 (shadowVertex_ && !candidate->shadow.initialize(device_, VK_FORMAT_UNDEFINED, *shadowVertex_, *shadowFragment_, vertices_, indices_,
                     madcat::rhi::detail::TextureAccess::format(candidate->depth), materials_, true)) ||
@@ -233,7 +234,8 @@ int runGraphics(const ApplicationOptions& options, const assets::ModelAssets& as
     const render::GeometryBatch& geometry, const GraphicsCallbacks& callbacks)
 {
     if (!options.width || !options.height || options.width > INT_MAX || options.height > INT_MAX ||
-        !options.graphFactory || !callbacks.frame || geometry.vertices.empty() || geometry.indices.empty())
+        !options.graphFactory || !callbacks.frame || geometry.vertices.empty() || geometry.indices.empty() ||
+        (options.forwardColorFormat!=rhi::ColorFormat::Presentation && options.forwardColorFormat!=rhi::ColorFormat::Rgba16Float))
     {
         std::fprintf(stderr, "MadCat error: invalid application extent, graph, frame callback or startup geometry.\n");
         return EXIT_FAILURE;

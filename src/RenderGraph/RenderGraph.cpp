@@ -69,6 +69,28 @@ bool PassContext::displayDepth(Resource depth)
     if (!commands_.displayDepth(depth.index)) { error_ = "RHI depth display failed"; return false; }
     return true;
 }
+bool PassContext::bindPipeline(const rhi::GraphicsPipelineRef& pipeline)
+{
+    if (!rendering_ || !commands_.bindPipeline(pipeline)) { error_ = "RHI pipeline binding failed or outside rendering"; return false; }
+    return true;
+}
+bool PassContext::bindSampledTexture(uint32_t set, Resource texture)
+{
+    if (!rendering_) { error_ = "Sampled binding outside rendering"; return false; }
+    if (!require(texture, Use::Sampled)) { return false; }
+    if (!commands_.bindSampledTexture(set, texture.index)) { error_ = "RHI sampled texture binding failed at set " + std::to_string(set); return false; }
+    return true;
+}
+bool PassContext::pushConstants(std::span<const std::byte> bytes)
+{
+    if (!rendering_ || !commands_.pushConstants(bytes)) { error_ = "RHI push constants failed or outside rendering"; return false; }
+    return true;
+}
+bool PassContext::draw(uint32_t vertexCount)
+{
+    if (!rendering_ || !commands_.draw(vertexCount)) { error_ = "RHI Draw failed or outside rendering"; return false; }
+    return true;
+}
 void Graph::fail(std::string message) { if (error_.empty()) { error_ = std::move(message); } }
 bool Graph::valid(Resource r) const
 { return r.graph == identity_ && r.index < resources_.size() && r.version < resources_[r.index].versions.size(); }
@@ -95,6 +117,14 @@ Resource Graph::createDepthTexture(std::string name, DepthTextureDesc descriptio
     resources_.push_back({std::move(name), 0, Kind::Depth, Use::None, {{-1, UINT32_MAX, false}}, description});
     return {identity_, index, 0};
 }
+Resource Graph::createColorTexture(std::string name, ColorTextureDesc description)
+{
+    if (!description.width || !description.height || description.format != rhi::ColorFormat::Rgba16Float)
+    { fail("Invalid managed color extent/format: " + name); return {}; }
+    const auto index = static_cast<uint32_t>(resources_.size());
+    resources_.push_back({std::move(name), 0, Kind::Color, Use::None, {{-1, UINT32_MAX, false}}, {}, description});
+    return {identity_, index, 0};
+}
 uint32_t Graph::addNode(std::string name)
 {
     const auto index = static_cast<uint32_t>(nodes_.size());
@@ -111,6 +141,8 @@ void Graph::access(uint32_t node, Access access)
     const auto& resource = resources_[access.resource.index];
     if (resource.depthTexture && access.use == Use::Sampled && !resource.depthTexture->sampled)
     { fail(target.name + ": depth texture was not declared sampleable: " + resource.name); return; }
+    if (resource.colorTexture && ((access.use == Use::Sampled && !resource.colorTexture->sampled) || access.use == Use::Present))
+    { fail(target.name + ": unsupported managed color usage: " + resource.name); return; }
     if (!compatible(resource.kind, access.use) || access.use == Use::HostWrite || access.use == Use::None)
     { fail(target.name + ": incompatible use of " + resource.name); return; }
     for (auto& prior : target.accesses)
@@ -211,7 +243,9 @@ std::expected<std::vector<Use>, std::string> Plan::record(rhi::GraphicsCommands&
     for (uint32_t slot = 0; slot < states.size(); ++slot)
     {
         if ((states[slot] != Use::None && !compatible(resources_[slot].kind, states[slot])) ||
-            (resources_[slot].depthTexture && states[slot] == Use::Sampled && !resources_[slot].depthTexture->sampled))
+            (resources_[slot].depthTexture && states[slot] == Use::Sampled && !resources_[slot].depthTexture->sampled) ||
+            (resources_[slot].colorTexture && (states[slot] == Use::Present ||
+                (states[slot] == Use::Sampled && !resources_[slot].colorTexture->sampled))))
         { return std::unexpected("Invalid external state: " + resources_[slot].name); }
     }
     for (const auto index : order_)

@@ -11,6 +11,8 @@ struct GraphicsImports
     Resource color, depth, vertices, indices, lighting;
     std::vector<Resource> textures;
     uint32_t width = 0, height = 0;
+    rhi::GraphicsPipelineFactory prepareGraphics;
+    bool presentationSrgb = false;
 };
 struct GraphicsGraph
 {

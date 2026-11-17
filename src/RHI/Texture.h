@@ -22,8 +22,8 @@ struct SamplerDesc
 // Strong reference to a GPU image, view and memory. Copies share one resource;
 // they do not grant concurrent write access or establish GPU completion. Keep
 // the Device and at least one reference alive until all submitted use finishes.
-// Backend factories provide depth attachments (optionally sampled) or immutable
-// sampled RGBA images. A sampling binding does not initialize image contents.
+// Backend factories provide depth/HDR color attachments (optionally sampled)
+// or immutable sampled RGBA images. A binding does not initialize image contents.
 class TextureRef
 {
 public:
@@ -35,6 +35,7 @@ public:
 private:
     friend struct detail::TextureAccess;
     friend TextureRef createDepthTexture(const VulkanDevice&, uint32_t, uint32_t, bool);
+    friend TextureRef createColorTexture(const VulkanDevice&, uint32_t, uint32_t, bool);
     friend TextureRef createSampledTexture(const VulkanDevice&, uint32_t, uint32_t, std::span<const uint8_t>);
     friend TextureBindingRef createTextureBinding(const VulkanDevice&, TextureRef, const SamplerDesc&);
     std::shared_ptr<detail::TextureState> state_;

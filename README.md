@@ -8,7 +8,7 @@
 
 最小用户示例已实现于 [BasicScene/main.cpp](examples/BasicScene/main.cpp)：加载一个模型，创建 Entity 场景、相机和方向光，选择前向渲染图，再调用共享运行入口。示例包含完整用户代码及模型／相机／灯光更新，[Hello World](docs/hello-world.md)按源码顺序解释如何使用引擎。下面保留现有构建说明、模块用法和验证记录，供按需查阅。
 
-第一版的主要使用方式已确定为：在仓库中新建 C++ 渲染实验，加载场景，编写或组合自己的 Pass。BasicScene 与 Sandbox 现已复用 `MadCatRuntime`，新实验可参考 [BasicScene 的构建登记](examples/BasicScene/CMakeLists.txt)链接该目标；CustomPass 尚待实现。目标用法见[用户入口设计](docs/architecture-design.md#用户入口与-c-实验工作流)，下一步见[近期实施顺序](docs/project-development.md#用户使用方式与近期实施顺序)。
+第一版的主要使用方式是：在仓库中新建 C++ 渲染实验，加载场景，编写或组合自己的 Pass。BasicScene、CustomPass 与 Sandbox 共用 `MadCatRuntime`。先从 BasicScene 学习场景与运行入口，再通过 [CustomPass 教程](docs/custom-pass.md)学习独立 Slang、显式管线／绑定、图内 HDR 纹理和显示转换。
 
 ## 最小 C++ 用户示例
 
@@ -21,7 +21,18 @@ cmake --build build --config Debug --target BasicScene MadCatShaders
 .\build\Debug\BasicScene.exe
 ```
 
-默认显示一个 Suzanne 模型；也可用位置参数传入自己的 glTF／GLB 路径。按 1 恢复、2 移动模型、3 移动相机、4 关灯，这些操作由示例中的用户回调实现。默认资产与 Shader 路径来自构建配置，可从其他工作目录启动；尚无安装包资源定位。当前 Scene 入口支持固定启动几何和无投射阴影 Lambert，通用自定义管线与 HDR 将由后续 CustomPass 增量补充。
+默认显示一个 Suzanne 模型；也可用位置参数传入自己的 glTF／GLB 路径。按 1 恢复、2 移动模型、3 移动相机、4 关灯，这些操作由示例中的用户回调实现。默认资产与 Shader 路径来自构建配置，可从其他工作目录启动；尚无安装包资源定位。当前 Scene 入口支持固定启动几何和无投射阴影 Lambert。
+
+## 自定义 Pass 与 HDR 示例
+
+[CustomPass](examples/CustomPass/main.cpp) 将场景写入图内 RGBA16F 纹理，再由用户的 [ToneMapPass](examples/CustomPass/ToneMapPass.h) 和 [Slang Shader](examples/CustomPass/display.slang)完成曝光与 Reinhard 显示转换。示例不使用 Vulkan 类型；在已有 RHI 能力范围内，新增普通 Pass 无需修改图编译器或 Vulkan 执行器。
+
+```powershell
+cmake --build build --config Debug --target CustomPass MadCatShaders CustomPassShaders
+.\build\Debug\CustomPass.exe
+```
+
+按 1 默认、2 曝光 −2 EV、3 曝光 +2 EV、4 关灯、5 移动模型；参数变化不重建管线。修改 Slang 后关闭程序，手动构建 `CustomPassShaders` 再启动。自定义图形路径当前限颜色附件、全屏三角形、一个片元采样 set 和小块 Push Constants；Compute、任意布局与运行期 Shader 更新待实现。详细机制、扩展步骤和验证命令见[教程](docs/custom-pass.md)。
 
 ## 构建与运行
 

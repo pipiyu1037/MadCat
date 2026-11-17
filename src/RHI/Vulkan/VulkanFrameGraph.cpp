@@ -8,6 +8,7 @@
 #include "VulkanSampledTexture.h"
 #include "VulkanTextureState.h"
 #include "VulkanTrianglePipeline.h"
+#include "VulkanGraphicsPipeline.h"
 #include <algorithm>
 #include <type_traits>
 
@@ -39,7 +40,7 @@ Scope scope(graph::Use use)
 struct VulkanFrameGraph::State : GraphicsCommands
 {
     struct Native { VkImage image=VK_NULL_HANDLE; VkBuffer buffer=VK_NULL_HANDLE; VkImageAspectFlags aspect=0; uint32_t mips=1;
-        TextureRef ownedDepth; TextureBindingRef sampled; };
+        TextureRef ownedTexture; TextureBindingRef sampled; };
     graph::GraphicsGraph program;
     std::vector<Native> native;
     std::vector<graph::Use> initial;
@@ -52,6 +53,10 @@ struct VulkanFrameGraph::State : GraphicsCommands
     const VulkanTrianglePipeline* shadow=nullptr;
     const VulkanDepthViewPipeline* depthView=nullptr;
     uint32_t activeDepth=UINT32_MAX;
+    VkDevice device=VK_NULL_HANDLE;
+    VkFormat presentationFormat=VK_FORMAT_UNDEFINED, activeColorFormat=VK_FORMAT_UNDEFINED;
+    GraphicsPipelineRef activePipeline;
+    bool textureBound=false, constantsSet=false;
     bool depthOnly=false;
     bool shadowsEnabled=false;
     VkExtent2D renderExtent{};
@@ -97,22 +102,25 @@ struct VulkanFrameGraph::State : GraphicsCommands
     }
     bool beginRendering(uint32_t color, uint32_t depthIndex, AttachmentLoad load, const std::array<float,4>& clearColor) override
     {
-        if ((color!=colorSlot && color!=UINT32_MAX) || (depthIndex!=UINT32_MAX &&
+        if ((color!=UINT32_MAX && (color>=native.size() || native[color].aspect!=VK_IMAGE_ASPECT_COLOR_BIT ||
+            (color!=colorSlot && !native[color].ownedTexture))) || (depthIndex!=UINT32_MAX &&
             (depthIndex>=native.size() || native[depthIndex].aspect!=VK_IMAGE_ASPECT_DEPTH_BIT))) { return false; }
         depthOnly=color==UINT32_MAX;
         activeDepth=depthIndex;
+        activePipeline={}; textureBound=false; constantsSet=false;
+        const auto colorTarget=color==UINT32_MAX || color==colorSlot ? TextureRef{} : native[color].ownedTexture;
+        activeColorFormat=depthOnly ? VK_FORMAT_UNDEFINED : color==colorSlot ? presentationFormat : TextureAccess::format(colorTarget);
         VkRenderingAttachmentInfo attachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-        attachment.imageView=colorView; attachment.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        attachment.imageView=color==colorSlot ? colorView : TextureAccess::view(colorTarget); attachment.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         attachment.loadOp=load==AttachmentLoad::Clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
         attachment.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
         std::ranges::copy(clearColor,attachment.clearValue.color.float32);
         VkRenderingAttachmentInfo depthAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-        const auto depthTarget=depthIndex==depthSlot ? depth : depthIndex==UINT32_MAX ? TextureRef{} : native[depthIndex].ownedDepth;
-        renderExtent=depthOnly ? VkExtent2D{depthTarget.width(),depthTarget.height()} : extent;
-        const auto* geometryPipeline=depthOnly ? shadow : pipeline;
-        if ((depthOnly && (!depthTarget || !shadow)) || (depthTarget &&
-            (depthTarget.width()!=renderExtent.width || depthTarget.height()!=renderExtent.height ||
-            (geometryPipeline && TextureAccess::format(depthTarget)!=geometryPipeline->depthFormat())))) { return false; }
+        const auto depthTarget=depthIndex==depthSlot ? depth : depthIndex==UINT32_MAX ? TextureRef{} : native[depthIndex].ownedTexture;
+        renderExtent=depthOnly ? VkExtent2D{depthTarget.width(),depthTarget.height()} :
+            color==colorSlot ? extent : VkExtent2D{colorTarget.width(),colorTarget.height()};
+        if ((depthOnly && !depthTarget) || (depthTarget &&
+            (depthTarget.width()!=renderExtent.width || depthTarget.height()!=renderExtent.height))) { return false; }
         depthAttachment.imageView=TextureAccess::view(depthTarget); depthAttachment.imageLayout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         depthAttachment.loadOp=attachment.loadOp; depthAttachment.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
         depthAttachment.clearValue.depthStencil={1,0};
@@ -127,6 +135,9 @@ struct VulkanFrameGraph::State : GraphicsCommands
         const auto* selected=depthOnly ? shadow : pipeline;
         if (!selected || activeDepth==UINT32_MAX || vertices!=vertexSlot || indices!=indexSlot ||
             uniform!=(depthOnly ? UINT32_MAX : lightingSlot)) { return false; }
+        const auto depthTarget=activeDepth==depthSlot ? depth : native[activeDepth].ownedTexture;
+        if (selected->colorFormat()!=activeColorFormat || selected->depthFormat()!=TextureAccess::format(depthTarget)) { return false; }
+        activePipeline={};
         if (!materialTextures.empty() && (draw.material>=materialTextures.size() ||
             std::ranges::find(textures,materialTextures[draw.material])==textures.end())) { return false; }
         TextureBindingRef binding;
@@ -138,22 +149,46 @@ struct VulkanFrameGraph::State : GraphicsCommands
         if (!depthOnly && shadowsEnabled && !binding) { return false; }
         return selected->recordIndexedDraw(command,renderExtent,draw,depthOnly ? VK_NULL_HANDLE : lighting->set(),binding);
     }
-    bool endRendering() override { end(command); return true; }
+    bool endRendering() override { end(command); activePipeline={}; return true; }
     bool displayDepth(uint32_t slot) override
     {
-        return depthView && !depthOnly && activeDepth==UINT32_MAX && slot<native.size() && native[slot].sampled &&
-            depthView->record(command,extent,native[slot].sampled);
+        activePipeline={};
+        return depthView && depthView->colorFormat()==activeColorFormat && !depthOnly && activeDepth==UINT32_MAX &&
+            slot<native.size() && native[slot].aspect==VK_IMAGE_ASPECT_DEPTH_BIT && native[slot].sampled &&
+            depthView->record(command,renderExtent,native[slot].sampled);
+    }
+    bool bindPipeline(const GraphicsPipelineRef& value) override
+    {
+        activePipeline={}; textureBound=false; constantsSet=false;
+        if (depthOnly || activeDepth!=UINT32_MAX || GraphicsPipelineAccess::device(value)!=device ||
+            GraphicsPipelineAccess::format(value)!=activeColorFormat || !GraphicsPipelineAccess::bind(value,command,renderExtent)) { return false; }
+        activePipeline=value; return true;
+    }
+    bool bindSampledTexture(uint32_t set, uint32_t slot) override
+    {
+        if (set || slot>=native.size() || !GraphicsPipelineAccess::bindTexture(activePipeline,command,native[slot].sampled)) { return false; }
+        textureBound=true; return true;
+    }
+    bool pushConstants(std::span<const std::byte> bytes) override
+    {
+        if (!GraphicsPipelineAccess::push(activePipeline,command,bytes)) { return false; }
+        constantsSet=true; return true;
+    }
+    bool draw(uint32_t count) override
+    {
+        return activePipeline && (!GraphicsPipelineAccess::samplesTexture(activePipeline) || textureBound) &&
+            (!GraphicsPipelineAccess::constantBytes(activePipeline) || constantsSet) && GraphicsPipelineAccess::draw(activePipeline,command,count);
     }
 };
 VulkanFrameGraph::VulkanFrameGraph()=default;
 VulkanFrameGraph::~VulkanFrameGraph()=default;
 bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkImageView view, VkExtent2D extent,
     TextureRef depth, const VulkanTrianglePipeline* pipeline, const VulkanFrameLighting& lighting,
-    const graph::GraphicsGraphFactory& factory, const VulkanDepthViewPipeline* depthView, const VulkanTrianglePipeline* shadow)
+    const graph::GraphicsGraphFactory& factory, const VulkanDepthViewPipeline* depthView, const VulkanTrianglePipeline* shadow, VkFormat presentationFormat)
 {
     if (state_ || !device.handle() || !image || !view || !depth || !factory) { return false; }
     if (depthView && (depthView->deviceHandle()!=device.handle() ||
-        (pipeline && depthView->colorFormat()!=pipeline->colorFormat()))) { return false; }
+        depthView->colorFormat()!=presentationFormat)) { return false; }
     if (shadow && (!pipeline || !shadow->handle() || shadow->deviceHandle()!=device.handle() ||
         shadow->colorFormat()!=VK_FORMAT_UNDEFINED || shadow->depthFormat()!=pipeline->depthFormat() ||
         BufferAccess::handle(shadow->vertexBuffer())!=BufferAccess::handle(pipeline->vertexBuffer()) ||
@@ -163,6 +198,7 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
         if (TextureBindingAccess::set(shadow->materialBindings()[i])!=TextureBindingAccess::set(pipeline->materialBindings()[i])) { return false; }
     } }
     auto state=std::make_unique<State>();
+    state->device=device.handle(); state->presentationFormat=presentationFormat;
     const auto getProc=loadFunction<PFN_vkGetDeviceProcAddr>(device.physicalDeviceInfo().instance,"vkGetDeviceProcAddr");
     if (!getProc) { return false; }
     state->barrier=reinterpret_cast<PFN_vkCmdPipelineBarrier2>(getProc(device.handle(),"vkCmdPipelineBarrier2"));
@@ -183,6 +219,8 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
     state->colorSlot=color.index; state->depthSlot=depthResource.index;
     graph::GraphicsImports input{color,depthResource,{},{},{},{}};
     input.width=extent.width; input.height=extent.height;
+    input.prepareGraphics=[&](const GraphicsPipelineDesc& desc) { return GraphicsPipelineAccess::create(device,presentationFormat,desc); };
+    input.presentationSrgb=presentationFormat==VK_FORMAT_B8G8R8A8_SRGB || presentationFormat==VK_FORMAT_R8G8B8A8_SRGB;
     if (pipeline)
     {
         const auto vertexBuffer=BufferAccess::handle(pipeline->vertexBuffer()), indexBuffer=BufferAccess::handle(pipeline->indexBuffer());
@@ -211,21 +249,24 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
     for (size_t slot=importedCount; slot<program->plan.resources().size(); ++slot)
     {
         const auto& resource=program->plan.resources()[slot];
-        if (!resource.depthTexture) { std::fprintf(stderr,"Render Graph error: unsupported managed resource.\n"); return false; }
-        const auto desc=*resource.depthTexture;
-        auto texture=createDepthTexture(device,desc.width,desc.height,desc.sampled);
+        if (!resource.depthTexture && !resource.colorTexture) { std::fprintf(stderr,"Render Graph error: unsupported managed resource.\n"); return false; }
+        const bool isDepth=resource.depthTexture.has_value();
+        const auto width=isDepth ? resource.depthTexture->width : resource.colorTexture->width;
+        const auto height=isDepth ? resource.depthTexture->height : resource.colorTexture->height;
+        const auto sampled=isDepth ? resource.depthTexture->sampled : resource.colorTexture->sampled;
+        auto texture=isDepth ? createDepthTexture(device,width,height,sampled) : createColorTexture(device,width,height,sampled);
         if (!texture) { return false; }
-        if (pipeline && TextureAccess::format(texture)!=pipeline->depthFormat())
+        if (isDepth && pipeline && TextureAccess::format(texture)!=pipeline->depthFormat())
         { std::fprintf(stderr,"Render Graph error: sampled depth format is incompatible with the prepared forward pipeline.\n"); return false; }
         TextureBindingRef binding;
-        if (desc.sampled)
+        if (sampled)
         {
             SamplerDesc sampler; sampler.linearMag=sampler.linearMin=false;
             sampler.wrapU=sampler.wrapV=SamplerDesc::Wrap::Clamp; sampler.mips=SamplerDesc::Mips::None;
             binding=createTextureBinding(device,texture,sampler);
             if (!binding) { return false; }
         }
-        state->native.push_back({TextureAccess::image(texture),VK_NULL_HANDLE,VK_IMAGE_ASPECT_DEPTH_BIT,1,texture,binding});
+        state->native.push_back({TextureAccess::image(texture),VK_NULL_HANDLE,VkImageAspectFlags(isDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT),1,texture,binding});
         state->initial.push_back(graph::Use::None);
     }
     for (uint32_t slot=0; slot<state->native.size(); ++slot)
@@ -240,7 +281,7 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
         for (const auto& access : node.accesses)
         {
             const auto slot=access.resource.index;
-            const auto allowed=slot>=importedCount ? graph::Use::Depth|(state->native[slot].sampled ? graph::Use::Sampled : graph::Use::None) :
+            const auto allowed=slot>=importedCount ? (state->native[slot].aspect==VK_IMAGE_ASPECT_DEPTH_BIT ? graph::Use::Depth : graph::Use::Color)|(state->native[slot].sampled ? graph::Use::Sampled : graph::Use::None) :
                 slot==state->colorSlot ? graph::Use::Color|graph::Use::Present :
                 slot==state->depthSlot ? graph::Use::Depth : slot==state->vertexSlot ? graph::Use::Vertex :
                 slot==state->indexSlot ? graph::Use::Index : slot==state->lightingSlot ? graph::Use::Uniform : graph::Use::Sampled;
@@ -252,7 +293,11 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
     std::string order;
     for (const auto node : state->program.plan.order()) { if (!order.empty()) { order+=" -> "; } order+=state->program.plan.nodes()[node].name; }
     std::fprintf(stderr,"Render Graph: compiled %zu Passes, %zu imported resources; %s.\n",state->program.plan.nodes().size(),importedCount,order.c_str());
-    if (state->native.size()>importedCount) { std::fprintf(stderr,"Render Graph: allocated %zu managed depth texture(s).\n",state->native.size()-importedCount); }
+    size_t managedDepth=0,managedColor=0;
+    for (size_t slot=importedCount; slot<state->native.size(); ++slot)
+    { if (state->native[slot].aspect==VK_IMAGE_ASPECT_DEPTH_BIT) { ++managedDepth; } else { ++managedColor; } }
+    if (managedDepth) { std::fprintf(stderr,"Render Graph: allocated %zu managed depth texture(s).\n",managedDepth); }
+    if (managedColor) { std::fprintf(stderr,"Render Graph: allocated %zu managed color texture(s).\n",managedColor); }
     state_=std::move(state); return true;
 }
 bool VulkanFrameGraph::record(VkCommandBuffer command, const std::array<float,4>& color,
@@ -282,7 +327,7 @@ bool VulkanFrameGraph::submitted()
     const bool depthInitialized=state_->pending[state_->depthSlot]==graph::Use::Depth;
     state_->geometrySubmitted=true;
     for (size_t slot=0; slot<state_->native.size(); ++slot)
-    { if (state_->native[slot].ownedDepth) { state_->initial[slot]=state_->pending[slot]; } }
+    { if (state_->native[slot].ownedTexture) { state_->initial[slot]=state_->pending[slot]; } }
     state_->pending.clear();
     return depthInitialized;
 }

@@ -194,7 +194,7 @@ bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwa
         return false;
     }
     if (triangle && (!triangle->handle() || triangle->deviceHandle() != device.handle() ||
-        triangle->colorFormat() != swapchain.surfaceFormat().format || triangle->depthFormat() != detail::TextureAccess::format(depth)))
+        (triangle->colorFormat() != swapchain.surfaceFormat().format && triangle->colorFormat() != VK_FORMAT_R16G16B16A16_SFLOAT) || triangle->depthFormat() != detail::TextureAccess::format(depth)))
     {
         std::fprintf(stderr, "Vulkan error: triangle pipeline must match the renderer Device and Swapchain color format.\n");
         return false;
@@ -230,7 +230,7 @@ bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwa
         if (!detail::checkResult(created->createImageView(created->device, &view, nullptr, &imageView), "vkCreateImageView")) { return false; }
         image.view = imageView;
         image.graph = std::make_unique<detail::VulkanFrameGraph>();
-        if (!image.graph->initialize(device, image.handle, image.view, created->extent, created->depth, triangle, created->lighting, graphFactory, depthView, shadow)) { return false; }
+        if (!image.graph->initialize(device, image.handle, image.view, created->extent, created->depth, triangle, created->lighting, graphFactory, depthView, shadow, swapchain.surfaceFormat().format)) { return false; }
     }
     VkCommandPoolCreateInfo pool{};
     pool.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;

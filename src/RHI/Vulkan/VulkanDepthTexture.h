@@ -12,6 +12,9 @@ namespace madcat::rhi
 // Returns empty on Vulkan/capability failure; CPU allocation failures may throw.
 // sampled adds SAMPLED usage and feature checks, without uploading/initializing.
 [[nodiscard]] TextureRef createDepthTexture(const VulkanDevice& device, uint32_t width, uint32_t height, bool sampled = false);
+// Single-mip RGBA16F color attachment. Format and combined sampled/attachment
+// usage are queried. Initial layout/content remain undefined, owned by the graph.
+[[nodiscard]] TextureRef createColorTexture(const VulkanDevice& device, uint32_t width, uint32_t height, bool sampled = true);
 
 namespace detail
 {
