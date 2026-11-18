@@ -52,6 +52,7 @@ public:
     [[nodiscard]] bool bindSampledTexture(uint32_t set, Resource texture);
     [[nodiscard]] bool pushConstants(std::span<const std::byte> bytes);
     [[nodiscard]] bool draw(uint32_t vertexCount);
+    [[nodiscard]] bool drawUi(Resource font);
     [[nodiscard]] const std::string& error() const { return error_; }
     [[nodiscard]] bool finished() const { return !rendering_; }
 private:

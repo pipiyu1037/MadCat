@@ -91,6 +91,13 @@ bool PassContext::draw(uint32_t vertexCount)
     if (!rendering_ || !commands_.draw(vertexCount)) { error_ = "RHI Draw failed or outside rendering"; return false; }
     return true;
 }
+bool PassContext::drawUi(Resource font)
+{
+    if (!rendering_) { error_ = "UI outside rendering"; return false; }
+    if (!require(font, Use::Sampled)) { return false; }
+    if (!commands_.drawUi(font.index)) { error_ = "RHI UI drawing failed"; return false; }
+    return true;
+}
 void Graph::fail(std::string message) { if (error_.empty()) { error_ = std::move(message); } }
 bool Graph::valid(Resource r) const
 { return r.graph == identity_ && r.index < resources_.size() && r.version < resources_[r.index].versions.size(); }

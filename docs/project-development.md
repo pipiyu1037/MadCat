@@ -6,6 +6,12 @@ MadCat 是一个使用自研 ECS 和 Vulkan 的渲染引擎。前期服务渲染
 
 ## 当前实现进度
 
+2026 年 11 月 18 日为 [CustomPass](../examples/CustomPass/main.cpp)接入 Dear ImGui 1.92.5 参数面板：连续编辑曝光 EV、方向光线性 RGB 和辐照度，校验无效请求并保留有效值，支持恢复默认值。新增 `SceneCallbacks::ui`／`GraphicsCallbacks::ui`，每帧先收集面板修改，再更新场景与固定参数。图执行 `ClearHDR → ForwardHDR → ToneMap → UI → Present`，UI 明确声明字体读取及颜色保留写入，Vulkan 适配集中在 [VulkanUi](../src/RHI/Vulkan/VulkanUi.cpp)，普通 Pass 不暴露 Vulkan 类型。固定字体经 RHI 上传完成后交接 Sampled 状态；私有绘制缓冲、绑定及上下文按 GPU 完成与命令退役顺序回收。
+
+新增依赖使用官方提交 `6d910d5487d11ca567b61c7824b0c78c569d62f0` 的源码归档与 SHA256 校验，仍由 FetchContent 管理。当前为固定 Latin 字体和单窗口，不支持运行期字体／DPI 重建、Docking、多窗口、用户图片或中间纹理查看；Pass 开关和安全手动 Shader 更新仍待实现。调参复用当前图和管线，尚不代表 F06／F07 全部验收。使用与专项检查见 [CustomPass 教程](custom-pass.md#编写参数面板)。
+
+本次 Debug／Release 构建及各 14 组图检查通过，无编译警告；各 9 个 UI 状态 × 35 个解析像素及 UI 的线性混合／sRGB 参考点通过，覆盖输入、无效请求保留、焦点、恢复、resize 和最小化恢复。两种配置各 5 项 UI 失败清理与 6 项原 CustomPass 失败回归、原 HDR 八状态参考通过；Debug 默认 Suzanne 冒烟与最小化直接退出、BasicScene 七状态参考与五项应用失败回归通过，截图已查看。实际 RTX 5060 Ti／NVIDIA 617.42／RGBA16F 97／sRGB 50／D32_SFLOAT 126；Debug 开启同步验证，无 warning／error，Release 未主动启用验证层。用户 Shader 未改动，沿用既有 SPIR-V；不同 GPU／DPI、真实提交失败与性能未验证。以下历史条目保留各增量当时的状态。
+
 2026 年 11 月 17 日实现 [CustomPass](../examples/CustomPass/main.cpp)：运行层准备 RGBA16F Forward，图创建 HDR 中间纹理；实验自己的 C++／Slang 显示 Pass 显式准备管线、绑定采样纹理、上传曝光并 Draw。图为 `ClearHDR → ForwardHDR → ToneMap → Present`，保留超过 1 的线性颜色后进行 Reinhard 显示转换。新增 Shader 包可通过 CMake 函数登记，保持手动编译。带 Prepared 的 addPass 按值固定准备版本；HDR 写入／采样和下次写入同步由图管理。用法与能力范围见 [CustomPass 教程](custom-pass.md)。
 
 Debug／Release 的 CustomPass、BasicScene、MadCat 和自定义失败检查构建通过，无编译警告；两种配置各 13 组图、32 项深度和 68 项既有管线检查通过。四个图形 Shader 包编译／SPIR-V 验证通过，自定义包的 12 项编译失败恢复通过。两种配置各八个状态、每状态 35 个独立解析像素通过，覆盖默认／±2 EV／关灯／模型移动／恢复／resize／最小化恢复；六项准备、绑定、参数与绘制失败均在提交前拒绝并完成清理。Debug 默认 Suzanne 可见性冒烟与最小化直接退出通过，截图已查看；Debug BasicScene 七组、原投射阴影十五组及主相机深度八组回归通过，同步验证无 warning／error。实际 RTX 5060 Ti／NVIDIA 617.42／RGBA16F／sRGB 格式 50／D32_SFLOAT，Release 未主动启用验证层。未测性能、其他 GPU、实际提交失败或运行期 Shader 更新。可编程图形路径限单颜色附件、顶点 ID 三角形、可选单片元采样 set 与小块 Push Constants；不代表 Compute、任意绑定布局或 F04／F05／F08 全部验收。以下保留历史增量当时的状态。
@@ -219,7 +225,7 @@ Falcor 的模块化 Render Graph 和研究工作流是体验参考。MadCat 采�
 |---|---|---|---|
 | 1 | 提取可复用应用运行层和可链接构建目标，建立 `examples/BasicScene`；先复用现有前向渲染，分离示例场景与窗口／设备／帧循环 | 从示例创建另一个实验，登记源文件后加载约定模型、创建相机与灯光；仅修改实验场景即可看到结果，resize／最小化／退出与原 Sandbox 回归通过 | 已实现；BasicScene 为独立消费目标，两种配置构建／解析像素和相关窗口回归通过 |
 | 2 | 建立 `examples/CustomPass`，以 HDR 颜色及显示转换作为具体实验；按需补足 Shader 构建登记、显式管线／绑定、节点参数和图内颜色资源 | 新增 C++ Pass 与 Slang、声明并连接资源、指定输出；在已提供的 RHI 能力范围内，新增普通 Pass 无需修改图编译器或 Vulkan 执行器；曝光与参考像素、同步及生命周期有验证 | 已实现受限图形路径、RGBA16F 及 Reinhard；两种配置的参考像素、失败边界和 Debug 同步验证通过，见 CustomPass 教程 |
-| 3 | 将参数面板、适用 Pass 的开关、中间纹理查看和手动 Shader 更新接入同一实验入口 | 修改参数无需重启；查看器读取被图声明；候选更新失败保留有效版本，GPU 使用寿命正确 | 待实现；延续 F06／F07 的既有范围 |
+| 3 | 将参数面板、适用 Pass 的开关、中间纹理查看和手动 Shader 更新接入同一实验入口 | 修改参数无需重启；查看器读取被图声明；候选更新失败保留有效版本，GPU 使用寿命正确 | 参数面板已实现；Pass 开关、中间纹理查看和安全更新待实现，F06／F07 尚未整体验收 |
 
 上述顺序将已有半年目标组织为用户能够完成的工作，不改变 PBR 和完整路径追踪的交付范围。HDR／显示转换在 CustomPass 中推进，之后继续 Metallic-Roughness PBR 与路径追踪；不等待完整工具界面才验证自定义 Pass。首个运行层增量保留当前单在途帧、单队列和明确等待策略，运行期候选切换等能力分别验证。
 
@@ -360,14 +366,14 @@ PBR 的第一份验收场景应能比较不同粗糙度、金属度和基础色�
 | 依赖管理 | [vcpkg Manifest 模式](https://learn.microsoft.com/en-us/vcpkg/concepts/manifest-mode) | 建议锁定依赖基线；Slang SDK 的分发方式可独立安排 |
 | 窗口和输入 | GLFW 3.4 已使用；[Vulkan 支持](https://www.glfw.org/docs/3.4/vulkan_guide.html) 已用于 Instance 与 Surface 初始化 | 当前实现窗口创建、事件等待、关闭、Vulkan 函数获取和窗口 Surface；其他输入能力后续增加 |
 | Vulkan 开发环境 | [LunarG Vulkan SDK](https://vulkan.lunarg.com/) 已使用 | 当前要求头文件至少 1.3.239；本机验证 SDK 1.4.363.0，运行时版本和验证层另行查询 |
-| 调试界面 | [Dear ImGui](https://github.com/ocornut/imgui) | 提供参数面板及官方 Vulkan 适配，当前不建设完整编辑器 |
+| 调试界面 | [Dear ImGui 1.92.5](https://github.com/ocornut/imgui/tree/v1.92.5) 已使用 | 固定提交归档及 SHA256，官方 GLFW／Vulkan 后端；CustomPass 单窗口参数面板，尚无通用纹理查看器 |
 | 数学 | [GLM 1.0.1](https://github.com/g-truc/glm/tree/1.0.1) 已使用 | Scene 与 Assets 的向量、矩阵及四元数；CPU 变换与相机检查、固定矩阵 GPU 传输和专用场景渲染已验证 |
 | glTF 解析 | [cgltf 1.15](https://github.com/jkuhlmann/cgltf/tree/v1.15) 已使用，MIT 许可 | 私有 C 解析器；引擎复制和校验 CPU 几何／节点，已接通 Scene 实例与共享 GPU 几何绘制；基础材质／PNG／JPEG／采样器与 GPU 基础色已接通 |
 | GPU 内存分配 | [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) | 在 Vulkan 后端使用，资源所有权与 GPU 使用寿命仍由引擎管理 |
 | Shader | Slang | 已接入手动编译；固定 `2026.17-25-gc7954ebd1`，产物在 `build/shaders/triangle/`，运行期更新待实现 |
 | 图片解码与测试 | [stb_image 2.30](https://github.com/nothings/stb/blob/d14d46f6b44456eb88beac58cba833a4135d4c89/stb_image.h) 已使用；独立检查目标 | MIT／公有领域双许可，私有 C 实现仅启用 PNG／JPEG；RGBA8 导入与材质采样已验证，尚无完整 glTF／PBR |
 
-当前已采用 CMake、固定提交的 GLFW 3.4／GLM 1.0.1／cgltf 1.15／stb_image 2.30 和本机 Vulkan SDK。四个库均通过 FetchContent 管理，GLM 锁定 `0af55ccecd98d4e5a8d1fad7de25ba429d60e863`，关闭其测试与编译库；cgltf 锁定 `360db1a95480fe102ae9c69b27c5d101167ff5ba`，stb 锁定 `d14d46f6b44456eb88beac58cba833a4135d4c89`，各在单独私有 C 翻译单元编译实现。Vulkan 开发环境通过 `find_package(Vulkan 1.3.239 REQUIRED)` 查找。沿用既有依赖方式，无需为当前资产导入迁移包管理器；其余工具库组合仍属于建议。cgltf 负责解析及 URI／base64，图片内存交给 stb_image 解码。[cgltf 使用说明](https://github.com/jkuhlmann/cgltf)、[stb 源码与许可](https://github.com/nothings/stb/tree/d14d46f6b44456eb88beac58cba833a4135d4c89)
+当前已采用 CMake、固定提交的 GLFW 3.4／GLM 1.0.1／cgltf 1.15／stb_image 2.30／Dear ImGui 1.92.5 和本机 Vulkan SDK。五个库均通过 FetchContent 管理，GLM 锁定 `0af55ccecd98d4e5a8d1fad7de25ba429d60e863`，关闭其测试与编译库；cgltf 锁定 `360db1a95480fe102ae9c69b27c5d101167ff5ba`，stb 锁定 `d14d46f6b44456eb88beac58cba833a4135d4c89`，各在单独私有 C 翻译单元编译实现；ImGui 使用提交 `6d910d5487d11ca567b61c7824b0c78c569d62f0` 的官方源码归档与 SHA256 校验。Vulkan 开发环境通过 `find_package(Vulkan 1.3.239 REQUIRED)` 查找。沿用既有依赖方式，无需迁移包管理器；其余工具库组合仍属于建议。cgltf 负责解析及 URI／base64，图片内存交给 stb_image 解码。[cgltf 使用说明](https://github.com/jkuhlmann/cgltf)、[stb 源码与许可](https://github.com/nothings/stb/tree/d14d46f6b44456eb88beac58cba833a4135d4c89)
 
 源码目录组织建议见[架构设计文档](architecture-design.md#源码组织)，实际目录与支持范围以当前源码为准。
 
@@ -420,7 +426,7 @@ Shader 编译与资源状态模型先做最小验证，再逐步完善；不等�
 13. 添加层级和世界 Transform 更新，再单独覆盖重新挂接与删除行为。
 14. 按几何、索引、法线、UV、贴图分别增加模型导入能力。
 
-当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、单帧同步、交换链与管线重建、Slang 到 SPIR-V 的手动编译与验证、启动时的 Shader Module 加载、最小图形管线和三角形 Draw、不可变顶点缓冲、纯深度纹理引用与遮挡、Scene／相机矩阵到 Shader 的固定 Push Constant 路径、Ray Query 离线编译探针，以及 CPU Entity 生命周期、组件增删／组合查询、Scene 层级和局部／世界 Transform、相机组件及视图／透视投影矩阵、glTF 静态几何与节点导入。遍历期间结构性修改会被拒绝，调用方可在遍历后处理。架构设计已收敛为首版实施基线，常规接口和内部存储在实现时确定，停止逐项扩展架构讨论；这不表示目标能力全部实现。索引缓冲、DrawIndexed、glTF 静态 GPU 预览与 CPU 模型资产引用／Scene 节点实例化已接通；最小 RenderScene 绘制提取与共享 GPU 几何也已接通；法线／UV 的 CPU 导入也已完成；GPU 属性传输与可视化已完成；基础材质／图片导入与纹理采样已完成；单方向光、最小 Pass／图及图内深度采样已接通，光源矩阵与阴影图生成／查看已接通，Forward 阴影比较／偏移／滤波也已接通。可复用实验入口与 BasicScene 已实现，下一步通过 CustomPass 推进 HDR 颜色输出与显示转换，见[近期实施顺序](#用户使用方式与近期实施顺序)。所有场景对象继续使用 Entity，未来渲染通过 Mesh、Material 等组件组合提取。Ray Query GPU 求交仍需 Storage／设备地址缓冲、设备能力启用、绑定、加速结构和计算提交，不能把当前顶点缓冲视为这些能力已经具备。运行期 Shader 更新仍需安全替换和失败恢复验证。
+当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、单帧同步、交换链与管线重建、Slang 到 SPIR-V 的手动编译与验证、启动时的 Shader Module 加载、最小图形管线和三角形 Draw、不可变顶点缓冲、纯深度纹理引用与遮挡、Scene／相机矩阵到 Shader 的固定 Push Constant 路径、Ray Query 离线编译探针，以及 CPU Entity 生命周期、组件增删／组合查询、Scene 层级和局部／世界 Transform、相机组件及视图／透视投影矩阵、glTF 静态几何与节点导入。遍历期间结构性修改会被拒绝，调用方可在遍历后处理。架构设计已收敛为首版实施基线，常规接口和内部存储在实现时确定，停止逐项扩展架构讨论；这不表示目标能力全部实现。索引缓冲、DrawIndexed、glTF 静态 GPU 预览与 CPU 模型资产引用／Scene 节点实例化已接通；最小 RenderScene 绘制提取与共享 GPU 几何也已接通；法线／UV 的 CPU 导入也已完成；GPU 属性传输与可视化已完成；基础材质／图片导入与纹理采样已完成；单方向光、最小 Pass／图及图内深度采样已接通，光源矩阵与阴影图生成／查看已接通，Forward 阴影比较／偏移／滤波也已接通。可复用实验入口、BasicScene、CustomPass 的 HDR／显示转换及参数面板已实现，下一步推进适用 Pass 开关、中间纹理查看和安全手动 Shader 更新，见[近期实施顺序](#用户使用方式与近期实施顺序)。所有场景对象继续使用 Entity，未来渲染通过 Mesh、Material 等组件组合提取。Ray Query GPU 求交仍需 Storage／设备地址缓冲、设备能力启用、绑定、加速结构和计算提交，不能把当前顶点缓冲视为这些能力已经具备。运行期 Shader 更新仍需安全替换和失败恢复验证。
 
 ## 验证策略与风险
 

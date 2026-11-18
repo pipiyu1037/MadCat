@@ -13,6 +13,7 @@
 #include "RHI/Vulkan/VulkanSurface.h"
 #include "RHI/Vulkan/VulkanSwapchain.h"
 #include "RHI/Vulkan/VulkanTrianglePipeline.h"
+#include "RHI/Vulkan/VulkanUi.h"
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
@@ -83,7 +84,7 @@ public:
         glfwSetWindowUserPointer(window_, this);
         glfwSetKeyCallback(window_, [](GLFWwindow* target, int key, int, int action, int) {
             auto& app = *static_cast<GraphicsLoop*>(glfwGetWindowUserPointer(target));
-            if (action != GLFW_PRESS || !app.callbacks_.keyPressed) { return; }
+            if (action != GLFW_PRESS || !app.callbacks_.keyPressed || (app.ui_ && app.ui_->capturesKeyboard())) { return; }
             // GLFW letter/digit key codes match ASCII; no platform key type escapes.
             if ((key >= GLFW_KEY_0 && key <= GLFW_KEY_9) || (key >= GLFW_KEY_A && key <= GLFW_KEY_Z))
             {
@@ -105,10 +106,19 @@ public:
         glfwSetWindowRefreshCallback(window_, [](GLFWwindow* target) {
             static_cast<GraphicsLoop*>(glfwGetWindowUserPointer(target))->render();
         });
+        if (callbacks_.ui)
+        {
+            ui_=std::make_unique<rhi::VulkanUi>();
+            if (!ui_->initialize(window_)) { throw std::runtime_error("UI platform initialization failed"); }
+        }
     }
 
     ~GraphicsLoop()
     {
+        // Retire commands first. UI shutdown restores the chained callbacks,
+        // which must happen before we clear the application's callbacks below.
+        presentation_.reset();
+        ui_.reset();
         // No callback may retain this owner during destruction/window teardown.
         glfwSetWindowRefreshCallback(window_, nullptr);
         glfwSetKeyCallback(window_, nullptr);
@@ -168,8 +178,10 @@ private:
             // Destroy the old native-window association before creating a new
             // Swapchain. No oldSwapchain retirement/reuse optimization yet.
             presentation_.reset();
+            if (ui_) { ui_->resetRenderer(); }
             auto candidate = std::make_unique<Presentation>();
             if (!candidate->swapchain.initialize(device_, surface_, {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}) ||
+                (ui_ && !ui_->prepare(device_,candidate->swapchain.surfaceFormat().format,static_cast<uint32_t>(candidate->swapchain.images().size()))) ||
                 !(candidate->depth = madcat::rhi::createDepthTexture(device_, candidate->swapchain.extent().width, candidate->swapchain.extent().height)) ||
                 !candidate->triangle.initialize(device_, options_.forwardColorFormat==rhi::ColorFormat::Rgba16Float ? VK_FORMAT_R16G16B16A16_SFLOAT :
                     candidate->swapchain.surfaceFormat().format, vertex_, fragment_, vertices_, indices_, madcat::rhi::detail::TextureAccess::format(candidate->depth), materials_) ||
@@ -178,7 +190,7 @@ private:
                     madcat::rhi::detail::TextureAccess::format(candidate->depth), materials_, true)) ||
                 !candidate->renderer.initialize(device_, candidate->swapchain, candidate->depth,
                     options_.graphFactory,
-                    &candidate->triangle, depthVertex_ ? &candidate->depthView : nullptr, shadowVertex_ ? &candidate->shadow : nullptr))
+                    &candidate->triangle, depthVertex_ ? &candidate->depthView : nullptr, shadowVertex_ ? &candidate->shadow : nullptr,ui_.get()))
             {
                 std::fprintf(stderr, "MadCat error: presentation creation/rebuild failed; stopping rendering.\n");
                 return false;
@@ -195,6 +207,7 @@ private:
         const double now = glfwGetTime();
         const FrameInfo info{static_cast<float>(extent.width) / static_cast<float>(extent.height), now - lastTime_};
         lastTime_ = now;
+        if (ui_) { ui_->frame(callbacks_.ui); }
         auto frame = callbacks_.frame(info);
         if (!frame) { throw std::runtime_error(frame.error()); }
         const auto result = presentation_->renderer.drawIndexed(frame->clearColor, frame->draws, frame->lighting, frame->shadowDraws);
@@ -219,6 +232,7 @@ private:
     const ApplicationOptions& options_;
     const GraphicsCallbacks& callbacks_;
     double lastTime_ = 0;
+    std::unique_ptr<rhi::VulkanUi> ui_;
     std::unique_ptr<Presentation> presentation_;
     int framebufferWidth_ = 0;
     int framebufferHeight_ = 0;

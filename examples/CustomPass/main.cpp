@@ -1,5 +1,8 @@
 #include "Runtime/Application.h"
 #include "ToneMapPass.h"
+#include "Passes/UiPass.h"
+#include <imgui.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
@@ -49,33 +52,84 @@ int main(int argc, char** argv)
                 clear.outputs,input.vertices,input.indices,input.lighting,input.textures});
             const auto toneMap=graph.addPass("ToneMap",experiment::ToneMapPass{},
                 experiment::ToneMapPass::Inputs{forward.outputs.color,input.color},std::move(*prepared));
-            const auto present=graph.addPass("Present",passes::PresentPass{},passes::PresentPass::Inputs{toneMap.outputs.color});
+            const auto ui=graph.addPass("UI",passes::UiPass{},passes::UiPass::Inputs{toneMap.outputs.color,input.uiFont});
+            const auto present=graph.addPass("Present",passes::PresentPass{},passes::PresentPass::Inputs{ui.outputs.color});
             auto plan=graph.compile();
             if (!plan) { return std::unexpected(plan.error()); }
             auto parameters=[&,clearNode=clear.node,forwardNode=forward.node,toneNode=toneMap.node,
-                presentNode=present.node,count=plan->nodes().size()](const std::array<float,4>& color,
+                uiNode=ui.node,presentNode=present.node,count=plan->nodes().size()](const std::array<float,4>& color,
                     std::span<const rhi::IndexedDraw> draws,std::span<const rhi::IndexedDraw>) {
                 std::vector<std::any> values(count);
                 values[clearNode]=passes::ClearPass::Parameters{color};
                 values[forwardNode]=passes::ForwardPass::Parameters{{draws.begin(),draws.end()}};
                 values[toneNode]=displayParameters; // copied again at the frame's record boundary
+                values[uiNode]=passes::UiPass::Parameters{};
                 values[presentNode]=passes::PresentPass::Parameters{};
                 return values;
             };
             return graph::GraphicsGraph{std::move(*plan),std::move(parameters)};
         };
         int mode=0,logged=-1;
+        struct Controls
+        {
+            float exposure=0;
+            std::array<float,3> color{1,.8f,.6f};
+            float irradiance=4*3.14159265f;
+            bool operator==(const Controls&) const = default;
+        };
+        Controls controls, lastPresented;
+        bool controlsPresented=false;
+        std::string diagnostic;
+        auto request=[&](const Controls& draft) {
+            if (!std::isfinite(draft.exposure) || draft.exposure < -8 || draft.exposure > 8 ||
+                !std::isfinite(draft.irradiance) || draft.irradiance < 0 || draft.irradiance > 32 ||
+                !std::ranges::all_of(draft.color,[](float c){return std::isfinite(c) && c>=0 && c<=1;}))
+            { diagnostic="Invalid parameters; keeping previous values."; return; }
+            controls=draft; diagnostic.clear();
+            displayParameters.exposureEV=controls.exposure;
+            auto& lightParameters=*scene.tryGet<scene::DirectionalLight>(light);
+            lightParameters.color={controls.color[0],controls.color[1],controls.color[2]};
+            lightParameters.irradiance=controls.irradiance;
+        };
         runtime::SceneCallbacks callbacks;
+        callbacks.ui=[&] {
+            auto draft=controls;
+            ImGui::SetNextWindowPos({12,12},ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize({340,210},ImGuiCond_Always);
+            ImGui::Begin("CustomPass Parameters",nullptr,ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoFocusOnAppearing);
+            ImGui::PushItemWidth(185);
+            bool edited=ImGui::SliderFloat("Exposure (EV)",&draft.exposure,-8,8,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+            edited|=ImGui::ColorEdit3("Light color",draft.color.data(),ImGuiColorEditFlags_Float|ImGuiColorEditFlags_NoPicker|ImGuiColorEditFlags_NoOptions);
+            edited|=ImGui::SliderFloat("Irradiance",&draft.irradiance,0,32,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+            if (ImGui::Button("Restore defaults"))
+            {
+                draft=Controls{}; edited=true; mode=0;
+                modelPose.translation.x=0;
+                if (!scene.setLocalTransform(instance->root,modelPose)) { throw std::runtime_error("Scene edit failed"); }
+            }
+            ImGui::TextUnformatted("Ctrl+click a slider to type a value.");
+            if (!diagnostic.empty()) { ImGui::TextWrapped("%s",diagnostic.c_str()); }
+            ImGui::PopItemWidth(); ImGui::End();
+            if (edited) { request(draft); }
+        };
         callbacks.keyPressed=[&](char key) {
             if (key<'1' || key>'5') { return; }
             mode=key-'1';
-            displayParameters.exposureEV=mode==1 ? -2.f : mode==2 ? 2.f : 0.f;
-            scene.tryGet<scene::DirectionalLight>(light)->irradiance=mode==3 ? 0.f : 4*3.14159265f;
+            Controls draft;
+            draft.exposure=mode==1 ? -2.f : mode==2 ? 2.f : 0.f;
+            draft.irradiance=mode==3 ? 0.f : 4*3.14159265f;
+            request(draft);
             modelPose.translation.x=mode==4 ? .45f : 0;
             if (!scene.setLocalTransform(instance->root,modelPose)) { throw std::runtime_error("Scene edit failed"); }
         };
         callbacks.presented=[&] {
             if (logged!=mode) { std::fprintf(stderr,"CustomPass: mode %d presented.\n",mode); logged=mode; }
+            if (!controlsPresented || controls!=lastPresented)
+            {
+                std::fprintf(stderr,"CustomPass: controls exposure %.4f, light (%.4f,%.4f,%.4f) x %.4f presented.\n",
+                    controls.exposure,controls.color[0],controls.color[1],controls.color[2],controls.irradiance);
+                lastPresented=controls; controlsPresented=true;
+            }
         };
         return runtime::run(application,scene,assets,camera,callbacks);
     }

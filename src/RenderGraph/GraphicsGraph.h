@@ -13,6 +13,7 @@ struct GraphicsImports
     uint32_t width = 0, height = 0;
     rhi::GraphicsPipelineFactory prepareGraphics;
     bool presentationSrgb = false;
+    Resource uiFont; // initialized, immutable atlas when a UI callback is enabled
 };
 struct GraphicsGraph
 {

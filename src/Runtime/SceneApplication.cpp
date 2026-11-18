@@ -21,6 +21,7 @@ int run(const ApplicationOptions& options, scene::Scene& scene, const assets::Mo
         GraphicsCallbacks graphics;
         graphics.keyPressed = callbacks.keyPressed;
         graphics.presented = callbacks.presented;
+        graphics.ui = callbacks.ui;
         graphics.frame = [&](const FrameInfo& info) -> std::expected<RenderFrame,std::string> {
             if (callbacks.update) { callbacks.update(info); }
             if (!scene.updateWorldTransforms()) { return std::unexpected("Frame world transform update failed"); }

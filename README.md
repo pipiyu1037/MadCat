@@ -32,7 +32,9 @@ cmake --build build --config Debug --target CustomPass MadCatShaders CustomPassS
 .\build\Debug\CustomPass.exe
 ```
 
-按 1 默认、2 曝光 −2 EV、3 曝光 +2 EV、4 关灯、5 移动模型；参数变化不重建管线。修改 Slang 后关闭程序，手动构建 `CustomPassShaders` 再启动。自定义图形路径当前限颜色附件、全屏三角形、一个片元采样 set 和小块 Push Constants；Compute、任意布局与运行期 Shader 更新待实现。详细机制、扩展步骤和验证命令见[教程](docs/custom-pass.md)。
+窗口内的 Dear ImGui 面板可连续调节曝光 EV、方向光线性 RGB 颜色和辐照度，提供恢复默认值；Ctrl＋单击滑条可输入数值。单击场景区域后，按 1 默认、2 曝光 −2 EV、3 曝光 +2 EV、4 关灯、5 移动模型。UI 编辑时抑制实验快捷键，普通参数变化不重建图或管线。图执行 `ClearHDR → ForwardHDR → ToneMap → UI → Present`，UI 保留场景颜色并声明字体采样。
+
+修改 Slang 后关闭程序，手动构建 `CustomPassShaders` 再启动。自定义图形路径当前限颜色附件、全屏三角形、一个片元采样 set 和小块 Push Constants；Compute、任意布局与运行期 Shader 更新待实现。详细机制、扩展步骤和验证命令见[教程](docs/custom-pass.md)。
 
 ## 构建与运行
 
@@ -50,6 +52,8 @@ cmake --build build --config Debug --target MadCatShaders
 ```
 
 首次配置通过 CMake FetchContent 获取固定提交的 GLFW 3.4、GLM 1.0.1、cgltf 1.15 和 stb_image 2.30，需要访问 GitHub；依赖源码和构建产物位于 `build` 下。GLM 用于 CPU 场景与资产变换，锁定提交 `0af55ccecd98d4e5a8d1fad7de25ba429d60e863`，不启用其测试或编译库。cgltf 使用 MIT 许可，锁定提交 `360db1a95480fe102ae9c69b27c5d101167ff5ba`；stb 锁定提交 `d14d46f6b44456eb88beac58cba833a4135d4c89`，提供 MIT／公有领域双许可。二者只作为资产模块内部的解析与图片解码依赖。[stb 源码与许可](https://github.com/nothings/stb/tree/d14d46f6b44456eb88beac58cba833a4135d4c89)
+
+参数面板另使用 [Dear ImGui 1.92.5](https://github.com/ocornut/imgui/tree/v1.92.5)（MIT），FetchContent 下载提交 `6d910d5487d11ca567b61c7824b0c78c569d62f0` 的源码归档并校验 SHA256。官方 GLFW／Vulkan 后端保持原样；UI 适配集中在 RHI 和运行层，CPU Scene／ECS／图检查不依赖 ImGui。
 
 程序创建一个 1280 × 720、标题为 MadCat 的可调整大小窗口，输出设备和 Surface 能力报告，选择设备、创建一个 Graphics／Compute／Present 队列，加载两个 Shader Module，再创建 Swapchain 和三角形管线。画面为深蓝背景上的插值彩色三角形：上方红色、左下蓝色、右下绿色。背景线性 RGBA 为 `(0.04, 0.08, 0.16, 1.0)`，本机 sRGB 格式下背景像素约为 RGB `(56, 80, 111)`。Debug 启用验证层，Release 不主动启用验证层。关闭前先等待 acquisition、GPU 提交和呈现资源退役，再释放帧渲染器、管线、Swapchain、两个 Shader Module、Device、Surface、Instance 和窗口；初始化或帧执行失败返回非零状态。
 

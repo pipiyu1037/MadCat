@@ -1,5 +1,5 @@
 add_executable(CustomPass main.cpp ToneMapPass.h)
-target_link_libraries(CustomPass PRIVATE MadCatRuntime)
+target_link_libraries(CustomPass PRIVATE MadCatRuntime MadCatImGui)
 target_compile_definitions(CustomPass PRIVATE
     MADCAT_EXAMPLE_ASSETS="${PROJECT_SOURCE_DIR}/assets"
     MADCAT_CUSTOM_SHADERS="${CMAKE_BINARY_DIR}/shaders/custom-display"
@@ -29,3 +29,9 @@ add_custom_target(CustomPassShaderChecks
         -P "${PROJECT_SOURCE_DIR}/tests/ShaderBuildChecks.cmake"
     VERBATIM
 )
+add_executable(UiChecks EXCLUDE_FROM_ALL ../../tests/UiChecks.cpp)
+target_link_libraries(UiChecks PRIVATE MadCatRuntime MadCatImGui)
+set_target_properties(UiChecks PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>")
+if(MSVC)
+    target_compile_options(UiChecks PRIVATE /W4 /permissive- /utf-8)
+endif()

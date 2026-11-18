@@ -1,6 +1,6 @@
 # MadCat 架构设计
 
-更新日期：2026-11-17。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
+更新日期：2026-11-18。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
 
 ## 文档职责与设计状态
 
@@ -886,6 +886,20 @@ UBO 的 set 1／binding 0 和图 Uniform 同步范围均扩展到 Vertex／Fragm
 - `forwardColorFormat` 只选择场景输出格式，用户图决定资源与显示算法。`presentationSrgb` 让实验明确检查呈现编码；本例要求 sRGB 附件，Reinhard 后输出线性颜色，由附件编码一次。HDR 指内部颜色范围，未实现 HDR 显示器输出模式。
 
 当前随每张交换链图的创建／resize 同步准备并持有管线，没有缓存、运行期 Prepared 候选发布、失败保留旧呈现资源或多帧并行。单文件图形 Shader 包通过 `madcat_add_graphics_shaders` 登记并手动编译，原有验证／发布失败恢复流程保持。Compute、任意绑定布局及运行期更新仍为后续目标；下文的计算 Tone Mapping、候选版本管理和绑定集合示例继续作为目标设计。
+
+### Dear ImGui 参数面板与叠加（当前实现）
+
+2026-11-18 接入固定提交的 Dear ImGui 1.92.5 和原样编译的官方 GLFW／Vulkan 后端。用户实验链接 `MadCatImGui`，通过 `SceneCallbacks::ui` 或 `GraphicsCallbacks::ui` 编写控件；`VulkanUi` 集中持有上下文和平台／GPU 适配，普通 Pass、Scene 和 ECS 不依赖 Vulkan UI 类型。当前单线程、单上下文、单窗口；关闭回调的既有实验不创建 UI 资源。
+
+运行层在每次可渲染帧中先启动 UI 帧、收集控件修改，再更新场景并固定渲染参数；UI 绘制在 GPU 顺序中位于显示转换后。CustomPass 编辑参数副本，显式校验有限性与范围，成功才整体替换有效值并写入光源。帧参数仍按值复制，不让界面写图节点。普通数值变化不重建图或管线。期望／有效资源配置的通用发布、运行期 Shader 更新和图切换仍属目标设计。
+
+[UiPass](../src/Passes/UiPass.h) 声明字体 Sampled 读取和显示颜色 Preserve 写入，使用 Load 及 alpha 混合，Present 读取 UI 输出版本。`PassContext::drawUi` 检查字体声明／版本；后端校验实际字体槽位、附件格式、无深度及每帧恰好一次 UI 绘制。输入字符始终交给官方 GLFW 后端；运行层按照 WantCaptureKeyboard 抑制实验快捷键。鼠标目前只用于 UI，尚无场景鼠标控制分发。
+
+固定 Latin 字体通过 RHI RGBA 纹理上传，上传提交完成后显式交接 Fragment Sampled 状态，再以 `GraphicsImports::uiFont` 导入图。禁用动态字体纹理更新，绘制时拒绝 atlas 尺寸／状态改变、未声明图片及任意用户绘制回调。官方后端私有顶点／索引缓冲只在当前单帧 presenter 等到前次提交和呈现完成后才写入，HostWrite 通过本次提交交接；这些缓冲不作为用户图资源暴露。图持有字体强引用，适配层持有采样器和官方 Descriptor；重建／退出先等待 GPU／WSI 并释放帧命令及图引用，再销毁 UI GPU 后端。UI 回调异常立即停止该帧；即使用户窗口未闭合，也直接销毁上下文，不调用会检查未闭合窗口栈的 EndFrame。
+
+当前要求 sRGB 呈现附件。暗色样式 RGB 先转为线性值再打包，alpha 保留覆盖率，混合发生在线性域并由附件编码一次；自定义 UI 颜色也须提供线性值。窗口重建重新准备匹配格式／图像数量的 GPU 后端，CPU 控件状态随上下文保留。固定字体、字号与布局起步，不支持运行期字体／DPI 重建、Docking、多窗口或用户图片；查看中间纹理时仍须增加显式图读取或可视化转换。
+
+验证和使用方式见 [CustomPass 教程](custom-pass.md#编写参数面板)。这一适配没有扩大普通 `GraphicsPipelineDesc` 的混合、索引输入或任意绑定能力；通用 RHI UI 渲染器仍可在后续实际需求出现时另行评估。
 
 ## 实现参考建议
 

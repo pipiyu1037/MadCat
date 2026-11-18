@@ -170,7 +170,7 @@ VulkanClearRenderer::~VulkanClearRenderer()
 
 bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwapchain& swapchain, TextureRef depth,
     const graph::GraphicsGraphFactory& graphFactory, const VulkanTrianglePipeline* triangle, const VulkanDepthViewPipeline* depthView,
-    const VulkanTrianglePipeline* shadow)
+    const VulkanTrianglePipeline* shadow, VulkanUi* ui)
 {
     if (state_)
     {
@@ -230,7 +230,7 @@ bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwa
         if (!detail::checkResult(created->createImageView(created->device, &view, nullptr, &imageView), "vkCreateImageView")) { return false; }
         image.view = imageView;
         image.graph = std::make_unique<detail::VulkanFrameGraph>();
-        if (!image.graph->initialize(device, image.handle, image.view, created->extent, created->depth, triangle, created->lighting, graphFactory, depthView, shadow, swapchain.surfaceFormat().format)) { return false; }
+        if (!image.graph->initialize(device, image.handle, image.view, created->extent, created->depth, triangle, created->lighting, graphFactory, depthView, shadow, swapchain.surfaceFormat().format, ui)) { return false; }
     }
     VkCommandPoolCreateInfo pool{};
     pool.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;

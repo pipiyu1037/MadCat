@@ -9,6 +9,7 @@
 #include "VulkanTextureState.h"
 #include "VulkanTrianglePipeline.h"
 #include "VulkanGraphicsPipeline.h"
+#include "VulkanUi.h"
 #include <algorithm>
 #include <type_traits>
 
@@ -52,6 +53,9 @@ struct VulkanFrameGraph::State : GraphicsCommands
     const VulkanTrianglePipeline* pipeline=nullptr;
     const VulkanTrianglePipeline* shadow=nullptr;
     const VulkanDepthViewPipeline* depthView=nullptr;
+    VulkanUi* ui=nullptr;
+    uint32_t uiFontSlot=UINT32_MAX;
+    bool uiRecorded=false;
     uint32_t activeDepth=UINT32_MAX;
     VkDevice device=VK_NULL_HANDLE;
     VkFormat presentationFormat=VK_FORMAT_UNDEFINED, activeColorFormat=VK_FORMAT_UNDEFINED;
@@ -179,12 +183,19 @@ struct VulkanFrameGraph::State : GraphicsCommands
         return activePipeline && (!GraphicsPipelineAccess::samplesTexture(activePipeline) || textureBound) &&
             (!GraphicsPipelineAccess::constantBytes(activePipeline) || constantsSet) && GraphicsPipelineAccess::draw(activePipeline,command,count);
     }
+    bool drawUi(uint32_t fontSlot) override
+    {
+        activePipeline={};
+        if (!ui || uiRecorded || fontSlot!=uiFontSlot || depthOnly || activeDepth!=UINT32_MAX ||
+            !ui->record(command,activeColorFormat)) { return false; }
+        uiRecorded=true; return true;
+    }
 };
 VulkanFrameGraph::VulkanFrameGraph()=default;
 VulkanFrameGraph::~VulkanFrameGraph()=default;
 bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkImageView view, VkExtent2D extent,
     TextureRef depth, const VulkanTrianglePipeline* pipeline, const VulkanFrameLighting& lighting,
-    const graph::GraphicsGraphFactory& factory, const VulkanDepthViewPipeline* depthView, const VulkanTrianglePipeline* shadow, VkFormat presentationFormat)
+    const graph::GraphicsGraphFactory& factory, const VulkanDepthViewPipeline* depthView, const VulkanTrianglePipeline* shadow, VkFormat presentationFormat, VulkanUi* ui)
 {
     if (state_ || !device.handle() || !image || !view || !depth || !factory) { return false; }
     if (depthView && (depthView->deviceHandle()!=device.handle() ||
@@ -221,6 +232,14 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
     input.width=extent.width; input.height=extent.height;
     input.prepareGraphics=[&](const GraphicsPipelineDesc& desc) { return GraphicsPipelineAccess::create(device,presentationFormat,desc); };
     input.presentationSrgb=presentationFormat==VK_FORMAT_B8G8R8A8_SRGB || presentationFormat==VK_FORMAT_R8G8B8A8_SRGB;
+    if (ui)
+    {
+        auto font=ui->font();
+        if (!font || TextureAccess::device(font)!=device.handle()) { return false; }
+        input.uiFont=import("UiFont",identity(TextureAccess::image(font)),graph::Kind::Color,graph::Use::Sampled,true,
+            {TextureAccess::image(font),VK_NULL_HANDLE,VK_IMAGE_ASPECT_COLOR_BIT,TextureAccess::mipLevels(font),font});
+        state->ui=ui; state->uiFontSlot=input.uiFont.index;
+    }
     if (pipeline)
     {
         const auto vertexBuffer=BufferAccess::handle(pipeline->vertexBuffer()), indexBuffer=BufferAccess::handle(pipeline->indexBuffer());
@@ -306,6 +325,7 @@ bool VulkanFrameGraph::record(VkCommandBuffer command, const std::array<float,4>
 {
     if (!state_ || !command) { return false; }
     auto& state=*state_; state.command=command; state.shadowsEnabled=shadowsEnabled;
+    state.uiRecorded=false;
     state.pending.clear();
     auto initial=state.initial;
     initial[state.colorSlot]=presented ? graph::Use::Present : graph::Use::None;
@@ -315,6 +335,8 @@ bool VulkanFrameGraph::record(VkCommandBuffer command, const std::array<float,4>
     const auto parameters=state.program.parameters(color,draws,shadowDraws);
     const auto result=state.program.plan.record(state,parameters,initial,[&](const auto& barrier){ return state.transition(barrier); });
     if (!result) { std::fprintf(stderr,"Render Graph error: %s\n",result.error().c_str()); return false; }
+    if (state.ui && !state.uiRecorded)
+    { std::fprintf(stderr,"Render Graph error: enabled UI requires one UI drawing node.\n"); return false; }
     if ((*result)[state.colorSlot]!=graph::Use::Present ||
         ((*result)[state.depthSlot]!=graph::Use::Depth && (*result)[state.depthSlot]!=initial[state.depthSlot]))
     { std::fprintf(stderr,"Render Graph error: output states do not match presenter/depth handoff.\n"); return false; }

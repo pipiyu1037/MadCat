@@ -27,5 +27,7 @@ public:
     virtual bool bindSampledTexture(uint32_t, uint32_t) { return false; }
     virtual bool pushConstants(std::span<const std::byte>) { return false; }
     virtual bool draw(uint32_t) { return false; }
+    // Specialized UI adapter; its atlas must be declared by the calling Pass.
+    virtual bool drawUi(uint32_t) { return false; }
 };
 }

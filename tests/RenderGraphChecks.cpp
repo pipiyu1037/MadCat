@@ -1,6 +1,7 @@
 #include "Passes/ForwardPass.h"
 #include "Passes/DepthViewPass.h"
 #include "Passes/ShadowPass.h"
+#include "Passes/UiPass.h"
 #include <cstdio>
 #include <stdexcept>
 
@@ -14,6 +15,7 @@ struct Commands : rhi::GraphicsCommands
 {
     int begins=0, ends=0, draws=0;
     int displays=0, depthOnly=0;
+    int uiDraws=0;
     bool beginRendering(uint32_t color,uint32_t depth,rhi::AttachmentLoad,const std::array<float,4>&) override
     { ++begins; if(color==UINT32_MAX && depth!=UINT32_MAX) { ++depthOnly; } return true; }
     bool drawIndexed(uint32_t,uint32_t,uint32_t,std::span<const uint32_t>,const rhi::IndexedDraw&,uint32_t = UINT32_MAX) override { ++draws; return true; }
@@ -23,6 +25,7 @@ struct Commands : rhi::GraphicsCommands
     bool bindSampledTexture(uint32_t set,uint32_t) override { return set==0; }
     bool pushConstants(std::span<const std::byte> bytes) override { return bytes.size()==sizeof(float); }
     bool draw(uint32_t count) override { ++draws; return count==3; }
+    bool drawUi(uint32_t) override { ++uiDraws; return true; }
 };
 void versionsAndOrdering()
 {
@@ -335,9 +338,39 @@ void managedDepthExecution()
     auto failed=program->plan.record(commands,parameters,states,[](auto){return false;});
     check(!failed && states[slot]==graph::Use::None,"Failed recording published resource states");
 }
+void uiOverlayContracts()
+{
+    graph::Graph g;
+    const auto color=texture(g);
+    const auto font=g.import("font",2,graph::Kind::Color,graph::Use::Sampled,true);
+    const auto depth=g.import("depth",3,graph::Kind::Depth,graph::Use::None,false);
+    const auto clear=g.addPass("Clear",passes::ClearPass{},passes::Targets{color,depth});
+    const auto ui=g.addPass("UI",passes::UiPass{},passes::UiPass::Inputs{clear.outputs.color,font});
+    const auto present=g.addPass("Present",passes::PresentPass{},passes::PresentPass::Inputs{ui.outputs.color});
+    auto plan=g.compile();
+    check(plan && plan->order()==std::vector<uint32_t>{clear.node,ui.node,present.node},"UI ordering lost");
+    check(plan->nodes()[ui.node].accesses[1].contents==graph::Write::Preserve,"UI discards background");
+    const std::array<std::any,3> parameters{passes::ClearPass::Parameters{},passes::UiPass::Parameters{},passes::PresentPass::Parameters{}};
+    const std::array states{graph::Use::None,graph::Use::Sampled,graph::Use::None};
+    Commands commands; std::vector<graph::Barrier> barriers;
+    auto recorded=plan->record(commands,parameters,states,[&](auto b){barriers.push_back(b);return true;});
+    check(recorded && commands.uiDraws==1 && (*recorded)[color.index]==graph::Use::Present,"UI record failed");
+    check(std::ranges::any_of(barriers,[&](auto b){return b.resource==color.index && b.before==graph::Use::Color && b.after==graph::Use::Color;}),"Missing preserving UI color barrier");
+    const auto accesses=plan->nodes()[ui.node].accesses;
+    graph::PassContext undeclared(std::span(accesses).subspan(1),commands);
+    check(undeclared.beginRendering(ui.outputs.color,{},rhi::AttachmentLoad::Load,{}) &&
+        !undeclared.drawUi(font) && commands.uiDraws==1,"Undeclared UI atlas accepted");
+    graph::PassContext context(accesses,commands);
+    check(!context.drawUi(font),"UI allowed outside rendering");
+    graph::Graph uninitialized;
+    auto invalid=texture(uninitialized);
+    auto atlas=uninitialized.import("font",2,graph::Kind::Color,graph::Use::Sampled,true);
+    (void)uninitialized.addPass("UI",passes::UiPass{},passes::UiPass::Inputs{invalid,atlas});
+    check(!uninitialized.compile(),"UI preserved uninitialized background");
+}
 }
 int main()
 {
-    try { versionsAndOrdering(); diagnostics(); duplicateIdentity(); executionAndFailure(); accessAndSnapshots(); forwardSynchronization(); parameterIsolation(); managedDepthContracts(); managedDepthExecution(); shadowExecution(); shadowForwardExecution(); managedColorContracts(); preparedColorExecution(); std::puts("Render Graph checks: 13 groups passed."); return 0; }
+    try { versionsAndOrdering(); diagnostics(); duplicateIdentity(); executionAndFailure(); accessAndSnapshots(); forwardSynchronization(); parameterIsolation(); managedDepthContracts(); managedDepthExecution(); shadowExecution(); shadowForwardExecution(); managedColorContracts(); preparedColorExecution(); uiOverlayContracts(); std::puts("Render Graph checks: 14 groups passed."); return 0; }
     catch(const std::exception& error) { std::fprintf(stderr,"Render Graph checks failed: %s\n",error.what()); return 1; }
 }

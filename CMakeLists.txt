@@ -36,6 +36,26 @@ FetchContent_Declare(stb
 )
 FetchContent_MakeAvailable(stb)
 
+FetchContent_Declare(imgui
+    URL https://codeload.github.com/ocornut/imgui/zip/6d910d5487d11ca567b61c7824b0c78c569d62f0 # Dear ImGui 1.92.5
+    URL_HASH SHA256=138804e5d53207e8ce7ba9f8baf7ba31417b7b4b0549696d7ec913daf38d16c1
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(imgui)
+add_library(MadCatImGui STATIC
+    "${imgui_SOURCE_DIR}/imgui.cpp" "${imgui_SOURCE_DIR}/imgui_draw.cpp"
+    "${imgui_SOURCE_DIR}/imgui_tables.cpp" "${imgui_SOURCE_DIR}/imgui_widgets.cpp"
+)
+target_include_directories(MadCatImGui SYSTEM PUBLIC "${imgui_SOURCE_DIR}")
+target_compile_features(MadCatImGui PUBLIC cxx_std_23)
+add_library(MadCatImGuiBackends STATIC
+    "${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp"
+    "${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp"
+)
+target_include_directories(MadCatImGuiBackends SYSTEM PUBLIC "${imgui_SOURCE_DIR}/backends")
+target_compile_definitions(MadCatImGuiBackends PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES PRIVATE GLFW_INCLUDE_NONE)
+target_link_libraries(MadCatImGuiBackends PUBLIC MadCatImGui PRIVATE glfw Vulkan::Headers)
+
 # Compile the upstream implementation once; its types stay private to Assets.
 add_library(MadCatStbImage STATIC src/Assets/StbImage.c)
 target_compile_features(MadCatStbImage PRIVATE c_std_11)
@@ -248,6 +268,7 @@ add_library(MadCatRHI STATIC
     src/RHI/Vulkan/VulkanFrameGraph.cpp
     src/RHI/Vulkan/VulkanDepthViewPipeline.cpp
     src/RHI/Vulkan/VulkanGraphicsPipeline.cpp
+    src/RHI/Vulkan/VulkanUi.cpp
     src/RHI/Vulkan/VulkanDevice.cpp
     src/RHI/Vulkan/VulkanInstance.cpp
     src/RHI/Vulkan/VulkanPhysicalDevice.cpp
@@ -260,7 +281,7 @@ add_library(MadCatRHI STATIC
 target_compile_features(MadCatRHI PUBLIC cxx_std_23)
 target_include_directories(MadCatRHI PUBLIC src)
 target_compile_definitions(MadCatRHI PRIVATE VK_NO_PROTOTYPES)
-target_link_libraries(MadCatRHI PUBLIC MadCatRenderGraph PRIVATE glfw Vulkan::Headers)
+target_link_libraries(MadCatRHI PUBLIC MadCatRenderGraph PRIVATE glfw Vulkan::Headers MadCatImGuiBackends)
 set_target_properties(MadCatRHI PROPERTIES CXX_EXTENSIONS OFF)
 
 add_library(MadCatRuntime STATIC

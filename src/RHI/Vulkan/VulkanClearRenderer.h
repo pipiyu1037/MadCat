@@ -16,6 +16,7 @@ class VulkanDevice;
 class VulkanSwapchain;
 class VulkanTrianglePipeline;
 class VulkanDepthViewPipeline;
+class VulkanUi;
 
 enum class ClearFrameResult
 {
@@ -47,7 +48,7 @@ public:
     [[nodiscard]] bool initialize(const VulkanDevice& device, const VulkanSwapchain& swapchain,
         TextureRef depth, const graph::GraphicsGraphFactory& graphFactory,
         const VulkanTrianglePipeline* triangle = nullptr, const VulkanDepthViewPipeline* depthView = nullptr,
-        const VulkanTrianglePipeline* shadow = nullptr);
+        const VulkanTrianglePipeline* shadow = nullptr, VulkanUi* ui = nullptr);
     // Clears color and depth (1.0), then draws the supplied matrix snapshots.
     // Retry means no image acquired (finite acquire timeout).
     // Unavailable/Failed are terminal: no further acquire or submit until rebuilt.

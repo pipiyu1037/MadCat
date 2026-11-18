@@ -11,6 +11,7 @@ namespace madcat::rhi
 class VulkanDevice;
 class VulkanTrianglePipeline;
 class VulkanDepthViewPipeline;
+class VulkanUi;
 namespace detail
 {
 class VulkanFrameLighting;
@@ -27,7 +28,7 @@ public:
     [[nodiscard]] bool initialize(const VulkanDevice& device, VkImage image, VkImageView view, VkExtent2D extent,
         TextureRef depth, const VulkanTrianglePipeline* pipeline, const VulkanFrameLighting& lighting,
         const graph::GraphicsGraphFactory& factory, const VulkanDepthViewPipeline* depthView = nullptr,
-        const VulkanTrianglePipeline* shadow = nullptr, VkFormat presentationFormat = VK_FORMAT_UNDEFINED);
+        const VulkanTrianglePipeline* shadow = nullptr, VkFormat presentationFormat = VK_FORMAT_UNDEFINED, VulkanUi* ui = nullptr);
     [[nodiscard]] bool record(VkCommandBuffer command, const std::array<float,4>& color,
         std::span<const IndexedDraw> draws, bool presented, bool depthInitialized,
         std::span<const IndexedDraw> shadowDraws, bool shadowsEnabled);

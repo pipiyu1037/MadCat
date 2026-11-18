@@ -29,6 +29,7 @@ struct GraphicsCallbacks
     std::function<std::expected<RenderFrame,std::string>(const FrameInfo&)> frame;
     std::function<void(char)> keyPressed; // uppercase ASCII letters and digits
     std::function<void()> presented; // present accepted; GPU/WSI completion can still be pending
+    std::function<void()> ui; // optional Dear ImGui widgets, before frame extraction
 };
 // Advanced frame-data entry used by Sandbox. All arguments/captures must live
 // through this blocking call. Startup geometry/materials are immutable; frame
@@ -43,6 +44,7 @@ struct SceneCallbacks
     std::function<void(const FrameInfo&)> update;
     std::function<void(char)> keyPressed;
     std::function<void()> presented; // same completion distinction as GraphicsCallbacks
+    std::function<void()> ui; // edit parameter drafts; graph must consume GraphicsImports::uiFont
 };
 // Scene entry: user owns Scene/Assets/camera and algorithm composition. Updates
 // run before world propagation and extraction, outside Scene queries. The engine

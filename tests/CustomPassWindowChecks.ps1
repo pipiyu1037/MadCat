@@ -1,6 +1,6 @@
 ﻿param(
     [ValidateSet('Debug','Release')][string]$Configuration = 'Debug',
-    [ValidateSet('reference','model','close-minimized','failures')][string]$Scenario = 'reference',
+    [ValidateSet('reference','ui','ui-failures','model','close-minimized','failures')][string]$Scenario = 'reference',
     [string]$BuildDirectory = 'build'
 )
 $ErrorActionPreference = 'Stop'
@@ -11,6 +11,32 @@ $outputRoot = Join-Path $buildPath 'verification/custom-pass'
 $name = "$($Configuration.ToLower())-$Scenario"
 $errorPath = Join-Path $outputRoot "$name.stderr.log"
 $outPath = Join-Path $outputRoot "$name.stdout.log"
+
+if ($Scenario -eq 'ui-failures') {
+    $previousSync = $env:VK_LAYER_VALIDATE_SYNC
+    try {
+        $env:VK_LAYER_VALIDATE_SYNC = '1'
+        $failureProcess = Start-Process -FilePath (Join-Path $buildPath "$Configuration/UiChecks.exe") -WorkingDirectory $outputRoot `
+            -WindowStyle Hidden -PassThru -RedirectStandardOutput $outPath -RedirectStandardError $errorPath
+        $null = $failureProcess.Handle
+        if (-not $failureProcess.WaitForExit(40000)) { Stop-Process -Id $failureProcess.Id -Force; throw 'UI failure checks timed out' }
+        $log = Get-Content -LiteralPath $errorPath -Raw -Encoding UTF8
+        if ($failureProcess.ExitCode -ne 0 -or $log -notmatch 'UI checks: 5 failure boundaries passed\.' -or
+            $log -match 'Vulkan \[(error|warning)\]|GLFW error|Clear frame presented') { throw "UI failure checks failed (see $errorPath)" }
+        foreach ($resource in @('UI renderer','Device')) {
+            $created = if ($resource -eq 'UI renderer') { 'UI renderer ready;' } else { 'Device created;' }
+            if ([regex]::Matches($log,$created).Count -ne 5 -or [regex]::Matches($log,"$resource destroyed\.").Count -ne 5) { throw "UI failure cleanup mismatch: $resource" }
+        }
+        if ([regex]::Matches($log,'RHI UI drawing failed').Count -ne 2 -or
+            $log -notmatch 'undeclared resource/version or usage' -or
+            $log -notmatch 'Injected UI callback failure' -or $log -notmatch 'Injected UI graph preparation failure') { throw 'UI failures hit the wrong boundary' }
+        Write-Output "$Configuration UI failure checks passed (5 boundaries)"
+    } finally {
+        $env:VK_LAYER_VALIDATE_SYNC = $previousSync
+        if ($failureProcess) { $failureProcess.Dispose() }
+    }
+    exit 0
+}
 
 if ($Scenario -eq 'failures') {
     $previousSync = $env:VK_LAYER_VALIDATE_SYNC
@@ -79,6 +105,8 @@ public static class CustomPassWindowCheck {
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
 }
 '@
 $previousSync = $env:VK_LAYER_VALIDATE_SYNC
@@ -125,6 +153,49 @@ function Select-Pose([int]$Pose) {
         (Read-Log) -match "CustomPass: mode $Pose presented\." } 'edited frame presentation'
     Start-Sleep -Milliseconds 150
 }
+function Click-Client([int]$X, [int]$Y, [bool]$Control=$false) {
+    $origin = New-Object CustomPassWindowCheck+Point
+    [void][CustomPassWindowCheck]::ClientToScreen($windowState.Handle,[ref]$origin)
+    [void][CustomPassWindowCheck]::SetForegroundWindow($windowState.Handle)
+    [void][CustomPassWindowCheck]::SetCursorPos(($origin.X+$X),($origin.Y+$Y))
+    if ($Control) {
+        [void][CustomPassWindowCheck]::PostMessage($windowState.Handle,0x100,[IntPtr]0x11,[IntPtr]0x001D0001)
+        Start-Sleep -Milliseconds 300
+    }
+    $position = [IntPtr](($Y -shl 16) -bor $X)
+    [void][CustomPassWindowCheck]::PostMessage($windowState.Handle,0x200,[IntPtr]0,$position)
+    Start-Sleep -Milliseconds 150
+    [void][CustomPassWindowCheck]::PostMessage($windowState.Handle,0x201,[IntPtr]1,$position)
+    Start-Sleep -Milliseconds 200
+    [void][CustomPassWindowCheck]::PostMessage($windowState.Handle,0x202,[IntPtr]0,$position)
+    Start-Sleep -Milliseconds 200
+    if ($Control) {
+        [void][CustomPassWindowCheck]::PostMessage($windowState.Handle,0x101,[IntPtr]0x11,[IntPtr]0xC01D0001)
+    }
+    Start-Sleep -Milliseconds 400
+}
+function Enter-Value([int]$X, [int]$Y, [string]$Value) {
+    Click-Client $X $Y $true
+    # All keyboard messages target this HWND. Ctrl+click selects the scalar.
+    $modes = [regex]::Matches((Read-Log),'CustomPass: mode').Count
+    if ($Value -eq '3') {
+        # TranslateMessage produces the digit, while the key callback must be
+        # suppressed for the underlying experiment (whose 3 key selects +2 EV).
+        [void][CustomPassWindowCheck]::PostMessage($windowState.Handle,0x100,[IntPtr]0x33,[IntPtr]0x00040001)
+        Start-Sleep -Milliseconds 200
+        [void][CustomPassWindowCheck]::PostMessage($windowState.Handle,0x101,[IntPtr]0x33,[IntPtr]0xC0040001)
+    } else {
+        foreach ($character in $Value.ToCharArray()) {
+            [void][CustomPassWindowCheck]::PostMessage($windowState.Handle,0x102,[IntPtr][int]$character,[IntPtr]1)
+        }
+    }
+    Start-Sleep -Milliseconds 300
+    [void][CustomPassWindowCheck]::PostMessage($windowState.Handle,0x100,[IntPtr]0x0D,[IntPtr]0x001C0001)
+    Start-Sleep -Milliseconds 200
+    [void][CustomPassWindowCheck]::PostMessage($windowState.Handle,0x101,[IntPtr]0x0D,[IntPtr]0xC01C0001)
+    Start-Sleep -Milliseconds 300
+    if ([regex]::Matches((Read-Log),'CustomPass: mode').Count -ne $modes) { throw 'UI digit leaked to experiment shortcut' }
+}
 function Encode([double]$Linear) {
     $value = if ($Linear -le .0031308) { 12.92*$Linear } else { 1.055*[Math]::Pow($Linear,1.0/2.4)-.055 }
     return [int][Math]::Round(255*$value)
@@ -133,7 +204,8 @@ function Tone([double]$Linear,[double]$Exposure) {
     $exposed = $Linear*$Exposure
     return Encode ($exposed/(1+$exposed))
 }
-function Check-Pixels([string]$Label, [int]$Pose=0) {
+function Check-Pixels([string]$Label, [int]$Pose=0, [double]$ExposureEV=[double]::NaN,
+    [double[]]$LightColor=@(1,.8,.6), [double]$Irradiance=(4*[Math]::PI)) {
     $size = Get-Size
     $origin = New-Object CustomPassWindowCheck+Point
     [void][CustomPassWindowCheck]::ClientToScreen($windowState.Handle,[ref]$origin)
@@ -143,6 +215,7 @@ function Check-Pixels([string]$Label, [int]$Pose=0) {
         $graphics.CopyFromScreen($origin.X,$origin.Y,0,0,$bitmap.Size)
         $bitmap.Save((Join-Path $outputRoot "$name-$Label.png"))
         $exposure = if ($Pose -eq 1) { .25 } elseif ($Pose -eq 2) { 4.0 } else { 1.0 }
+        if (-not [double]::IsNaN($ExposureEV)) { $exposure=[Math]::Pow(2,$ExposureEV) }
         $background = @((Tone .04 $exposure),(Tone .08 $exposure),(Tone .16 $exposure))
         if ($Scenario -eq 'model') {
             $visible = 0
@@ -159,7 +232,22 @@ function Check-Pixels([string]$Label, [int]$Pose=0) {
         $center = .5+[Math]::Sqrt(3)*$offset/(6*$aspect)
         $halfWidth = [Math]::Sqrt(3)*.7/(6*$aspect)
         $halfHeight = [Math]::Sqrt(3)*.525/6
-        $lit = @((Tone 1.0 $exposure),(Tone 1.6 $exposure),(Tone 1.8 $exposure))
+        $lit = @((Tone (.25*$LightColor[0]*$Irradiance/[Math]::PI) $exposure),
+            (Tone (.5*$LightColor[1]*$Irradiance/[Math]::PI) $exposure),
+            (Tone (.75*$LightColor[2]*$Irradiance/[Math]::PI) $exposure))
+        if ($Scenario -eq 'ui') {
+            # Independent body pixel: .06 sRGB style color converted to linear,
+            # packed as UNORM8, alpha .94, blended over the tone-mapped scene.
+            $color=$bitmap.GetPixel(30,180)
+            $alpha=240.0/255; $body=1.0/255
+            $actual=@($color.R,$color.G,$color.B)
+            $sceneBackground=@(.04,.08,.16)
+            for ($channel=0;$channel -lt 3;++$channel) {
+                $linear=$sceneBackground[$channel]*$exposure
+                $expected=Encode ($body*$alpha+($linear/(1+$linear))*(1-$alpha))
+                if ([Math]::Abs($actual[$channel]-$expected) -gt 3) { throw 'UI sRGB overlay or background preservation failed' }
+            }
+        }
         $checked = 0
         foreach ($nx in @(-.32,-.24,-.12,0,.12,.24,.32)) { foreach ($v in @(.38,.45,.55,.62,.72)) {
             $x = [int][Math]::Floor((.5+$nx/$aspect)*$size[0]); $y=[int][Math]::Floor($v*$size[1])
@@ -197,6 +285,7 @@ try {
     Wait-Condition { (Read-Log) -match 'CustomPass: mode 0 presented\.' } 'first frame'
     Wait-Ready
     Check-Pixels 'initial'
+    Click-Client 700 500 # Give experiment shortcuts the scene's keyboard focus.
     if ($Scenario -eq 'reference') {
         $pipelineCount = [regex]::Matches((Read-Log),'Graphics pipeline created;').Count
         Select-Pose 1; Check-Pixels 'exposure-minus2' 1
@@ -207,6 +296,32 @@ try {
         if ([regex]::Matches((Read-Log),'Graphics pipeline created;').Count -ne $pipelineCount) { throw 'Scene edits rebuilt pipeline' }
         [void][CustomPassWindowCheck]::SetWindowPos($windowState.Handle,[IntPtr](-1),30,30,850,650,0x10)
         Wait-Ready; Check-Pixels 'resized'
+    }
+    if ($Scenario -eq 'ui') {
+        $pipelineCount = [regex]::Matches((Read-Log),'Graphics pipeline created;').Count
+        $uiCount = [regex]::Matches((Read-Log),'UI renderer ready;').Count
+        Enter-Value 100 48 '3'
+        Wait-Condition { (Read-Log) -match 'controls exposure 3.0000,' } 'UI exposure application'
+        Check-Pixels 'ui-exposure' 0 3
+        Enter-Value 100 95 '6.283185'
+        Wait-Condition { (Read-Log) -match 'x 6.2832 presented' } 'UI irradiance application'
+        Check-Pixels 'ui-intensity' 0 3 @(1,.8,.6) (2*[Math]::PI)
+        Enter-Value 42 71 '0.25'
+        Wait-Condition { (Read-Log) -match 'light \(0.2500,0.8000,0.6000\)' } 'UI color application'
+        Check-Pixels 'ui-color' 0 3 @(.25,.8,.6) (2*[Math]::PI)
+        Enter-Value 42 71 '-0.5'
+        Start-Sleep -Milliseconds 150
+        Check-Pixels 'ui-invalid-keeps-effective' 0 3 @(.25,.8,.6) (2*[Math]::PI)
+        Click-Client 80 118
+        Wait-Condition { [regex]::Matches((Read-Log),'controls exposure 0.0000, light \(1.0000,0.8000,0.6000\) x 12.5664').Count -gt 1 } 'UI defaults restoration'
+        Check-Pixels 'ui-defaults'
+        if ([regex]::Matches((Read-Log),'Graphics pipeline created;').Count -ne $pipelineCount -or
+            [regex]::Matches((Read-Log),'UI renderer ready;').Count -ne $uiCount) { throw 'UI parameter edits rebuilt GPU state' }
+        Click-Client 700 500
+        Select-Pose 2; Check-Pixels 'scene-shortcut-after-ui' 2
+        Select-Pose 0
+        [void][CustomPassWindowCheck]::SetWindowPos($windowState.Handle,[IntPtr](-1),30,30,850,650,0x10)
+        Wait-Ready; Check-Pixels 'ui-resized'
     }
     [void][CustomPassWindowCheck]::ShowWindow($windowState.Handle,6)
     Wait-Condition { (Read-Log) -match 'rendering paused;' } 'minimize'
@@ -232,8 +347,11 @@ try {
         $created = [regex]::Matches($log,"$resource created;").Count
         if ($created -lt 1 -or $created -ne [regex]::Matches($log,"$resource destroyed\.").Count) { throw "Custom resource lifetime mismatch: $resource" }
     }
-    if ($log -notmatch 'ClearHDR -> ForwardHDR -> ToneMap -> Present' -or $log -notmatch 'color format 97' -or
+    if ($log -notmatch 'ClearHDR -> ForwardHDR -> ToneMap -> UI -> Present' -or $log -notmatch 'color format 97' -or
         $log -notmatch '(?s)Frame commands retired.*HDR color texture destroyed.*Triangle pipeline destroyed') { throw 'HDR graph or retirement order mismatch' }
+    $uiRenderers = [regex]::Matches($log,'UI renderer ready;').Count
+    if ($uiRenderers -lt 1 -or $uiRenderers -ne [regex]::Matches($log,'UI renderer destroyed\.').Count -or
+        $log -notmatch '(?s)Frame commands retired.*UI renderer destroyed.*Device destroyed') { throw 'UI lifetime mismatch' }
     Write-Output "$Configuration $Scenario passed; $pipelines presentation generations; logs/screenshots: $outputRoot"
 } finally {
     $appProcess.Refresh()
