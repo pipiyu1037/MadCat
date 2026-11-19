@@ -2,6 +2,7 @@
 #include "Passes/DepthViewPass.h"
 #include "Passes/ShadowPass.h"
 #include "Passes/UiPass.h"
+#include "../examples/CustomPass/DisplayGraph.h"
 #include <cstdio>
 #include <stdexcept>
 
@@ -15,7 +16,7 @@ struct Commands : rhi::GraphicsCommands
 {
     int begins=0, ends=0, draws=0;
     int displays=0, depthOnly=0;
-    int uiDraws=0;
+    int uiDraws=0, pushes=0;
     bool beginRendering(uint32_t color,uint32_t depth,rhi::AttachmentLoad,const std::array<float,4>&) override
     { ++begins; if(color==UINT32_MAX && depth!=UINT32_MAX) { ++depthOnly; } return true; }
     bool drawIndexed(uint32_t,uint32_t,uint32_t,std::span<const uint32_t>,const rhi::IndexedDraw&,uint32_t = UINT32_MAX) override { ++draws; return true; }
@@ -23,7 +24,7 @@ struct Commands : rhi::GraphicsCommands
     bool displayDepth(uint32_t) override { ++displays; return true; }
     bool bindPipeline(const rhi::GraphicsPipelineRef&) override { return true; }
     bool bindSampledTexture(uint32_t set,uint32_t) override { return set==0; }
-    bool pushConstants(std::span<const std::byte> bytes) override { return bytes.size()==sizeof(float); }
+    bool pushConstants(std::span<const std::byte> bytes) override { ++pushes; return bytes.size()==sizeof(float); }
     bool draw(uint32_t count) override { ++draws; return count==3; }
     bool drawUi(uint32_t) override { ++uiDraws; return true; }
 };
@@ -368,9 +369,77 @@ void uiOverlayContracts()
     (void)uninitialized.addPass("UI",passes::UiPass{},passes::UiPass::Inputs{invalid,atlas});
     check(!uninitialized.compile(),"UI preserved uninitialized background");
 }
+void customDepthViewer()
+{
+    for (const bool enabled : {false,true})
+    {
+        graph::Graph g;
+        graph::GraphicsImports input;
+        input.color=texture(g);
+        input.vertices=g.import("vertices",2,graph::Kind::Buffer,graph::Use::HostWrite,true);
+        input.indices=g.import("indices",3,graph::Kind::Buffer,graph::Use::HostWrite,true);
+        input.uiFont=g.import("font",4,graph::Kind::Color,graph::Use::Sampled,true);
+        input.width=64; input.height=48; input.presentationSrgb=true;
+        experiment::ToneMapPass::Parameters display;
+        experiment::DisplaySettings settings{enabled,experiment::DisplayView::Depth};
+        auto factory=experiment::makeDisplayGraph(display,{},settings);
+        settings={}; // The graph must retain the requested structure by value.
+        auto program=factory(g,input);
+        check(bool(program),"Custom depth viewer requires external depth or ToneMap preparation");
+        const auto& resources=program->plan.resources();
+        const auto depth=static_cast<uint32_t>(resources.size()-1);
+        check(resources[depth].depthTexture && resources[depth].depthTexture->sampled,"Viewer depth is not managed/sampleable");
+        const rhi::IndexedDraw draw{};
+        const auto parameters=program->parameters({},std::span(&draw,1),{});
+        std::vector<graph::Use> states;
+        for (const auto& resource : resources) { states.push_back(resource.initial); }
+        Commands commands; std::vector<graph::Barrier> barriers;
+        auto record=[&](const auto& initial) { return program->plan.record(commands,parameters,initial,
+            [&](auto barrier){barriers.push_back(barrier);return true;}); };
+        auto result=record(states);
+        check(result && commands.displays==1 && commands.uiDraws==1 && commands.draws==(enabled ? 1 : 0) &&
+            (*result)[input.color.index]==graph::Use::Present,"Viewer lost Forward selection, UI or Present");
+        check(std::ranges::any_of(barriers,[&](auto b){return b.resource==depth && b.before==graph::Use::Depth &&
+            b.after==graph::Use::Sampled;}),"Custom viewer lacks depth write-to-read synchronization");
+        barriers.clear();
+        check(bool(record(*result)) && std::ranges::any_of(barriers,[&](auto b){return b.resource==depth &&
+            b.before==graph::Use::Sampled && b.after==graph::Use::Depth;}),"Custom viewer lacks next-frame read-to-write synchronization");
+    }
+}
+void hdrRangeExecution()
+{
+    graph::Graph g;
+    const auto color=texture(g), hdr=g.createColorTexture("HDR",{64,48});
+    const auto depth=g.createDepthTexture("depth",{64,48,false});
+    const auto font=g.import("font",2,graph::Kind::Color,graph::Use::Sampled,true);
+    const auto clear=g.addPass("ClearHDR",passes::ClearPass{},passes::Targets{hdr,depth});
+    const auto viewer=g.addPass("HDRRange",experiment::HdrRangePass{},
+        experiment::HdrRangePass::Inputs{clear.outputs.color,color},experiment::HdrRangePass::Prepared{});
+    const auto ui=g.addPass("UI",passes::UiPass{},passes::UiPass::Inputs{viewer.outputs.color,font});
+    (void)g.addPass("Present",passes::PresentPass{},passes::PresentPass::Inputs{ui.outputs.color});
+    auto plan=g.compile(); check(bool(plan),"HDR range graph failed");
+    const std::array<std::any,4> parameters{passes::ClearPass::Parameters{},experiment::HdrRangePass::Parameters{},
+        passes::UiPass::Parameters{},passes::PresentPass::Parameters{}};
+    std::vector<graph::Use> states;
+    for (const auto& resource : plan->resources()) { states.push_back(resource.initial); }
+    Commands commands; std::vector<graph::Barrier> barriers;
+    auto record=[&](const auto& initial) { return plan->record(commands,parameters,initial,
+        [&](auto b){barriers.push_back(b);return true;}); };
+    auto result=record(states);
+    check(result && commands.draws==1 && commands.uiDraws==1 && commands.pushes==0 &&
+        (*result)[color.index]==graph::Use::Present,"HDR viewer lost zero-constant execution, UI or Present");
+    check(std::ranges::any_of(barriers,[&](auto b){return b.resource==hdr.index && b.before==graph::Use::Color &&
+        b.after==graph::Use::Sampled;}),"HDR range write-to-read barrier missing");
+    barriers.clear();
+    check(bool(record(*result)) && std::ranges::any_of(barriers,[&](auto b){return b.resource==hdr.index &&
+        b.before==graph::Use::Sampled && b.after==graph::Use::Color;}),"HDR range next-frame read-to-write barrier missing");
+    graph::PassContext context(plan->nodes()[viewer.node].accesses,commands);
+    check(context.beginRendering(viewer.outputs.color,{},rhi::AttachmentLoad::Clear,{}) &&
+        !context.bindSampledTexture(0,hdr),"HDR viewer accepted an undeclared old version");
+}
 }
 int main()
 {
-    try { versionsAndOrdering(); diagnostics(); duplicateIdentity(); executionAndFailure(); accessAndSnapshots(); forwardSynchronization(); parameterIsolation(); managedDepthContracts(); managedDepthExecution(); shadowExecution(); shadowForwardExecution(); managedColorContracts(); preparedColorExecution(); uiOverlayContracts(); std::puts("Render Graph checks: 14 groups passed."); return 0; }
+    try { versionsAndOrdering(); diagnostics(); duplicateIdentity(); executionAndFailure(); accessAndSnapshots(); forwardSynchronization(); parameterIsolation(); managedDepthContracts(); managedDepthExecution(); shadowExecution(); shadowForwardExecution(); managedColorContracts(); preparedColorExecution(); uiOverlayContracts(); customDepthViewer(); hdrRangeExecution(); std::puts("Render Graph checks: 16 groups passed."); return 0; }
     catch(const std::exception& error) { std::fprintf(stderr,"Render Graph checks failed: %s\n",error.what()); return 1; }
 }

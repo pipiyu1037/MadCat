@@ -28,13 +28,25 @@ cmake --build build --config Debug --target BasicScene MadCatShaders
 [CustomPass](examples/CustomPass/main.cpp) 将场景写入图内 RGBA16F 纹理，再由用户的 [ToneMapPass](examples/CustomPass/ToneMapPass.h) 和 [Slang Shader](examples/CustomPass/display.slang)完成曝光与 Reinhard 显示转换。示例不使用 Vulkan 类型；在已有 RHI 能力范围内，新增普通 Pass 无需修改图编译器或 Vulkan 执行器。
 
 ```powershell
-cmake --build build --config Debug --target CustomPass MadCatShaders CustomPassShaders
+cmake --build build --config Debug --target CustomPass MadCatShaders CustomPassShaders CustomPassHdrShaders
 .\build\Debug\CustomPass.exe
 ```
 
 窗口内的 Dear ImGui 面板可连续调节曝光 EV、方向光线性 RGB 颜色和辐照度，提供恢复默认值；Ctrl＋单击滑条可输入数值。单击场景区域后，按 1 默认、2 曝光 −2 EV、3 曝光 +2 EV、4 关灯、5 移动模型。UI 编辑时抑制实验快捷键，普通参数变化不重建图或管线。图执行 `ClearHDR → ForwardHDR → ToneMap → UI → Present`，UI 保留场景颜色并声明字体采样。
 
-修改 Slang 后关闭程序，手动构建 `CustomPassShaders` 再启动。自定义图形路径当前限颜色附件、全屏三角形、一个片元采样 set 和小块 Push Constants；Compute、任意布局与运行期 Shader 更新待实现。详细机制、扩展步骤和验证命令见[教程](docs/custom-pass.md)。
+Forward 复选框可在运行中移除／恢复场景绘制节点；关闭时保留 `ClearHDR → ToneMap → UI → Present`，显示背景和面板。新图为所有交换链图像准备成功后统一切换，失败保留当前图并显示原因。窗口重建继续使用最后生效的图。
+
+View 下拉框可选择 Final image 或 Camera depth。深度模式在主视口显示 `1 - deviceDepth` 灰度，近处较亮、清除背景为黑色，参数面板继续可用。它表示非线性设备深度；曝光和灯光不影响该显示。Restore defaults 恢复最终画面和 Forward 开启。使用与验证见[主相机深度查看](docs/custom-pass.md#主相机深度查看)。
+
+View 还可选择 HDR range，直接检查 ToneMap 前的 SceneHDR。任一 RGB 分量大于 1 时整像素标记为洋红色，否则显示 0～1 的线性 RGB，由 sRGB 附件编码；曝光不影响这个视图。使用与阈值验证见[HDR 范围查看](docs/custom-pass.md#hdr-范围查看)。
+
+已下载 [Lantern](assets/models/Lantern/README.md) 和 [Box](assets/models/Box/README.md) 原始 glTF 场景，附固定来源、许可与 SHA256 清单。可用 `--fit` 在示例侧居中缩放显示：
+
+```powershell
+.\build\Debug\CustomPass.exe --fit assets/models/Lantern/Lantern.gltf
+```
+
+修改 Slang 后关闭程序，手动构建对应目标再启动：`CustomPassShaders` 编译最终显示，`CustomPassHdrShaders` 编译 HDR 范围查看。自定义图形路径当前限颜色附件、全屏三角形、一个片元采样 set 和小块 Push Constants；Compute、任意布局与运行期 Shader 更新待实现。详细机制、扩展步骤和验证命令见[教程](docs/custom-pass.md)。
 
 ## 构建与运行
 

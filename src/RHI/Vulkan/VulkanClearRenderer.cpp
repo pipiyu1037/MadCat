@@ -31,6 +31,11 @@ struct VulkanClearRenderer::State
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     VkExtent2D extent{};
     const VulkanTrianglePipeline* triangle = nullptr;
+    const VulkanDevice* owner = nullptr;
+    const VulkanDepthViewPipeline* depthView = nullptr;
+    const VulkanTrianglePipeline* shadow = nullptr;
+    VulkanUi* ui = nullptr;
+    VkFormat presentationFormat = VK_FORMAT_UNDEFINED;
     // This fixed geometry is retained for the whole one-frame context. State's
     // destructor waits and releases recorded commands before dropping this copy.
     BufferRef vertexKeepAlive;
@@ -206,6 +211,8 @@ bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwa
     created->extent = swapchain.extent();
     created->depth = std::move(depth);
     created->triangle = triangle;
+    created->owner = &device; created->depthView = depthView; created->shadow = shadow;
+    created->ui = ui; created->presentationFormat = swapchain.surfaceFormat().format;
     if (triangle)
     {
         created->vertexKeepAlive = triangle->vertexBuffer();
@@ -269,6 +276,53 @@ bool VulkanClearRenderer::initialize(const VulkanDevice& device, const VulkanSwa
 bool VulkanClearRenderer::waitIdle()
 {
     return !state_ || state_->wait();
+}
+
+GraphReplaceResult VulkanClearRenderer::replaceGraph(const graph::GraphicsGraphFactory& factory)
+{
+    if (!state_ || state_->status!=ClearFrameResult::Presented)
+    { return {GraphReplaceStatus::Failed,"Presenter is unavailable for graph replacement"}; }
+    if (!factory) { return {GraphReplaceStatus::Rejected,"Missing candidate graph factory"}; }
+    auto& frame=*state_;
+    std::vector<std::unique_ptr<detail::VulkanFrameGraph>> candidates;
+    try
+    {
+        candidates.reserve(frame.images.size());
+        for (size_t index=0; index<frame.images.size(); ++index)
+        {
+            const auto& image=frame.images[index];
+            std::string diagnostic;
+            const graph::GraphicsGraphFactory checked=[&](graph::Graph& graph,const graph::GraphicsImports& input) {
+                auto result=factory(graph,input);
+                if (!result) { diagnostic=result.error(); }
+                return result;
+            };
+            auto candidate=std::make_unique<detail::VulkanFrameGraph>();
+            if (!candidate->initialize(*frame.owner,image.handle,image.view,frame.extent,frame.depth,frame.triangle,
+                frame.lighting,checked,frame.depthView,frame.shadow,frame.presentationFormat,frame.ui))
+            {
+                if (diagnostic.empty()) { diagnostic="GPU resource preparation or output handoff failed; see renderer diagnostics"; }
+                return {GraphReplaceStatus::Rejected,"Image " + std::to_string(index) + ": " + diagnostic};
+            }
+            candidates.push_back(std::move(candidate));
+        }
+    }
+    catch (const std::exception& error) { return {GraphReplaceStatus::Rejected,error.what()}; }
+    catch (...) { return {GraphReplaceStatus::Rejected,"Unknown candidate preparation exception"}; }
+    // No resources referenced by recorded commands can be released before this
+    // wait AND reset. Unique-pointer swaps below cannot fail partway through.
+    if (!frame.wait() || !detail::checkResult(frame.resetCommandPool(frame.device,frame.commandPool,0),"vkResetCommandPool(graph replacement)"))
+    {
+        frame.status=ClearFrameResult::Failed;
+        return {GraphReplaceStatus::Failed,"Cannot retire previous graph commands"};
+    }
+    std::fprintf(stderr,"Vulkan: Graph commands retired before replacement.\n");
+    for (size_t index=0; index<frame.images.size(); ++index) { frame.images[index].graph.swap(candidates[index]); }
+    // Image.presented and the shared depthInitialized state describe successful
+    // submissions, and survive replacement. New managed resources start undefined.
+    candidates.clear();
+    std::fprintf(stderr,"Vulkan: Graph replacement applied to %zu image plans.\n",frame.images.size());
+    return {GraphReplaceStatus::Applied,{}};
 }
 
 ClearFrameResult VulkanClearRenderer::draw(const std::array<float, 4>& color, std::span<const DrawTransform> transforms)

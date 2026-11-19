@@ -1,6 +1,6 @@
 # MadCat 架构设计
 
-更新日期：2026-11-18。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
+更新日期：2026-11-19。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
 
 ## 文档职责与设计状态
 
@@ -82,7 +82,7 @@ return madcat::runtime::run(application, scene, assets, camera, callbacks);
 |---|---|
 | 场景初始化 | 用户在调用 run 前导入资产并创建 Scene／相机／灯光；run 更新初始世界变换、打包和上传启动几何，首次缺少几何或有效相机则诊断失败 |
 | 每帧更新 | keyPressed 提供数字／大写字母输入；update 在世界变换更新和 RenderScene 提取前执行。结构性修改遵守现有查询边界，纯数值变化不重建图。FrameInfo 提供输出宽高比及距上次渲染尝试的时间，暂停等待时间计入间隔 |
-| 建图 | ApplicationOptions.graphFactory 在创建或重建呈现资源时，为每个交换链图像构建计划；计划不随数值参数重建。当前运行期图切换及 Shader 版本发布未实现 |
+| 建图 | ApplicationOptions.graphFactory 提供初始图，运行期 GraphRequest 可提交整图候选；每张交换链图像独立准备，全部成功后统一切换。resize 使用最后成功的工厂；计划不随普通数值参数重建，Shader 版本发布流程待实现 |
 
 这里的实验入口与 Pass 的声明／准备／执行是两个层次。实验负责场景与算法组合，具体 Pass 记录 GPU 工作；graphFactory 中可显式调用 Pass 的准备函数，建图不必每帧进行。场景几何仍准备固定的 Forward 和可选 Shadow／DepthView 管线；CustomPass 另通过 RHI 工厂准备图形管线，并把 Prepared 显式交给节点执行。
 
@@ -94,10 +94,10 @@ Scene 入口自动提取无投射阴影的 Lambert 绘制和光照。进阶入�
 
 - 用户实验持有 CPU 场景、资产及算法模块的长期状态。运行层组织它们的调用，RenderScene 管理派生 GPU 场景数据，图管理执行计划和中间资源；导入图不转移逻辑所有权。
 - 实验对象覆盖完整运行期；运行结束时停止提交，完成相关 GPU 工作及呈现资源退役，再释放被借用的实验和算法状态。记录与提交所用的准备版本、绑定、上传内存和资源引用仍由 RHI 按完成条件保活。
-- 应用运行层负责窗口与事件、设备、帧循环和呈现，通过既有 Scene、RenderScene、RenderGraph 和 RHI 接口组织工作。候选版本安全应用仍是后续职责，当前未实现运行期替换。
+- 应用运行层负责窗口与事件、设备、帧循环和呈现，通过既有 Scene、RenderScene、RenderGraph 和 RHI 接口组织工作。已实现受限整图候选的安全替换与失败保留；Shader 包版本发布和通用单独 Prepared 更新仍待实现。
 - 普通 Pass 通过显式管线、绑定和 Draw／Dispatch 表达工作。现有 `displayDepth()`、按附件选择 Forward／Shadow 管线及固定帧参数工厂是当前验证路径的限制；后续用自定义 Pass 场景驱动接口收敛，避免继续按算法名称扩充通用执行器。
 
-BasicScene、CustomPass 与 Sandbox 共用运行层，前两者消费 Scene 入口，Sandbox 消费帧数据入口。CMake 将后端编入 MadCatRHI，将运行组织及 RenderScene 材质适配编入 MadCatRuntime，CPU Scene／RenderScene／图检查目标继续独立。[CustomPass](../examples/CustomPass/main.cpp)已以 HDR／显示转换验证自定义 Shader、显式管线／绑定、图内颜色资源与参数传递；完整参数面板、运行期 Shader 更新与通用查看器按已有目标逐步接入。
+BasicScene、CustomPass 与 Sandbox 共用运行层，前两者消费 Scene 入口，Sandbox 消费帧数据入口。CMake 将后端编入 MadCatRHI，将运行组织及 RenderScene 材质适配编入 MadCatRuntime，CPU Scene／RenderScene／图检查目标继续独立。[CustomPass](../examples/CustomPass/main.cpp)已以 HDR／显示转换验证自定义 Shader、显式管线／绑定、图内颜色资源与参数传递；参数面板、Forward 图开关、主相机深度和 HDR 范围查看已实现，运行期 Shader 更新与其他纹理查看按已有目标逐步接入。
 
 ## 模块边界和数据流
 
@@ -885,13 +885,13 @@ UBO 的 set 1／binding 0 和图 Uniform 同步范围均扩展到 Vertex／Fragm
 - 图管理 Color→Sampled 和下次 Sampled→Color，同样只在提交成功后发布内部状态。图计划持有 Prepared，帧图持有纹理与 Descriptor；先等待 acquire／submit／present 完成、释放命令，再释放引用。Device 为借用，工厂及其 GPU 引用不可越过所属 runtime::run 的寿命；不能在外部长期缓存。
 - `forwardColorFormat` 只选择场景输出格式，用户图决定资源与显示算法。`presentationSrgb` 让实验明确检查呈现编码；本例要求 sRGB 附件，Reinhard 后输出线性颜色，由附件编码一次。HDR 指内部颜色范围，未实现 HDR 显示器输出模式。
 
-当前随每张交换链图的创建／resize 同步准备并持有管线，没有缓存、运行期 Prepared 候选发布、失败保留旧呈现资源或多帧并行。单文件图形 Shader 包通过 `madcat_add_graphics_shaders` 登记并手动编译，原有验证／发布失败恢复流程保持。Compute、任意绑定布局及运行期更新仍为后续目标；下文的计算 Tone Mapping、候选版本管理和绑定集合示例继续作为目标设计。
+当前随每张交换链图的创建／resize 或整图请求同步准备并持有管线；整图候选失败可保留当前图，没有管线缓存、通用单独 Prepared 发布、resize 失败保留旧呈现资源或多帧并行。单文件图形 Shader 包通过 `madcat_add_graphics_shaders` 登记并手动编译，原有验证／发布失败恢复流程保持。Compute、任意绑定布局及运行期 Shader 更新仍为后续目标；下文的计算 Tone Mapping、通用候选版本管理和绑定集合示例继续作为目标设计。
 
 ### Dear ImGui 参数面板与叠加（当前实现）
 
 2026-11-18 接入固定提交的 Dear ImGui 1.92.5 和原样编译的官方 GLFW／Vulkan 后端。用户实验链接 `MadCatImGui`，通过 `SceneCallbacks::ui` 或 `GraphicsCallbacks::ui` 编写控件；`VulkanUi` 集中持有上下文和平台／GPU 适配，普通 Pass、Scene 和 ECS 不依赖 Vulkan UI 类型。当前单线程、单上下文、单窗口；关闭回调的既有实验不创建 UI 资源。
 
-运行层在每次可渲染帧中先启动 UI 帧、收集控件修改，再更新场景并固定渲染参数；UI 绘制在 GPU 顺序中位于显示转换后。CustomPass 编辑参数副本，显式校验有限性与范围，成功才整体替换有效值并写入光源。帧参数仍按值复制，不让界面写图节点。普通数值变化不重建图或管线。期望／有效资源配置的通用发布、运行期 Shader 更新和图切换仍属目标设计。
+运行层在每次可渲染帧中先启动 UI 帧、收集控件修改，再更新场景并固定渲染参数；UI 绘制在 GPU 顺序中位于显示转换后。CustomPass 编辑参数副本，显式校验有限性与范围，成功才整体替换有效值并写入光源。帧参数仍按值复制，不让界面写图节点。普通数值变化不重建图或管线。整图请求和失败保留已在下一节实现；通用资源配置发布及运行期 Shader 更新仍属目标设计。
 
 [UiPass](../src/Passes/UiPass.h) 声明字体 Sampled 读取和显示颜色 Preserve 写入，使用 Load 及 alpha 混合，Present 读取 UI 输出版本。`PassContext::drawUi` 检查字体声明／版本；后端校验实际字体槽位、附件格式、无深度及每帧恰好一次 UI 绘制。输入字符始终交给官方 GLFW 后端；运行层按照 WantCaptureKeyboard 抑制实验快捷键。鼠标目前只用于 UI，尚无场景鼠标控制分发。
 
@@ -900,6 +900,40 @@ UBO 的 set 1／binding 0 和图 Uniform 同步范围均扩展到 Vertex／Fragm
 当前要求 sRGB 呈现附件。暗色样式 RGB 先转为线性值再打包，alpha 保留覆盖率，混合发生在线性域并由附件编码一次；自定义 UI 颜色也须提供线性值。窗口重建重新准备匹配格式／图像数量的 GPU 后端，CPU 控件状态随上下文保留。固定字体、字号与布局起步，不支持运行期字体／DPI 重建、Docking、多窗口或用户图片；查看中间纹理时仍须增加显式图读取或可视化转换。
 
 验证和使用方式见 [CustomPass 教程](custom-pass.md#编写参数面板)。这一适配没有扩大普通 `GraphicsPipelineDesc` 的混合、索引输入或任意绑定能力；通用 RHI UI 渲染器仍可在后续实际需求出现时另行评估。
+
+### 运行期整图切换与 Forward 开关（当前实现）
+
+2026-11-18 在参数面板之后增加一次性 `GraphRequest{id, factory}`，由 `GraphicsCallbacks`／`SceneCallbacks` 的 `graphRequest` 返回。ID 非零并递增，工厂把结构设置按值捕获，为所有交换链图像生成同一配置；捕获的 CPU 参数、场景和资产按 run 的寿命借用。运行层在 UI 完成后、场景提取前消费请求，通过 `graphUpdated(GraphUpdate)` 通知 applied 和诊断；依赖资源的参数可在成功通知时同步更新，普通参数仍通过帧快照固定。
+
+[DisplayGraph](../examples/CustomPass/DisplayGraph.h) 用 Forward 开关验证真实节点连接变化：最终画面开启时 `ClearHDR → ForwardHDR → ToneMap → UI → Present`；关闭时 `ClearHDR → ToneMap → UI → Present`。Clear 初始化 HDR 与图内深度，ToneMap 始终取得有效输入。面板分别显示请求值和当前生效图，失败时保留生效值并显示原因，不自动重复失败请求。切换不删除 Scene 对象，也不重新上传启动几何／材质。
+
+[VulkanClearRenderer::replaceGraph](../src/RHI/Vulkan/VulkanClearRenderer.cpp) 在当前状态旁构建所有图像的候选帧图。图编译／资源准备失败或准备异常时，未提交的候选自行回收，当前帧图和命令保持有效。所有候选成功后，等待前次 acquire、提交和呈现完成，再重置命令池；只有命令退役后才统一交换各图像的 unique_ptr，随后销毁旧图资源。交换步骤不分配内存，单线程中不会出现部分图像替换成功的状态。
+
+交换链的 presented 标志和共享深度初始化状态继续来自已成功提交的工作；候选的图内 HDR 等中间资源从未初始化状态开始，由声明中的生产者写入。图初始化增加最终 Present 状态检查，缺失显示交接的候选在发布前拒绝。固定 Device、交换链视图、Forward／Shadow／DepthView 管线、光照缓冲和 UI 适配的借用均覆盖所有候选及当前图的使用期。普通图切换保留交换链和 UI GPU 后端，resize 仍同步重建它们，并使用最后成功的工厂。
+
+当前选择完整候选图加单帧等待，保证正确性并便于检查资源回收；代价是切换时暂存两套图内资源，最终画面重新准备各图像的自定义显示管线，没有缓存或并行退役。初始化／resize 创建失败的停绘策略保持；等待、命令重置或执行／提交失败仍停止渲染，不提供设备丢失恢复。候选检查覆盖编译、准备与最终交接，不保证任意用户 execute 的运行结果。此能力没有实现 Shader 包一致快照、运行期编译／应用或通用单独 Prepared 更新；主相机深度查看见下文，其他纹理查看、历史资源迁移及 Shader 更新流程仍按后续增量验证。
+
+外部 Lantern／Box 资源及 `--fit` 仅服务实验验证：示例遍历选中场景的源节点世界矩阵，计算 AABB，并对实例根设置居中缩放；原始资产和 Assets／Scene／RHI 边界保持。来源、许可、哈希与使用见[资源说明](../assets/models/README.md#外部开源模型)。
+
+### CustomPass 主相机深度查看（当前实现）
+
+2026-11-19 为同一实验增加 `DisplaySettings{forwardEnabled, view}`，工厂按值捕获完整结构配置。View 选择 Final 或 Depth，通过现有候选图发布流程统一替换；当前生效模式仅在成功通知后更新，失败保持旧图，窗口重建沿用最后成功的工厂。参数面板和 Forward 开关在两种模式下均可用，Restore defaults 恢复 Final／Forward 开启。
+
+CustomPass 以 `createDepthTexture` 声明同窗口大小、可采样的 SceneDepth；两种模式按交换链图像各自持有 HDR 和深度资源，不再使用导入的共享深度作为场景附件。Clear 初始化两个附件，Forward 写入各自新版本。Depth 模式使用现有 DepthViewPass 声明读取当前深度版本，输出到呈现颜色，再由 UiPass Preserve 叠加和 Present 交接。图产生 Depth→Sampled 和下一帧 Sampled→Depth，同步状态仅在队列提交成功后登记；候选失败或命令退役后按原有所有权规则释放图内纹理和 Descriptor。
+
+运行层通过已有 `prepareDepthView` 选项预备显示管线，普通 Pass 不接触 Vulkan。深度模式不准备 ToneMap，HDR 附件仍保留；Final 模式继续使用 HDR／曝光／Reinhard。DepthView 输出线性 `1 - deviceDepth` 灰度并由 sRGB 附件编码一次，表示非线性设备深度；关闭 Forward 后只采样 Clear 初始化的深度，得到黑色背景。查看器是显式图资源消费者，没有把图内纹理作为未声明的 ImGui 图片传递。
+
+该增量没有通用纹理枚举、UI 图片注册、HDR／整数纹理转换、像素拾取或该实验的阴影图选择；GPU 等待、提交及 resize 失败边界保持原约定。使用与验证见[主相机深度查看](custom-pass.md#主相机深度查看)。
+
+### CustomPass HDR 范围查看（当前实现）
+
+2026-11-19 后续增量增加 `DisplayView::HdrRange`，完整结构配置继续由 DisplayGraph 工厂按值捕获。HDR 模式连接 `ClearHDR → ForwardHDR → HDRRange → UI → Present`，Forward 关闭时移除该节点，查看 Clear 初始化的 HDR 背景。候选准备失败保持当前有效图，成功后沿用既有等待／命令退役／统一发布顺序；resize 使用最后成功的工厂。普通灯光与曝光参数修改仍只固定帧参数。
+
+用户侧 [HdrRangePass](../examples/CustomPass/HdrRangePass.h) 声明读取当前 SceneHDR 版本，覆盖写入呈现颜色；用现有图形管线工厂准备 set 0、image binding 0／sampler binding 1 的全屏管线，无 Push Constants。执行显式绑定采样资源和 Draw，图处理 Color→Sampled 以及下一帧 Sampled→Color，提交成功后登记状态。UI 只消费转换后的呈现颜色，字体采样契约保持。本增量没有修改图编译器或 Vulkan 后端，也没有引入依赖。
+
+[hdr-range.slang](../examples/CustomPass/hdr-range.slang) 直接读取 RGBA16F 存储值，在曝光和 ToneMap 之前判断任一 RGB 分量是否严格大于 1；符合时输出洋红色，否则夹到 0～1 预览，由 sRGB 附件编码一次。标记与曝光独立，灯光和场景更新改变源 HDR。该显示不是像素数值拾取，不能用洋红色唯一地区分原始洋红色材质，也没有独立通道、亮度、NaN 或 HDR 显示器输出能力。
+
+实验的 Shader 根目录由 CMake 注入 `build/shaders`；Final 准备 `custom-display`，HDR 准备 `custom-hdr-range`，Depth 使用运行层预备的深度管线。新包通过 `CustomPassHdrShaders` 手动编译和验证，C++ 构建不隐式触发编译。GPU 管线、图内纹理和 Descriptor 继续按图持有及 GPU 命令退役条件回收；没有实现运行期 Shader 包一致快照或手动更新。使用与验证见[HDR 范围查看](custom-pass.md#hdr-范围查看)。
 
 ## 实现参考建议
 

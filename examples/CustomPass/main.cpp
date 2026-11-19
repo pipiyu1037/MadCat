@@ -1,11 +1,12 @@
 #include "Runtime/Application.h"
-#include "ToneMapPass.h"
-#include "Passes/UiPass.h"
+#include "DisplayGraph.h"
 #include <imgui.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
+#include <utility>
+#include <limits>
 
 #ifdef _WIN32
 int wmain(int argc, wchar_t** argv)
@@ -16,19 +17,46 @@ int main(int argc, char** argv)
     using namespace madcat;
     try
     {
-        if (argc>2) { throw std::runtime_error("Usage: CustomPass [model.gltf|model.glb]"); }
-        const auto path=argc==2 ? std::filesystem::path(argv[1]) :
-            std::filesystem::path(u8"" MADCAT_EXAMPLE_ASSETS)/"models/Suzanne/Suzanne.gltf";
+        auto path=std::filesystem::path(u8"" MADCAT_EXAMPLE_ASSETS)/"models/Suzanne/Suzanne.gltf";
+        bool fit=false,hasPath=false;
+        for (int arg=1;arg<argc;++arg) {
+            const std::filesystem::path value(argv[arg]);
+            if (value=="--fit" && !fit) { fit=true; }
+            else if (!hasPath && value!="--fit") { path=value; hasPath=true; }
+            else { throw std::runtime_error("Usage: CustomPass [--fit] [model.gltf|model.glb]"); }
+        }
         auto imported=assets::importGltfGeometry(path);
         if (!imported) { throw std::runtime_error(imported.error().message); }
+        scene::LocalTransform initialPose; initialPose.scale=glm::vec3(.7f);
+        if (fit)
+        {
+            glm::dvec3 minimum(std::numeric_limits<double>::max()), maximum(-std::numeric_limits<double>::max());
+            auto nodes=imported->sceneRoots;
+            while (!nodes.empty()) {
+                const auto node=nodes.back(); nodes.pop_back();
+                const auto& source=imported->nodes[node];
+                nodes.insert(nodes.end(),source.children.begin(),source.children.end());
+                if (source.mesh) { for (const auto& primitive : imported->meshes[*source.mesh].primitives) {
+                    for (const auto& position : primitive.positions) {
+                        const auto point=glm::dvec3(glm::dmat4(source.worldTransform)*glm::dvec4(position,1));
+                        minimum=glm::min(minimum,point); maximum=glm::max(maximum,point);
+                    }
+                } }
+            }
+            const auto half=(maximum-minimum)*.5;
+            const double halfExtent=std::max({half.x,half.y,half.z});
+            if (!std::isfinite(halfExtent) || halfExtent<=0) { throw std::runtime_error("Cannot frame empty or degenerate model"); }
+            initialPose.scale=glm::vec3(static_cast<float>(.7/halfExtent));
+            initialPose.translation=glm::vec3(-(minimum+maximum)*.5*(.7/halfExtent));
+        }
         assets::ModelAssets assets;
         const auto model=assets.add(std::move(*imported));
         scene::Scene scene;
         const auto instance=scene::instantiateModel(scene,assets,model);
         if (!instance) { throw std::runtime_error(instance.error()); }
         const auto camera=scene.create(), light=scene.create();
-        scene::LocalTransform modelPose, cameraPose;
-        modelPose.scale=glm::vec3(.7f); cameraPose.translation.z=3;
+        scene::LocalTransform modelPose=initialPose, cameraPose;
+        cameraPose.translation.z=3;
         if (!scene.setLocalTransform(instance->root,modelPose) || !scene.add<scene::PerspectiveCamera>(camera) ||
             !scene.setLocalTransform(camera,cameraPose)) { throw std::runtime_error("Scene setup failed"); }
         auto* sunlight=scene.add<scene::DirectionalLight>(light);
@@ -39,35 +67,17 @@ int main(int argc, char** argv)
         runtime::ApplicationOptions application;
         application.title="MadCat CustomPass";
         application.forwardColorFormat=rhi::ColorFormat::Rgba16Float;
-        application.graphFactory=[&](graph::Graph& graph, const graph::GraphicsImports& input)
-            -> std::expected<graph::GraphicsGraph,std::string> {
-            if (!input.presentationSrgb) { return std::unexpected("CustomPass display Shader requires an sRGB presentation attachment"); }
-            // Prepare the experiment's Shader/layout/pipeline using RHI only.
-            auto prepared=experiment::ToneMapPass::prepare(input.prepareGraphics,
-                std::filesystem::path(u8"" MADCAT_CUSTOM_SHADERS));
-            if (!prepared) { return std::unexpected(prepared.error()); }
-            const auto hdr=graph.createColorTexture("SceneHDR",{input.width,input.height});
-            const auto clear=graph.addPass("ClearHDR",passes::ClearPass{},passes::Targets{hdr,input.depth});
-            const auto forward=graph.addPass("ForwardHDR",passes::ForwardPass{},passes::ForwardPass::Inputs{
-                clear.outputs,input.vertices,input.indices,input.lighting,input.textures});
-            const auto toneMap=graph.addPass("ToneMap",experiment::ToneMapPass{},
-                experiment::ToneMapPass::Inputs{forward.outputs.color,input.color},std::move(*prepared));
-            const auto ui=graph.addPass("UI",passes::UiPass{},passes::UiPass::Inputs{toneMap.outputs.color,input.uiFont});
-            const auto present=graph.addPass("Present",passes::PresentPass{},passes::PresentPass::Inputs{ui.outputs.color});
-            auto plan=graph.compile();
-            if (!plan) { return std::unexpected(plan.error()); }
-            auto parameters=[&,clearNode=clear.node,forwardNode=forward.node,toneNode=toneMap.node,
-                uiNode=ui.node,presentNode=present.node,count=plan->nodes().size()](const std::array<float,4>& color,
-                    std::span<const rhi::IndexedDraw> draws,std::span<const rhi::IndexedDraw>) {
-                std::vector<std::any> values(count);
-                values[clearNode]=passes::ClearPass::Parameters{color};
-                values[forwardNode]=passes::ForwardPass::Parameters{{draws.begin(),draws.end()}};
-                values[toneNode]=displayParameters; // copied again at the frame's record boundary
-                values[uiNode]=passes::UiPass::Parameters{};
-                values[presentNode]=passes::PresentPass::Parameters{};
-                return values;
-            };
-            return graph::GraphicsGraph{std::move(*plan),std::move(parameters)};
+        application.prepareDepthView=true;
+        const auto shaderRoot=std::filesystem::path(u8"" MADCAT_EXAMPLE_SHADERS);
+        experiment::DisplaySettings requestedGraph,activeGraph,lastPresentedGraph;
+        application.graphFactory=experiment::makeDisplayGraph(displayParameters,shaderRoot,activeGraph);
+        uint64_t graphRequestId=0;
+        std::optional<runtime::GraphRequest> pendingGraph;
+        std::string graphDiagnostic;
+        auto requestGraph=[&](experiment::DisplaySettings settings) {
+            requestedGraph=settings;
+            pendingGraph=runtime::GraphRequest{++graphRequestId,
+                experiment::makeDisplayGraph(displayParameters,shaderRoot,settings)};
         };
         int mode=0,logged=-1;
         struct Controls
@@ -92,10 +102,15 @@ int main(int argc, char** argv)
             lightParameters.irradiance=controls.irradiance;
         };
         runtime::SceneCallbacks callbacks;
+        callbacks.graphRequest=[&] { return std::exchange(pendingGraph,std::nullopt); };
+        callbacks.graphUpdated=[&](const runtime::GraphUpdate& update) {
+            if (update.applied) { activeGraph=requestedGraph; }
+            graphDiagnostic=update.diagnostic;
+        };
         callbacks.ui=[&] {
             auto draft=controls;
             ImGui::SetNextWindowPos({12,12},ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize({340,210},ImGuiCond_Always);
+            ImGui::SetNextWindowSize({340,270},ImGuiCond_Always);
             ImGui::Begin("CustomPass Parameters",nullptr,ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoFocusOnAppearing);
             ImGui::PushItemWidth(185);
             bool edited=ImGui::SliderFloat("Exposure (EV)",&draft.exposure,-8,8,"%.2f",ImGuiSliderFlags_AlwaysClamp);
@@ -104,10 +119,26 @@ int main(int argc, char** argv)
             if (ImGui::Button("Restore defaults"))
             {
                 draft=Controls{}; edited=true; mode=0;
-                modelPose.translation.x=0;
+                modelPose=initialPose;
+                if (requestedGraph!=experiment::DisplaySettings{} || activeGraph!=experiment::DisplaySettings{}) { requestGraph({}); }
                 if (!scene.setLocalTransform(instance->root,modelPose)) { throw std::runtime_error("Scene edit failed"); }
             }
+            ImGui::SameLine();
+            auto graphSettings=requestedGraph;
+            if (ImGui::Checkbox("Forward",&graphSettings.forwardEnabled)) { requestGraph(graphSettings); }
             ImGui::TextUnformatted("Ctrl+click a slider to type a value.");
+            ImGui::Text("Active graph: Forward %s",activeGraph.forwardEnabled ? "on" : "off");
+            int view=static_cast<int>(graphSettings.view);
+            if (ImGui::Combo("View",&view,"Final image\0Camera depth\0HDR range\0")) {
+                graphSettings.view=static_cast<experiment::DisplayView>(view); requestGraph(graphSettings);
+            }
+            ImGui::Text("Active view: %s",experiment::displayViewName(activeGraph.view));
+            if (activeGraph.view==experiment::DisplayView::Depth) { ImGui::TextUnformatted("1 - device depth (nonlinear)"); }
+            if (activeGraph.view==experiment::DisplayView::HdrRange) {
+                ImGui::TextUnformatted("Magenta: any RGB > 1; else RGB.");
+                ImGui::TextUnformatted("Before exposure and tone mapping.");
+            }
+            if (!graphDiagnostic.empty()) { ImGui::TextWrapped("%s",graphDiagnostic.c_str()); }
             if (!diagnostic.empty()) { ImGui::TextWrapped("%s",diagnostic.c_str()); }
             ImGui::PopItemWidth(); ImGui::End();
             if (edited) { request(draft); }
@@ -119,10 +150,17 @@ int main(int argc, char** argv)
             draft.exposure=mode==1 ? -2.f : mode==2 ? 2.f : 0.f;
             draft.irradiance=mode==3 ? 0.f : 4*3.14159265f;
             request(draft);
-            modelPose.translation.x=mode==4 ? .45f : 0;
+            modelPose.translation.x=initialPose.translation.x+(mode==4 ? .45f : 0);
             if (!scene.setLocalTransform(instance->root,modelPose)) { throw std::runtime_error("Scene edit failed"); }
         };
         callbacks.presented=[&] {
+            if (activeGraph.forwardEnabled!=lastPresentedGraph.forwardEnabled) {
+                std::fprintf(stderr,"CustomPass: Forward %s presented.\n",activeGraph.forwardEnabled ? "on" : "off");
+            }
+            if (activeGraph.view!=lastPresentedGraph.view) {
+                std::fprintf(stderr,"CustomPass: view %s presented.\n",experiment::displayViewName(activeGraph.view));
+            }
+            lastPresentedGraph=activeGraph;
             if (logged!=mode) { std::fprintf(stderr,"CustomPass: mode %d presented.\n",mode); logged=mode; }
             if (!controlsPresented || controls!=lastPresented)
             {

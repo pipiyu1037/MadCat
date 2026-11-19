@@ -78,7 +78,7 @@ public:
         : window_(window), device_(device), surface_(surface), vertex_(vertex), fragment_(fragment),
           vertices_(std::move(vertices)), indices_(std::move(indices)), materials_(std::move(materials)),
           depthVertex_(depthVertex), depthFragment_(depthFragment), shadowVertex_(shadowVertex), shadowFragment_(shadowFragment),
-          options_(options), callbacks_(callbacks), lastTime_(glfwGetTime())
+          options_(options), callbacks_(callbacks), activeGraph_(options.graphFactory), lastTime_(glfwGetTime())
     {
         iconified_ = glfwGetWindowAttrib(window_, GLFW_ICONIFIED) == GLFW_TRUE;
         glfwSetWindowUserPointer(window_, this);
@@ -189,7 +189,7 @@ private:
                 (shadowVertex_ && !candidate->shadow.initialize(device_, VK_FORMAT_UNDEFINED, *shadowVertex_, *shadowFragment_, vertices_, indices_,
                     madcat::rhi::detail::TextureAccess::format(candidate->depth), materials_, true)) ||
                 !candidate->renderer.initialize(device_, candidate->swapchain, candidate->depth,
-                    options_.graphFactory,
+                    activeGraph_,
                     &candidate->triangle, depthVertex_ ? &candidate->depthView : nullptr, shadowVertex_ ? &candidate->shadow : nullptr,ui_.get()))
             {
                 std::fprintf(stderr, "MadCat error: presentation creation/rebuild failed; stopping rendering.\n");
@@ -208,6 +208,27 @@ private:
         const FrameInfo info{static_cast<float>(extent.width) / static_cast<float>(extent.height), now - lastTime_};
         lastTime_ = now;
         if (ui_) { ui_->frame(callbacks_.ui); }
+        if (callbacks_.graphRequest)
+        {
+            if (auto request=callbacks_.graphRequest())
+            {
+                GraphUpdate update{request->id,false,{}};
+                if (!request->id || request->id<=lastGraphRequest_)
+                { update.diagnostic="Graph request ID must be nonzero and increasing"; }
+                else
+                {
+                    lastGraphRequest_=request->id;
+                    auto result=presentation_->renderer.replaceGraph(request->factory);
+                    if (result.status==rhi::GraphReplaceStatus::Failed) { throw std::runtime_error(result.diagnostic); }
+                    update.applied=result.status==rhi::GraphReplaceStatus::Applied;
+                    update.diagnostic=std::move(result.diagnostic);
+                    if (update.applied) { activeGraph_=std::move(request->factory); }
+                }
+                std::fprintf(stderr,"MadCat: graph request %llu %s%s%s.\n",static_cast<unsigned long long>(update.id),
+                    update.applied ? "applied" : "rejected",update.diagnostic.empty() ? "" : ": ",update.diagnostic.c_str());
+                if (callbacks_.graphUpdated) { callbacks_.graphUpdated(update); }
+            }
+        }
         auto frame = callbacks_.frame(info);
         if (!frame) { throw std::runtime_error(frame.error()); }
         const auto result = presentation_->renderer.drawIndexed(frame->clearColor, frame->draws, frame->lighting, frame->shadowDraws);
@@ -231,6 +252,8 @@ private:
     const madcat::rhi::VulkanShaderModule* shadowFragment_;
     const ApplicationOptions& options_;
     const GraphicsCallbacks& callbacks_;
+    graph::GraphicsGraphFactory activeGraph_;
+    uint64_t lastGraphRequest_=0;
     double lastTime_ = 0;
     std::unique_ptr<rhi::VulkanUi> ui_;
     std::unique_ptr<Presentation> presentation_;

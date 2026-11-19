@@ -53,4 +53,6 @@ AABB 为 `[-1,-1,0]..[1,1,.5]`，居中点 `(0,0,.25)`，预览适配缩放 `.6`
 
 ## 外部开源模型
 
+[Lantern](Lantern/README.md)（CC0-1.0）和 [Box](Box/README.md)（CC-BY-4.0）从 Khronos 官方固定提交原样下载，保留 glTF、外部缓冲、完整原始贴图、上游说明和许可。各目录的 `source.json` 提供来源 URL、字节数和 SHA256。它们用于 CustomPass 的静态场景、基础色／Lambert 可见性及运行期 Forward 图切换验证；运行时可加 `--fit` 居中缩放，原始文件不变。外部场景是可见性／生命周期检查，不替代解析平面的独立像素参考，也不代表 PBR 或发光材质验收。
+
 [Suzanne](Suzanne/README.md) 是从 Khronos 官方 glTF Sample Assets 固定提交原样下载的经典猴头模型，采用 CC0 许可。目录保留 `.gltf`、外部 `.bin`、两张贴图及许可；没有格式转换。已通过 Debug／Release 导入和静态绘制、模型／相机变换、resize 与最小化恢复检查。来源、文件哈希、命令和验证边界见模型说明。

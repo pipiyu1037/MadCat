@@ -308,6 +308,12 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
             { std::fprintf(stderr,"Render Graph error: %s requests an unsupported resource usage.\n",node.name.c_str()); return false; }
         }
     }
+    auto finalColor=graph::Use::None;
+    for (const auto node : program->plan.order()) { for (const auto& access : program->plan.nodes()[node].accesses) {
+        if (access.resource.index==state->colorSlot) { finalColor=access.use; }
+    } }
+    if (finalColor!=graph::Use::Present)
+    { std::fprintf(stderr,"Render Graph error: output must end in Present before publication.\n"); return false; }
     state->program=std::move(*program);
     std::string order;
     for (const auto node : state->program.plan.order()) { if (!order.empty()) { order+=" -> "; } order+=state->program.plan.nodes()[node].name; }

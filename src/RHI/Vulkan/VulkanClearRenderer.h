@@ -25,6 +25,12 @@ enum class ClearFrameResult
     SwapchainUnavailable,
     Failed
 };
+enum class GraphReplaceStatus { Applied, Rejected, Failed };
+struct GraphReplaceResult
+{
+    GraphReplaceStatus status;
+    std::string diagnostic;
+};
 
 // Single-frame Vulkan presenter executing caller-provided graphics graph plans.
 // Borrows Device, Swapchain and optional prebuilt forward/shadow/viewer
@@ -64,6 +70,10 @@ public:
     // Waits for acquisition, command submission and present-resource retirement.
     // Also called on destruction, before releasing views or synchronization.
     [[nodiscard]] bool waitIdle();
+    // Prepare all image plans without touching the current graph. Rejection
+    // preserves it; success waits for GPU/WSI, resets commands, then replaces all
+    // plans together. Device/wait/reset failures stop this presenter.
+    [[nodiscard]] GraphReplaceResult replaceGraph(const graph::GraphicsGraphFactory& factory);
 
 private:
     struct State;

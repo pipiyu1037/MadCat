@@ -2,9 +2,23 @@
 
 MadCat 是一个使用自研 ECS 和 Vulkan 的渲染引擎。前期服务渲染算法研究和图形效果实验，长期考虑游戏与仿真用途。开发者应能加载模型、用 C++ 编写渲染 Pass、连接多个 Pass，并在运行时调整参数、查看中间结果。
 
-本文维护开发范围、实现进度、半年计划和验收方法；架构方案独立维护于[架构设计文档](architecture-design.md)。两份文档供项目开发者及协作编码助手使用。文档更新日期为 2026 年 11 月 17 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
+本文维护开发范围、实现进度、半年计划和验收方法；架构方案独立维护于[架构设计文档](architecture-design.md)。两份文档供项目开发者及协作编码助手使用。文档更新日期为 2026 年 11 月 19 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
 
 ## 当前实现进度
+
+2026 年 11 月 19 日后续增量为同一 [CustomPass](../examples/CustomPass/main.cpp) 实验接入 HDR 范围查看。View 新增 HDR range，独立 C++／Slang Pass 读取 ToneMap 前的 SceneHDR；任一 RGB 分量严格大于 1 时标记洋红色，否则直接预览 0～1 线性 RGB，由 sRGB 附件编码。曝光不影响此视图，灯光和场景更新改变源 HDR。查看资源由图显式声明，Forward／View 完整设置继续通过候选图发布，失败保留当前图，resize 沿用成功配置。新增独立手动目标 `CustomPassHdrShaders`／`CustomPassHdrShaderChecks`，不修改 Vulkan 后端／图编译器或新增依赖。使用与检查见[HDR 范围查看](custom-pass.md#hdr-范围查看)。阴影图统一查看、安全手动 Shader 更新和 F06／F07 整体验收仍待完成。
+
+Debug／Release 的 CustomPass、GraphSwitchChecks、CustomPassChecks 构建及各 16 组 CPU 图检查通过，无编译警告；配置仅保留既有 GLM 弃用提示。新 Shader 包编译／SPIR-V 验证和 12 项编译／发布失败恢复检查通过，反汇编核对 Fragment 入口、set 0 的 image 0／sampler 1 及无 Push Constants。两种配置的 hdr 各 24 状态 × 35 个场景像素及 UI 混合参考点通过，涵盖等于 1／小于 1、各 RGB 分量独立超范围和曝光独立性；各 9 个候选请求（4 次发布／5 次保留）通过，覆盖三种视图的失败回退及资源回收。Debug 深度查看 19 状态、参数面板九状态回归，以及 Suzanne HDR 显示／resize／最小化直接退出冒烟通过，截图已查看。设备为 RTX 5060 Ti／NVIDIA 617.42，RGBA16F 97／sRGB 50／D32_SFLOAT 126；Debug 同步验证无 warning／error，Release 未主动启用验证层。旧 Shader 源码及产物未重编；其他 GPU／DPI、真实 GPU 等待／重置／提交失败及性能未验证。以下保留历史增量当时的状态。
+
+2026 年 11 月 19 日在同一 [CustomPass](../examples/CustomPass/main.cpp) 实验接入主相机深度查看。View 下拉框选择 Final image／Camera depth，后者使用 `ClearHDR → ForwardHDR → DepthView → UI → Present`，关闭 Forward 后得到初始化的黑色深度背景。图内 SceneDepth 为每个交换链图像独立分配，查看节点显式声明当前版本采样，由图安排写入／读取及跨帧同步；Forward／View 完整配置通过已有候选图发布，失败保留有效图，resize 沿用成功配置。深度显示为非线性 `1 - deviceDepth`，不受曝光与灯光影响；Restore defaults 恢复最终画面和 Forward 开启。使用与检查见[主相机深度查看](custom-pass.md#主相机深度查看)。该增量没有新增依赖、Vulkan 接口或 Shader 修改；HDR／阴影图的统一查看、安全手动 Shader 更新及 F06／F07 整体验收仍待完成。
+
+Debug／Release 的 CustomPass、GraphSwitchChecks 构建及各 15 组图检查通过，无编译警告。两种配置的 viewer 各 19 状态 × 35 个独立场景像素及 UI 混合参考点通过；各 9 个候选请求（4 次发布、5 次保留）同时核对 Forward／View 配置并验证失败回退与资源回收。Debug 深度模式最小化直接退出、参数面板九状态回归、Suzanne 深度／最终画面切换与窗口生命周期冒烟通过，截图已查看。实际为 RTX 5060 Ti／NVIDIA 617.42，RGBA16F 97／sRGB 50／D32_SFLOAT 126；Debug 开启同步验证，无 warning／error，Release 未主动启用验证层。未修改或重编 Shader，沿用既有 SPIR-V。Suzanne 属于可见性检查，不是完整外观验收；其他 GPU／DPI、真实 GPU 等待／提交失败和性能未验证。以下保留历史增量当时的状态。
+
+2026 年 11 月 18 日后续增量完成 CustomPass 的运行期 Forward 开关与受限整图候选发布。[Runtime](../src/Runtime/Application.h) 在帧开始阶段消费一次性请求，RHI 为全部交换链图像准备候选；失败保留当前图，成功后等待 GPU／WSI、重置旧命令并统一替换。关闭 Forward 后保留 ClearHDR／ToneMap／UI／Present，背景和界面持续有效。resize 使用最后成功的工厂，普通参数变化仍不重建图。接口与限制见[运行期图切换](architecture-design.md#运行期整图切换与-forward-开关当前实现)。
+
+新增 [Lantern](../assets/models/Lantern/README.md) 与 [Box](../assets/models/Box/README.md) 原始 glTF 静态资源，固定 Khronos 提交，保留完整相关文件、许可、上游说明及 SHA256 清单。Lantern 为 3 Mesh／3 Primitive／4145 顶点／16182 索引／4 节点／4 张 2048² 图片，Box 为 1 Mesh／24 顶点／36 索引／2 节点。示例可用 `--fit` 居中缩放，源资产不修改；当前只消费基础色／Lambert，不把原始 PBR／法线／发光贴图视为已实现。
+
+Debug／Release 的相关目标构建及各 14 组图检查通过，无编译警告。两种配置的连续 12 次开关、关闭后窗口重建／最小化恢复、再次开启共各 17 状态 × 35 个解析像素通过；各 9 个候选请求（4 次发布、5 次保留）验证了第二图像准备失败、异常、缺失 Present、无效 ID、空工厂和后续恢复，候选与旧图资源均正确回收。Debug 两份外部资源的开关／窗口生命周期和关闭状态最小化退出通过；Release 两份资源的显示／恢复通过，截图已检查，属于可见性冒烟。Debug 参数面板、原 HDR、UI／CustomPass 失败、BasicScene 七状态及应用五项失败回归通过，Release 参数面板与原 CustomPass 失败回归通过。Debug 同步验证无 warning／error；Release 未主动启用验证层。设备仍为 RTX 5060 Ti／NVIDIA 617.42／RGBA16F 97／sRGB 50／D32_SFLOAT 126。用户 Shader 未修改／重编，沿用既有 SPIR-V；性能、其他设备、真实 GPU 等待／提交失败未验证。当前未接入中间纹理查看和安全手动 Shader 更新，F06／F07 未整体验收。以下保留各历史增量当时的状态。
 
 2026 年 11 月 18 日为 [CustomPass](../examples/CustomPass/main.cpp)接入 Dear ImGui 1.92.5 参数面板：连续编辑曝光 EV、方向光线性 RGB 和辐照度，校验无效请求并保留有效值，支持恢复默认值。新增 `SceneCallbacks::ui`／`GraphicsCallbacks::ui`，每帧先收集面板修改，再更新场景与固定参数。图执行 `ClearHDR → ForwardHDR → ToneMap → UI → Present`，UI 明确声明字体读取及颜色保留写入，Vulkan 适配集中在 [VulkanUi](../src/RHI/Vulkan/VulkanUi.cpp)，普通 Pass 不暴露 Vulkan 类型。固定字体经 RHI 上传完成后交接 Sampled 状态；私有绘制缓冲、绑定及上下文按 GPU 完成与命令退役顺序回收。
 
@@ -225,7 +239,7 @@ Falcor 的模块化 Render Graph 和研究工作流是体验参考。MadCat 采�
 |---|---|---|---|
 | 1 | 提取可复用应用运行层和可链接构建目标，建立 `examples/BasicScene`；先复用现有前向渲染，分离示例场景与窗口／设备／帧循环 | 从示例创建另一个实验，登记源文件后加载约定模型、创建相机与灯光；仅修改实验场景即可看到结果，resize／最小化／退出与原 Sandbox 回归通过 | 已实现；BasicScene 为独立消费目标，两种配置构建／解析像素和相关窗口回归通过 |
 | 2 | 建立 `examples/CustomPass`，以 HDR 颜色及显示转换作为具体实验；按需补足 Shader 构建登记、显式管线／绑定、节点参数和图内颜色资源 | 新增 C++ Pass 与 Slang、声明并连接资源、指定输出；在已提供的 RHI 能力范围内，新增普通 Pass 无需修改图编译器或 Vulkan 执行器；曝光与参考像素、同步及生命周期有验证 | 已实现受限图形路径、RGBA16F 及 Reinhard；两种配置的参考像素、失败边界和 Debug 同步验证通过，见 CustomPass 教程 |
-| 3 | 将参数面板、适用 Pass 的开关、中间纹理查看和手动 Shader 更新接入同一实验入口 | 修改参数无需重启；查看器读取被图声明；候选更新失败保留有效版本，GPU 使用寿命正确 | 参数面板已实现；Pass 开关、中间纹理查看和安全更新待实现，F06／F07 尚未整体验收 |
+| 3 | 将参数面板、适用 Pass 的开关、中间纹理查看和手动 Shader 更新接入同一实验入口 | 修改参数无需重启；查看器读取被图声明；候选更新失败保留有效版本，GPU 使用寿命正确 | 参数面板、Forward 开关、受限整图候选切换、主相机深度与 HDR 范围查看已实现；阴影图统一查看和 Shader 安全更新待实现，F06／F07 尚未整体验收 |
 
 上述顺序将已有半年目标组织为用户能够完成的工作，不改变 PBR 和完整路径追踪的交付范围。HDR／显示转换在 CustomPass 中推进，之后继续 Metallic-Roughness PBR 与路径追踪；不等待完整工具界面才验证自定义 Pass。首个运行层增量保留当前单在途帧、单队列和明确等待策略，运行期候选切换等能力分别验证。
 
@@ -297,7 +311,7 @@ F09 的具体算法与实现路径仍需按架构文档中的建议验证，验�
 
 环境与 Shader 版本沿用上述记录，未修改 Shader，未测量性能。`MadCatTriangleChecks` 复用模拟 Vulkan 程序，覆盖函数缺失、Layout／Pipeline 创建失败与重试、重复初始化、格式、动态尺寸及 Draw 参数；真实驱动上的资源耗尽未注入。可分发的窗口检查在 `tests/TriangleWindowChecks.ps1`，运行说明见 [README](../README.md#三角形绘制与检查)，截图和日志位于 `<构建目录>/verification/triangle/`。当前只显示一个裁剪空间三角形，尚无通用资源绑定、场景、相机或 Render Graph；该次尚未完成 Ray Query 编译与 GPU 求交探针，后续编译探针证据见路径追踪章节。
 
-Shader 布局和运行期更新的目标设计见[架构设计文档](architecture-design.md#shader-布局与运行期更新设计)；当前运行程序仍只在启动时加载 Shader，尚未验证通用反射或运行期替换。
+Shader 布局和运行期更新的目标设计见[架构设计文档](architecture-design.md#shader-布局与运行期更新设计)；固定 Forward 管线仍在启动时加载 Shader，自定义显示管线会在建图／重建／整图切换时准备。尚未验证通用反射、Shader 包一致快照及运行期手动更新流程。
 
 ## 模型和渲染功能基线
 
@@ -426,7 +440,7 @@ Shader 编译与资源状态模型先做最小验证，再逐步完善；不等�
 13. 添加层级和世界 Transform 更新，再单独覆盖重新挂接与删除行为。
 14. 按几何、索引、法线、UV、贴图分别增加模型导入能力。
 
-当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、单帧同步、交换链与管线重建、Slang 到 SPIR-V 的手动编译与验证、启动时的 Shader Module 加载、最小图形管线和三角形 Draw、不可变顶点缓冲、纯深度纹理引用与遮挡、Scene／相机矩阵到 Shader 的固定 Push Constant 路径、Ray Query 离线编译探针，以及 CPU Entity 生命周期、组件增删／组合查询、Scene 层级和局部／世界 Transform、相机组件及视图／透视投影矩阵、glTF 静态几何与节点导入。遍历期间结构性修改会被拒绝，调用方可在遍历后处理。架构设计已收敛为首版实施基线，常规接口和内部存储在实现时确定，停止逐项扩展架构讨论；这不表示目标能力全部实现。索引缓冲、DrawIndexed、glTF 静态 GPU 预览与 CPU 模型资产引用／Scene 节点实例化已接通；最小 RenderScene 绘制提取与共享 GPU 几何也已接通；法线／UV 的 CPU 导入也已完成；GPU 属性传输与可视化已完成；基础材质／图片导入与纹理采样已完成；单方向光、最小 Pass／图及图内深度采样已接通，光源矩阵与阴影图生成／查看已接通，Forward 阴影比较／偏移／滤波也已接通。可复用实验入口、BasicScene、CustomPass 的 HDR／显示转换及参数面板已实现，下一步推进适用 Pass 开关、中间纹理查看和安全手动 Shader 更新，见[近期实施顺序](#用户使用方式与近期实施顺序)。所有场景对象继续使用 Entity，未来渲染通过 Mesh、Material 等组件组合提取。Ray Query GPU 求交仍需 Storage／设备地址缓冲、设备能力启用、绑定、加速结构和计算提交，不能把当前顶点缓冲视为这些能力已经具备。运行期 Shader 更新仍需安全替换和失败恢复验证。
+当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、单帧同步、交换链与管线重建、Slang 到 SPIR-V 的手动编译与验证、启动时的 Shader Module 加载、最小图形管线和三角形 Draw、不可变顶点缓冲、纯深度纹理引用与遮挡、Scene／相机矩阵到 Shader 的固定 Push Constant 路径、Ray Query 离线编译探针，以及 CPU Entity 生命周期、组件增删／组合查询、Scene 层级和局部／世界 Transform、相机组件及视图／透视投影矩阵、glTF 静态几何与节点导入。遍历期间结构性修改会被拒绝，调用方可在遍历后处理。架构设计已收敛为首版实施基线，常规接口和内部存储在实现时确定，停止逐项扩展架构讨论；这不表示目标能力全部实现。索引缓冲、DrawIndexed、glTF 静态 GPU 预览与 CPU 模型资产引用／Scene 节点实例化已接通；最小 RenderScene 绘制提取与共享 GPU 几何也已接通；法线／UV 的 CPU 导入也已完成；GPU 属性传输与可视化已完成；基础材质／图片导入与纹理采样已完成；单方向光、最小 Pass／图及图内深度采样已接通，光源矩阵与阴影图生成／查看已接通，Forward 阴影比较／偏移／滤波也已接通。可复用实验入口、BasicScene、CustomPass 的 HDR／显示转换及参数面板已实现，Forward 开关、整图候选切换、主相机深度和 HDR 范围查看也已实现，下一步继续阴影图统一查看和安全手动 Shader 更新，见[近期实施顺序](#用户使用方式与近期实施顺序)。所有场景对象继续使用 Entity，未来渲染通过 Mesh、Material 等组件组合提取。Ray Query GPU 求交仍需 Storage／设备地址缓冲、设备能力启用、绑定、加速结构和计算提交，不能把当前顶点缓冲视为这些能力已经具备。运行期 Shader 更新仍需安全替换和失败恢复验证。
 
 ## 验证策略与风险
 

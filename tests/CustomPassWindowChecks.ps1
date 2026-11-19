@@ -1,7 +1,8 @@
 ﻿param(
     [ValidateSet('Debug','Release')][string]$Configuration = 'Debug',
-    [ValidateSet('reference','ui','ui-failures','model','close-minimized','failures')][string]$Scenario = 'reference',
-    [string]$BuildDirectory = 'build'
+    [ValidateSet('reference','ui','ui-failures','graph','graph-failures','graph-close-minimized','viewer','viewer-close-minimized','hdr','hdr-close-minimized','model','close-minimized','failures')][string]$Scenario = 'reference',
+    [string]$BuildDirectory = 'build',
+    [string]$ModelPath = ''
 )
 $ErrorActionPreference = 'Stop'
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -9,6 +10,9 @@ $buildPath = (Resolve-Path (Join-Path $workspace $BuildDirectory)).Path
 $outputRoot = Join-Path $buildPath 'verification/custom-pass'
 [void][IO.Directory]::CreateDirectory($outputRoot)
 $name = "$($Configuration.ToLower())-$Scenario"
+if ($ModelPath) { $name += '-' + [IO.Path]::GetFileNameWithoutExtension($ModelPath) }
+$forwardEnabled = $true
+$displayView = 'final'
 $errorPath = Join-Path $outputRoot "$name.stderr.log"
 $outPath = Join-Path $outputRoot "$name.stdout.log"
 
@@ -112,16 +116,18 @@ public static class CustomPassWindowCheck {
 $previousSync = $env:VK_LAYER_VALIDATE_SYNC
 try {
     $env:VK_LAYER_VALIDATE_SYNC = '1'
-    $launch = @{FilePath=(Join-Path $buildPath "$Configuration/CustomPass.exe"); WorkingDirectory=$outputRoot
+    $executable = if ($Scenario -eq 'graph-failures') { 'GraphSwitchChecks.exe' } else { 'CustomPass.exe' }
+    $launch = @{FilePath=(Join-Path $buildPath "$Configuration/$executable"); WorkingDirectory=$outputRoot
         WindowStyle='Hidden'; PassThru=$true; RedirectStandardOutput=$outPath; RedirectStandardError=$errorPath}
-    if ($Scenario -ne 'model') { $launch.ArgumentList = @('"' + $fixturePath + '"') }
+    if ($ModelPath) { $launch.ArgumentList = @('--fit',('"' + (Resolve-Path (Join-Path $workspace $ModelPath)).Path + '"')) }
+    elseif ($Scenario -notin @('model','graph-failures')) { $launch.ArgumentList = @('"' + $fixturePath + '"') }
     $appProcess = Start-Process @launch
     $null = $appProcess.Handle
 } finally { $env:VK_LAYER_VALIDATE_SYNC = $previousSync }
 $windowState = @{Handle=[IntPtr]::Zero}
 function Read-Log { if (Test-Path $errorPath) { return Get-Content -LiteralPath $errorPath -Raw -Encoding UTF8 }; return '' }
 function Wait-Condition([scriptblock]$Condition, [string]$Label) {
-    $deadline = [DateTime]::UtcNow.AddSeconds(12)
+    $deadline = [DateTime]::UtcNow.AddSeconds(40)
     do {
         $appProcess.Refresh()
         if ($appProcess.HasExited) { throw "Early exit during $Label (see $errorPath): $(Read-Log)" }
@@ -174,6 +180,30 @@ function Click-Client([int]$X, [int]$Y, [bool]$Control=$false) {
     }
     Start-Sleep -Milliseconds 400
 }
+function Set-Forward([bool]$Enabled) {
+    if ($script:forwardEnabled -eq $Enabled) { return }
+    $before = [regex]::Matches((Read-Log),'CustomPass: Forward').Count
+    Click-Client 155 118
+    $state = if ($Enabled) { 'on' } else { 'off' }
+    Wait-Condition { [regex]::Matches((Read-Log),'CustomPass: Forward').Count -gt $before -and
+        (Read-Log) -match "CustomPass: Forward $state presented\." } 'Forward graph publication'
+    $script:forwardEnabled=$Enabled
+}
+function Set-View([bool]$Depth) {
+    Set-DisplayView $(if ($Depth) { 'depth' } else { 'final' })
+}
+function Set-DisplayView([ValidateSet('final','depth','hdr-range')][string]$View) {
+    if ($script:displayView -eq $View) { return }
+    $before=[regex]::Matches((Read-Log),'CustomPass: view').Count
+    Click-Client 100 174
+    # Fixed Latin font and layout: popup rows directly below the View combo.
+    $row=@('final','depth','hdr-range').IndexOf($View)
+    Click-Client 100 (196+17*$row)
+    Wait-Condition { [regex]::Matches((Read-Log),'CustomPass: view').Count -gt $before -and
+        (Read-Log) -match "CustomPass: view $View presented\." } 'viewer graph publication'
+    $script:displayView=$View
+    Start-Sleep -Milliseconds 150
+}
 function Enter-Value([int]$X, [int]$Y, [string]$Value) {
     Click-Client $X $Y $true
     # All keyboard messages target this HWND. Ctrl+click selects the scalar.
@@ -204,6 +234,34 @@ function Tone([double]$Linear,[double]$Exposure) {
     $exposed = $Linear*$Exposure
     return Encode ($exposed/(1+$exposed))
 }
+function Range-Color([double[]]$Linear) {
+    # Independently round finite fixture radiance to the RGBA16F storage grid.
+    # This also makes the exact stored value 1 test independent of float noise.
+    $stored=foreach ($value in $Linear) {
+        if ($value -eq 0) { 0.0; continue }
+        $exponent=[Math]::Max(-14,[Math]::Floor([Math]::Log([Math]::Abs($value),2)))
+        $unit=[Math]::Pow(2,$exponent-10)
+        [Math]::Round($value/$unit)*$unit
+    }
+    if (($stored | Measure-Object -Maximum).Maximum -gt 1) { return @(255,0,255) }
+    return @($stored | ForEach-Object { Encode ([Math]::Max(0.0,[Math]::Min(1.0,[double]$_))) })
+}
+function Set-ReferenceLight([double[]]$Color,[double]$Irradiance) {
+    for ($channel=0;$channel -lt 3;++$channel) {
+        if ($Color[$channel] -ne $script:referenceLight[$channel]) {
+            Enter-Value (42+60*$channel) 71 ($Color[$channel].ToString('R',[Globalization.CultureInfo]::InvariantCulture))
+        }
+    }
+    if ($Irradiance -ne $script:referenceIrradiance) {
+        Enter-Value 100 95 ($Irradiance.ToString('R',[Globalization.CultureInfo]::InvariantCulture))
+    }
+    $expected='light ({0:F4},{1:F4},{2:F4}) x {3:F4} presented.' -f $Color[0],$Color[1],$Color[2],$Irradiance
+    Wait-Condition {
+        $matches=[regex]::Matches((Read-Log),'CustomPass: controls [^\r\n]+')
+        return $matches.Count -gt 0 -and $matches[$matches.Count-1].Value.EndsWith($expected)
+    } 'reference light parameters'
+    $script:referenceLight=$Color; $script:referenceIrradiance=$Irradiance
+}
 function Check-Pixels([string]$Label, [int]$Pose=0, [double]$ExposureEV=[double]::NaN,
     [double[]]$LightColor=@(1,.8,.6), [double]$Irradiance=(4*[Math]::PI)) {
     $size = Get-Size
@@ -216,14 +274,23 @@ function Check-Pixels([string]$Label, [int]$Pose=0, [double]$ExposureEV=[double]
         $bitmap.Save((Join-Path $outputRoot "$name-$Label.png"))
         $exposure = if ($Pose -eq 1) { .25 } elseif ($Pose -eq 2) { 4.0 } else { 1.0 }
         if (-not [double]::IsNaN($ExposureEV)) { $exposure=[Math]::Pow(2,$ExposureEV) }
-        $background = @((Tone .04 $exposure),(Tone .08 $exposure),(Tone .16 $exposure))
-        if ($Scenario -eq 'model') {
+        $background = if ($displayView -eq 'depth') { @(0,0,0) } elseif ($displayView -eq 'hdr-range') {
+            Range-Color @(.04,.08,.16)
+        } else { @((Tone .04 $exposure),(Tone .08 $exposure),(Tone .16 $exposure)) }
+        if ($Scenario -eq 'model' -or $ModelPath) {
             $visible = 0
-            for ($y=1; $y -lt 15; ++$y) { for ($x=1; $x -lt 15; ++$x) {
-                $color = $bitmap.GetPixel([int]($size[0]*$x/15),[int]($size[1]*$y/15))
+            # Dense enough to hit thin poles/chains, without counting the UI.
+            for ($y=1; $y -lt 60; ++$y) { for ($x=1; $x -lt 60; ++$x) {
+                $px=[int]($size[0]*$x/60); $py=[int]($size[1]*$y/60)
+                if ($px -lt 360 -and $py -lt 290) { continue } # Exclude UI from model visibility.
+                $color = $bitmap.GetPixel($px,$py)
+                if (-not $forwardEnabled) {
+                    if ([Math]::Abs($color.R-$background[0]) -gt 3 -or [Math]::Abs($color.G-$background[1]) -gt 3 -or
+                        [Math]::Abs($color.B-$background[2]) -gt 3) { throw 'Disabled Forward left scene geometry visible' }
+                }
                 if ([Math]::Abs($color.R-$background[0])+[Math]::Abs($color.G-$background[1])+[Math]::Abs($color.B-$background[2]) -gt 12) { ++$visible }
             } }
-            if ($visible -lt 5) { throw 'Default Suzanne model is not visible' }
+            if ($forwardEnabled -and $visible -lt 5) { throw 'External model is not visible' }
             Write-Output "$Label model visibility: $visible samples (smoke only)"
             return
         }
@@ -235,25 +302,40 @@ function Check-Pixels([string]$Label, [int]$Pose=0, [double]$ExposureEV=[double]
         $lit = @((Tone (.25*$LightColor[0]*$Irradiance/[Math]::PI) $exposure),
             (Tone (.5*$LightColor[1]*$Irradiance/[Math]::PI) $exposure),
             (Tone (.75*$LightColor[2]*$Irradiance/[Math]::PI) $exposure))
-        if ($Scenario -eq 'ui') {
+        if ($displayView -eq 'hdr-range') {
+            $lit=Range-Color @((.25*$LightColor[0]*$Irradiance/[Math]::PI),
+                (.5*$LightColor[1]*$Irradiance/[Math]::PI),(.75*$LightColor[2]*$Irradiance/[Math]::PI))
+        }
+        if ($displayView -eq 'depth') {
+            # Independent near=.1, far=1000, plane distance=3 perspective depth.
+            # The viewer displays 1 - deviceDepth; exposure/light do not apply.
+            $shade=Encode (1-(1000.0/(1000-.1)-(.1*1000/(1000-.1))/3))
+            $lit=@($shade,$shade,$shade)
+        }
+        if ($Scenario -in @('ui','viewer','viewer-close-minimized','hdr','hdr-close-minimized')) {
             # Independent body pixel: .06 sRGB style color converted to linear,
             # packed as UNORM8, alpha .94, blended over the tone-mapped scene.
-            $color=$bitmap.GetPixel(30,180)
+            $color=$bitmap.GetPixel(30,255) # Empty body below controls/diagnostics.
             $alpha=240.0/255; $body=1.0/255
             $actual=@($color.R,$color.G,$color.B)
             $sceneBackground=@(.04,.08,.16)
             for ($channel=0;$channel -lt 3;++$channel) {
                 $linear=$sceneBackground[$channel]*$exposure
-                $expected=Encode ($body*$alpha+($linear/(1+$linear))*(1-$alpha))
+                $displayed=if ($displayView -eq 'depth') { 0 } elseif ($displayView -eq 'hdr-range') {
+                    $sceneBackground[$channel]
+                } else { $linear/(1+$linear) }
+                $expected=Encode ($body*$alpha+$displayed*(1-$alpha))
                 if ([Math]::Abs($actual[$channel]-$expected) -gt 3) { throw 'UI sRGB overlay or background preservation failed' }
             }
         }
         $checked = 0
-        foreach ($nx in @(-.32,-.24,-.12,0,.12,.24,.32)) { foreach ($v in @(.38,.45,.55,.62,.72)) {
+        # Keep the analytic scene grid below the fixed-height parameter panel,
+        # including the smallest client extent used by the resize checks.
+        foreach ($nx in @(-.32,-.24,-.12,0,.12,.24,.32)) { foreach ($v in @(.48,.52,.56,.62,.72)) {
             $x = [int][Math]::Floor((.5+$nx/$aspect)*$size[0]); $y=[int][Math]::Floor($v*$size[1])
             $u=($x+.5)/$size[0]; $actualV=($y+.5)/$size[1]
-            $inside = [Math]::Abs($u-$center) -lt $halfWidth -and [Math]::Abs($actualV-.5) -lt $halfHeight
-            $expected = if (-not $inside) { $background } elseif ($Pose -eq 3) { @(0,0,0) } else { $lit }
+            $inside = $forwardEnabled -and [Math]::Abs($u-$center) -lt $halfWidth -and [Math]::Abs($actualV-.5) -lt $halfHeight
+            $expected = if (-not $inside) { $background } elseif ($Pose -eq 3 -and $displayView -ne 'depth') { @(0,0,0) } else { $lit }
             $color = $bitmap.GetPixel($x,$y); $actual=@($color.R,$color.G,$color.B)
             for ($channel=0; $channel -lt 3; ++$channel) {
                 if ([Math]::Abs($actual[$channel]-$expected[$channel]) -gt 3) {
@@ -274,12 +356,29 @@ try {
             if ($processId -eq $appProcess.Id) {
                 $title = New-Object Text.StringBuilder 256
                 [void][CustomPassWindowCheck]::GetWindowText($window,$title,$title.Capacity)
-                if ($title.ToString() -eq 'MadCat CustomPass') { $windowState.Handle=$window }
+                if ($title.ToString() -in @('MadCat CustomPass','MadCat Graph switch checks')) { $windowState.Handle=$window }
             }
             return $true
         },[IntPtr]::Zero)
         return $windowState.Handle -ne [IntPtr]::Zero
     } 'window discovery'
+    if ($Scenario -eq 'graph-failures') {
+        Wait-Condition { (Read-Log) -match 'Graph switch checks: 9 requests passed; ready to close\.' } 'candidate failures and recovery'
+        [void][CustomPassWindowCheck]::PostMessage($windowState.Handle,0x10,[IntPtr]::Zero,[IntPtr]::Zero)
+        if (-not $appProcess.WaitForExit(10000)) { throw 'Graph checks did not exit' }
+        $log=Read-Log
+        if ($appProcess.ExitCode -ne 0 -or $log -notmatch 'Graph switch checks: cleanup passed\.' -or
+            $log -match 'Vulkan \[(error|warning)\]|Vulkan error:|GLFW error|MadCat .*failed:|MadCat error:') { throw "Graph switch checks failed (see $errorPath)" }
+        if ([regex]::Matches($log,'Graph replacement applied to').Count -ne 4 -or
+            [regex]::Matches($log,'Graph commands retired before replacement\.').Count -ne 4 -or
+            [regex]::Matches($log,'Graph switch check: case \d retained;').Count -ne 5) { throw 'Wrong graph publication/retention count' }
+        foreach ($resource in @('HDR color texture','Sampled depth texture','Graphics pipeline','Texture binding','UI renderer')) {
+            $created = if ($resource -eq 'UI renderer') { 'UI renderer ready;' } else { "$resource created[;\.]" }
+            if ([regex]::Matches($log,$created).Count -ne [regex]::Matches($log,"$resource destroyed\.").Count) { throw "Candidate cleanup mismatch: $resource" }
+        }
+        Write-Output "$Configuration graph-failures passed (9 requests, atomic image plans, cleanup)"
+        exit 0
+    }
     [void][CustomPassWindowCheck]::ShowWindow($windowState.Handle,9)
     [void][CustomPassWindowCheck]::SetWindowPos($windowState.Handle,[IntPtr](-1),30,30,1000,760,0x10)
     Wait-Condition { (Read-Log) -match 'CustomPass: mode 0 presented\.' } 'first frame'
@@ -323,11 +422,111 @@ try {
         [void][CustomPassWindowCheck]::SetWindowPos($windowState.Handle,[IntPtr](-1),30,30,850,650,0x10)
         Wait-Ready; Check-Pixels 'ui-resized'
     }
+    if ($Scenario -in @('graph','graph-close-minimized')) {
+        $uiCount=[regex]::Matches((Read-Log),'UI renderer ready;').Count
+        $sceneCount=[regex]::Matches((Read-Log),'Triangle pipeline created;').Count
+        for ($iteration=0;$iteration -lt 12;++$iteration) {
+            Set-Forward (-not $forwardEnabled)
+            Check-Pixels "toggle-$iteration"
+        }
+        Set-Forward $false; Check-Pixels 'disabled'
+        if ([regex]::Matches((Read-Log),'UI renderer ready;').Count -ne $uiCount -or
+            [regex]::Matches((Read-Log),'Triangle pipeline created;').Count -ne $sceneCount) { throw 'Graph switch rebuilt presentation/UI/scene resources' }
+        [void][CustomPassWindowCheck]::SetWindowPos($windowState.Handle,[IntPtr](-1),30,30,850,650,0x10)
+        Wait-Ready; Check-Pixels 'resized-disabled'
+        if ((Read-Log) -match 'graph request \d+ rejected') { throw 'Valid Forward request rejected' }
+    }
+    if ($Scenario -in @('viewer','viewer-close-minimized')) {
+        $uiCount=[regex]::Matches((Read-Log),'UI renderer ready;').Count
+        $sceneCount=[regex]::Matches((Read-Log),'Triangle pipeline created;').Count
+        for ($iteration=0;$iteration -lt 6;++$iteration) {
+            Set-View ($displayView -ne 'depth'); Check-Pixels "view-$iteration"
+        }
+        Set-View $true; Check-Pixels 'depth'
+        Click-Client 700 500
+        Select-Pose 2; Check-Pixels 'depth-ignores-exposure' 2
+        Select-Pose 3; Check-Pixels 'depth-ignores-light' 3
+        Select-Pose 4; Check-Pixels 'depth-model-moved' 4
+        Select-Pose 0
+        Set-Forward $false; Check-Pixels 'depth-forward-off'
+        Set-View $false; Check-Pixels 'final-forward-off'
+        Set-View $true; Check-Pixels 'depth-still-off'
+        Set-Forward $true; Check-Pixels 'depth-forward-restored'
+        if ([regex]::Matches((Read-Log),'UI renderer ready;').Count -ne $uiCount -or
+            [regex]::Matches((Read-Log),'Triangle pipeline created;').Count -ne $sceneCount) { throw 'Viewer switch rebuilt UI/scene resources' }
+        [void][CustomPassWindowCheck]::SetWindowPos($windowState.Handle,[IntPtr](-1),30,30,850,650,0x10)
+        Wait-Ready; Check-Pixels 'depth-resized'
+        if ((Read-Log) -match 'graph request \d+ rejected') { throw 'Valid viewer request rejected' }
+    }
+    if ($Scenario -eq 'hdr') {
+        $uiCount=[regex]::Matches((Read-Log),'UI renderer ready;').Count
+        $sceneCount=[regex]::Matches((Read-Log),'Triangle pipeline created;').Count
+        $iteration=0
+        foreach ($view in @('hdr-range','depth','final','hdr-range','final','hdr-range')) {
+            Set-DisplayView $view; Check-Pixels "hdr-switch-$iteration"; ++$iteration
+        }
+        $pipelineCount=[regex]::Matches((Read-Log),'Graphics pipeline created;').Count
+        Click-Client 700 500
+        Select-Pose 1; Check-Pixels 'hdr-ignores-exposure' 1
+        Select-Pose 3; Check-Pixels 'hdr-light-off' 3
+        Select-Pose 4; Check-Pixels 'hdr-model-moved' 4
+        Select-Pose 0
+        $referenceLight=@(1,.8,.6); $referenceIrradiance=4*[Math]::PI
+        Set-ReferenceLight @(1,.8,.6) ([Math]::PI)
+        Check-Pixels 'hdr-in-range' 0 0 @(1,.8,.6) ([Math]::PI)
+        Set-ReferenceLight @(1,0,0) (4*[Math]::PI)
+        Check-Pixels 'hdr-exactly-one' 0 0 @(1,0,0)
+        Set-ReferenceLight @(.999,0,0) (4*[Math]::PI)
+        Check-Pixels 'hdr-below-one' 0 0 @(.999,0,0)
+        Set-ReferenceLight @(1,0,0) 13
+        Check-Pixels 'hdr-red-above-one' 0 0 @(1,0,0) 13
+        Set-ReferenceLight @(0,1,0) (4*[Math]::PI)
+        Check-Pixels 'hdr-green-above-one' 0 0 @(0,1,0)
+        Set-ReferenceLight @(0,0,1) (4*[Math]::PI)
+        Check-Pixels 'hdr-blue-above-one' 0 0 @(0,0,1)
+        Set-ReferenceLight @(1,.8,.6) (4*[Math]::PI)
+        if ([regex]::Matches((Read-Log),'Graphics pipeline created;').Count -ne $pipelineCount) { throw 'HDR parameter edits rebuilt pipelines' }
+        Set-Forward $false; Check-Pixels 'hdr-forward-off'
+        Set-DisplayView 'final'; Check-Pixels 'hdr-final-forward-off'
+        Set-DisplayView 'depth'; Check-Pixels 'hdr-depth-forward-off'
+        Set-DisplayView 'hdr-range'; Check-Pixels 'hdr-still-off'
+        Set-Forward $true; Check-Pixels 'hdr-forward-restored'
+        if ([regex]::Matches((Read-Log),'UI renderer ready;').Count -ne $uiCount -or
+            [regex]::Matches((Read-Log),'Triangle pipeline created;').Count -ne $sceneCount) { throw 'HDR view switch rebuilt UI/scene resources' }
+        [void][CustomPassWindowCheck]::SetWindowPos($windowState.Handle,[IntPtr](-1),30,30,850,650,0x10)
+        Wait-Ready; Check-Pixels 'hdr-resized'
+        if ((Read-Log) -match 'graph request \d+ rejected') { throw 'Valid HDR view request rejected' }
+    }
+    if ($Scenario -eq 'hdr-close-minimized') {
+        Set-DisplayView 'hdr-range'; Check-Pixels 'hdr-before-minimize'
+        [void][CustomPassWindowCheck]::SetWindowPos($windowState.Handle,[IntPtr](-1),30,30,850,650,0x10)
+        Wait-Ready; Check-Pixels 'hdr-resized-before-minimize'
+    }
     [void][CustomPassWindowCheck]::ShowWindow($windowState.Handle,6)
     Wait-Condition { (Read-Log) -match 'rendering paused;' } 'minimize'
-    if ($Scenario -ne 'close-minimized') {
+    if ($Scenario -notin @('close-minimized','graph-close-minimized','viewer-close-minimized','hdr-close-minimized')) {
         [void][CustomPassWindowCheck]::ShowWindow($windowState.Handle,9)
         Wait-Ready; Check-Pixels 'resumed'
+        if ($Scenario -eq 'graph') { Set-Forward $true; Check-Pixels 'enabled-after-resume' }
+        if ($Scenario -eq 'viewer') {
+            Set-View $false; Check-Pixels 'final-after-resume'
+            Set-View $true
+            Set-Forward $false
+            $beforeDefaults=[regex]::Matches((Read-Log),'CustomPass: view final presented\.').Count
+            Click-Client 80 118 # Defaults must restore both Final and Forward.
+            Wait-Condition { [regex]::Matches((Read-Log),'CustomPass: view final presented\.').Count -gt $beforeDefaults } 'default view restoration'
+            $displayView='final'
+            $forwardEnabled=$true
+            Check-Pixels 'defaults-final'
+        }
+        if ($Scenario -eq 'hdr') {
+            Set-Forward $false
+            $beforeDefaults=[regex]::Matches((Read-Log),'CustomPass: view final presented\.').Count
+            Click-Client 80 118
+            Wait-Condition { [regex]::Matches((Read-Log),'CustomPass: view final presented\.').Count -gt $beforeDefaults } 'HDR defaults restoration'
+            $displayView='final'; $forwardEnabled=$true
+            Check-Pixels 'hdr-defaults-final'
+        }
     }
     [void][CustomPassWindowCheck]::PostMessage($windowState.Handle,0x10,[IntPtr]::Zero,[IntPtr]::Zero)
     if (-not $appProcess.WaitForExit(10000)) { throw 'CustomPass did not exit' }
@@ -343,7 +542,7 @@ try {
     }
     if ([regex]::Matches($log,'Texture binding created\.').Count -ne [regex]::Matches($log,'Texture binding destroyed\.').Count -or
         [regex]::Matches($log,'Sampled texture uploaded;').Count -ne [regex]::Matches($log,'Sampled texture destroyed\.').Count) { throw 'Material lifetime mismatch' }
-    foreach ($resource in @('HDR color texture','Graphics pipeline')) {
+    foreach ($resource in @('HDR color texture','Sampled depth texture','Graphics pipeline')) {
         $created = [regex]::Matches($log,"$resource created;").Count
         if ($created -lt 1 -or $created -ne [regex]::Matches($log,"$resource destroyed\.").Count) { throw "Custom resource lifetime mismatch: $resource" }
     }

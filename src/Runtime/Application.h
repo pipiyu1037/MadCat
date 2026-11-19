@@ -3,6 +3,7 @@
 #include "RenderScene/RenderScene.h"
 #include "RenderGraph/GraphicsGraph.h"
 #include <filesystem>
+#include <optional>
 
 namespace madcat::runtime
 {
@@ -18,6 +19,10 @@ struct ApplicationOptions
     rhi::ColorFormat forwardColorFormat = rhi::ColorFormat::Presentation;
 };
 struct FrameInfo { float aspect; double deltaSeconds; };
+// A one-shot request. Factories capture structural options by value and borrow
+// CPU experiment state only for this run. IDs are nonzero and increasing.
+struct GraphRequest { uint64_t id; graph::GraphicsGraphFactory factory; };
+struct GraphUpdate { uint64_t id; bool applied; std::string diagnostic; };
 struct RenderFrame
 {
     std::array<float,4> clearColor{.04f,.08f,.16f,1};
@@ -30,6 +35,8 @@ struct GraphicsCallbacks
     std::function<void(char)> keyPressed; // uppercase ASCII letters and digits
     std::function<void()> presented; // present accepted; GPU/WSI completion can still be pending
     std::function<void()> ui; // optional Dear ImGui widgets, before frame extraction
+    std::function<std::optional<GraphRequest>()> graphRequest;
+    std::function<void(const GraphUpdate&)> graphUpdated;
 };
 // Advanced frame-data entry used by Sandbox. All arguments/captures must live
 // through this blocking call. Startup geometry/materials are immutable; frame
@@ -45,6 +52,8 @@ struct SceneCallbacks
     std::function<void(char)> keyPressed;
     std::function<void()> presented; // same completion distinction as GraphicsCallbacks
     std::function<void()> ui; // edit parameter drafts; graph must consume GraphicsImports::uiFont
+    std::function<std::optional<GraphRequest>()> graphRequest; // consumed after UI, before scene extraction
+    std::function<void(const GraphUpdate&)> graphUpdated; // rejected candidates retain the active graph
 };
 // Scene entry: user owns Scene/Assets/camera and algorithm composition. Updates
 // run before world propagation and extraction, outside Scene queries. The engine

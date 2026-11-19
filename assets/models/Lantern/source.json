@@ -1,0 +1,55 @@
+{
+  "repository": "KhronosGroup/glTF-Sample-Assets",
+  "commit": "4995a638c96dbc94376d3d6164e70fee3ac7f7a2",
+  "license": "CC0-1.0",
+  "files": [
+    {
+      "file": "Lantern.gltf",
+      "bytes": 5970,
+      "sha256": "2106fea76c458caf43078c34ae7da7016cedd1f22e6f4badf94590be590f53d6",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/4995a638c96dbc94376d3d6164e70fee3ac7f7a2/Models/Lantern/glTF/Lantern.gltf"
+    },
+    {
+      "file": "Lantern.bin",
+      "bytes": 231324,
+      "sha256": "ef0e2e89e4b14ff9035b43867a16dc3218569b29363ccb16b283b86f1dc50eb0",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/4995a638c96dbc94376d3d6164e70fee3ac7f7a2/Models/Lantern/glTF/Lantern.bin"
+    },
+    {
+      "file": "Lantern_baseColor.png",
+      "bytes": 4461532,
+      "sha256": "a2d6aa660f0b9ce46b3863e955248454e73be96063218b799af9f750e0f7be71",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/4995a638c96dbc94376d3d6164e70fee3ac7f7a2/Models/Lantern/glTF/Lantern_baseColor.png"
+    },
+    {
+      "file": "Lantern_emissive.png",
+      "bytes": 169335,
+      "sha256": "eafa6390501d537f5bbcf92c64ad1c39d2493aef4508e9cc9d537771efe8bad7",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/4995a638c96dbc94376d3d6164e70fee3ac7f7a2/Models/Lantern/glTF/Lantern_emissive.png"
+    },
+    {
+      "file": "Lantern_normal.png",
+      "bytes": 2619883,
+      "sha256": "3318a4d3bef8be53c192d87b7401145493774126c54a22e50e1269f9476065fa",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/4995a638c96dbc94376d3d6164e70fee3ac7f7a2/Models/Lantern/glTF/Lantern_normal.png"
+    },
+    {
+      "file": "Lantern_roughnessMetallic.png",
+      "bytes": 2078597,
+      "sha256": "01b8105756fd86f13e66602f85ee03e7e5daf22a8531f32bef8bbe678cf38cf6",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/4995a638c96dbc94376d3d6164e70fee3ac7f7a2/Models/Lantern/glTF/Lantern_roughnessMetallic.png"
+    },
+    {
+      "file": "upstream-readme.txt",
+      "bytes": 1080,
+      "sha256": "58a4903ae9c0bbb7d3f6ff1b9263b3b480edb7ca82109afdb06723275835a6c7",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/4995a638c96dbc94376d3d6164e70fee3ac7f7a2/Models/Lantern/README.md"
+    },
+    {
+      "file": "LICENSE.txt",
+      "bytes": 6533,
+      "sha256": "a43fc2004d1e073f1107a1f6146664d08dae6cea93cb828742a4bec6da828e91",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/4995a638c96dbc94376d3d6164e70fee3ac7f7a2/LICENSES/CC0-1.0.txt"
+    }
+  ]
+}
