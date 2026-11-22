@@ -34,12 +34,13 @@ int main()
     };
     using enum experiment::DisplayView;
     struct Case { uint64_t id; experiment::DisplaySettings settings; int fault; };
-    const std::array cases{Case{1,{false,HdrRange},0},Case{2,{true,HdrRange},1},Case{3,{true,Depth},2},Case{4,{true,Final},3},
+    const std::array cases{Case{1,{false,Shadow},0},Case{2,{true,Shadow},1},Case{3,{true,HdrRange},2},Case{4,{true,Final},3},
         Case{0,{true,Final},4},Case{5,{true,Final},5},Case{6,{true,Depth},0},Case{7,{true,HdrRange},0},Case{8,{true,Final},0}};
     runtime::ApplicationOptions options;
     options.title="MadCat Graph switch checks";
     options.forwardColorFormat=rhi::ColorFormat::Rgba16Float;
     options.prepareDepthView=true;
+    options.prepareShadow=true;
     options.graphFactory=makeGraph(effective);
     runtime::GraphicsCallbacks callbacks;
     callbacks.ui=[] { ImGui::Begin("Graph switching"); ImGui::TextUnformatted("Automatic failure/recovery checks"); ImGui::End(); };

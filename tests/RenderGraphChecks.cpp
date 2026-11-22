@@ -406,6 +406,49 @@ void customDepthViewer()
             b.before==graph::Use::Sampled && b.after==graph::Use::Depth;}),"Custom viewer lacks next-frame read-to-write synchronization");
     }
 }
+void customShadowViewer()
+{
+    for (const bool enabled : {false,true})
+    {
+        graph::Graph g;
+        graph::GraphicsImports input;
+        input.color=texture(g);
+        input.vertices=g.import("vertices",2,graph::Kind::Buffer,graph::Use::HostWrite,true);
+        input.indices=g.import("indices",3,graph::Kind::Buffer,graph::Use::HostWrite,true);
+        input.uiFont=g.import("font",4,graph::Kind::Color,graph::Use::Sampled,true);
+        input.width=64; input.height=48; input.presentationSrgb=true;
+        experiment::ToneMapPass::Parameters display;
+        experiment::DisplaySettings settings{enabled,experiment::DisplayView::Shadow};
+        auto factory=experiment::makeDisplayGraph(display,{},settings);
+        settings={};
+        auto program=factory(g,input);
+        check(bool(program),"Shadow viewer unexpectedly requires display preparation");
+        const auto& resources=program->plan.resources();
+        const auto depth=static_cast<uint32_t>(resources.size()-1);
+        check(resources.size()==5 && resources[depth].depthTexture && resources[depth].depthTexture->sampled &&
+            resources[depth].depthTexture->width==1024 && resources[depth].depthTexture->height==1024,
+            "Shadow viewer lost fixed light resolution or allocated unused scene attachments");
+        check(program->plan.nodes().size()==4 && program->plan.nodes()[0].name=="Shadow",
+            "Shadow view executes unrelated Forward work");
+        const rhi::IndexedDraw cameraDraw{};
+        std::vector<rhi::IndexedDraw> shadows(2);
+        const auto parameters=program->parameters({},std::span(&cameraDraw,1),shadows);
+        shadows.clear(); // Per-frame values must own the light-space list.
+        std::vector<graph::Use> states;
+        for (const auto& resource : resources) { states.push_back(resource.initial); }
+        Commands commands; std::vector<graph::Barrier> barriers;
+        auto record=[&](const auto& initial) { return program->plan.record(commands,parameters,initial,
+            [&](auto b){barriers.push_back(b);return true;}); };
+        auto result=record(states);
+        check(result && commands.draws==2 && commands.depthOnly==1 && commands.displays==1 && commands.uiDraws==1 &&
+            (*result)[input.color.index]==graph::Use::Present,"Shadow view lost light draws, Forward independence, UI or Present");
+        check(std::ranges::any_of(barriers,[&](auto b){return b.resource==depth && b.before==graph::Use::Depth &&
+            b.after==graph::Use::Sampled;}),"Shadow viewer lacks depth write-to-read synchronization");
+        barriers.clear();
+        check(bool(record(*result)) && std::ranges::any_of(barriers,[&](auto b){return b.resource==depth &&
+            b.before==graph::Use::Sampled && b.after==graph::Use::Depth;}),"Shadow viewer lacks next-frame read-to-write synchronization");
+    }
+}
 void hdrRangeExecution()
 {
     graph::Graph g;
@@ -440,6 +483,6 @@ void hdrRangeExecution()
 }
 int main()
 {
-    try { versionsAndOrdering(); diagnostics(); duplicateIdentity(); executionAndFailure(); accessAndSnapshots(); forwardSynchronization(); parameterIsolation(); managedDepthContracts(); managedDepthExecution(); shadowExecution(); shadowForwardExecution(); managedColorContracts(); preparedColorExecution(); uiOverlayContracts(); customDepthViewer(); hdrRangeExecution(); std::puts("Render Graph checks: 16 groups passed."); return 0; }
+    try { versionsAndOrdering(); diagnostics(); duplicateIdentity(); executionAndFailure(); accessAndSnapshots(); forwardSynchronization(); parameterIsolation(); managedDepthContracts(); managedDepthExecution(); shadowExecution(); shadowForwardExecution(); managedColorContracts(); preparedColorExecution(); uiOverlayContracts(); customDepthViewer(); customShadowViewer(); hdrRangeExecution(); std::puts("Render Graph checks: 17 groups passed."); return 0; }
     catch(const std::exception& error) { std::fprintf(stderr,"Render Graph checks failed: %s\n",error.what()); return 1; }
 }

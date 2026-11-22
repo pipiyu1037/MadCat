@@ -11,8 +11,8 @@ int run(const ApplicationOptions& options, scene::Scene& scene, const assets::Mo
 {
     try
     {
-        if (!options.width || !options.height || options.prepareShadow)
-        { throw std::runtime_error("Scene application requires a nonzero extent and unshadowed frame input"); }
+        if (!options.width || !options.height)
+        { throw std::runtime_error("Scene application requires a nonzero extent"); }
         if (!scene.updateWorldTransforms()) { throw std::runtime_error("Startup world transform update failed"); }
         auto snapshot = render::extractDraws(scene, assets, camera, float(options.width)/float(options.height));
         if (!snapshot) { throw std::runtime_error(snapshot.error()); }
@@ -37,6 +37,16 @@ int run(const ApplicationOptions& options, scene::Scene& scene, const assets::Mo
             frame.draws = std::move(*resolved);
             for (auto& draw : frame.draws) { draw.transform.view = rhi::GeometryView::Lit; }
             frame.lighting = *lighting;
+            if (options.prepareShadow)
+            {
+                const auto matrix = render::buildDirectionalShadowMatrix(*lighting, options.shadowView);
+                if (!matrix) { return std::unexpected(matrix.error()); }
+                const auto snapshot = render::extractDraws(scene, assets, *matrix);
+                if (!snapshot) { return std::unexpected(snapshot.error()); }
+                auto shadows = render::resolveDraws(*geometry, *snapshot);
+                if (!shadows) { return std::unexpected(shadows.error()); }
+                frame.shadowDraws = std::move(*shadows);
+            }
             return frame;
         };
         return runGraphics(options, assets, *geometry, graphics);

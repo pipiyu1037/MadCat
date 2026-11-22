@@ -1,6 +1,6 @@
 ﻿param(
     [ValidateSet('Debug','Release')][string]$Configuration = 'Debug',
-    [ValidateSet('reference','ui','ui-failures','graph','graph-failures','graph-close-minimized','viewer','viewer-close-minimized','hdr','hdr-close-minimized','model','close-minimized','failures')][string]$Scenario = 'reference',
+    [ValidateSet('reference','ui','ui-failures','graph','graph-failures','graph-close-minimized','viewer','viewer-close-minimized','hdr','hdr-close-minimized','shadow','shadow-close-minimized','model','close-minimized','failures')][string]$Scenario = 'reference',
     [string]$BuildDirectory = 'build',
     [string]$ModelPath = ''
 )
@@ -192,12 +192,12 @@ function Set-Forward([bool]$Enabled) {
 function Set-View([bool]$Depth) {
     Set-DisplayView $(if ($Depth) { 'depth' } else { 'final' })
 }
-function Set-DisplayView([ValidateSet('final','depth','hdr-range')][string]$View) {
+function Set-DisplayView([ValidateSet('final','depth','hdr-range','shadow')][string]$View) {
     if ($script:displayView -eq $View) { return }
     $before=[regex]::Matches((Read-Log),'CustomPass: view').Count
     Click-Client 100 174
     # Fixed Latin font and layout: popup rows directly below the View combo.
-    $row=@('final','depth','hdr-range').IndexOf($View)
+    $row=@('final','depth','hdr-range','shadow').IndexOf($View)
     Click-Client 100 (196+17*$row)
     Wait-Condition { [regex]::Matches((Read-Log),'CustomPass: view').Count -gt $before -and
         (Read-Log) -match "CustomPass: view $View presented\." } 'viewer graph publication'
@@ -274,7 +274,7 @@ function Check-Pixels([string]$Label, [int]$Pose=0, [double]$ExposureEV=[double]
         $bitmap.Save((Join-Path $outputRoot "$name-$Label.png"))
         $exposure = if ($Pose -eq 1) { .25 } elseif ($Pose -eq 2) { 4.0 } else { 1.0 }
         if (-not [double]::IsNaN($ExposureEV)) { $exposure=[Math]::Pow(2,$ExposureEV) }
-        $background = if ($displayView -eq 'depth') { @(0,0,0) } elseif ($displayView -eq 'hdr-range') {
+        $background = if ($displayView -in @('depth','shadow')) { @(0,0,0) } elseif ($displayView -eq 'hdr-range') {
             Range-Color @(.04,.08,.16)
         } else { @((Tone .04 $exposure),(Tone .08 $exposure),(Tone .16 $exposure)) }
         if ($Scenario -eq 'model' -or $ModelPath) {
@@ -284,13 +284,13 @@ function Check-Pixels([string]$Label, [int]$Pose=0, [double]$ExposureEV=[double]
                 $px=[int]($size[0]*$x/60); $py=[int]($size[1]*$y/60)
                 if ($px -lt 360 -and $py -lt 290) { continue } # Exclude UI from model visibility.
                 $color = $bitmap.GetPixel($px,$py)
-                if (-not $forwardEnabled) {
+                if (-not $forwardEnabled -and $displayView -ne 'shadow') {
                     if ([Math]::Abs($color.R-$background[0]) -gt 3 -or [Math]::Abs($color.G-$background[1]) -gt 3 -or
                         [Math]::Abs($color.B-$background[2]) -gt 3) { throw 'Disabled Forward left scene geometry visible' }
                 }
                 if ([Math]::Abs($color.R-$background[0])+[Math]::Abs($color.G-$background[1])+[Math]::Abs($color.B-$background[2]) -gt 12) { ++$visible }
             } }
-            if ($forwardEnabled -and $visible -lt 5) { throw 'External model is not visible' }
+            if (($forwardEnabled -or $displayView -eq 'shadow') -and $visible -lt 5) { throw 'External model is not visible' }
             Write-Output "$Label model visibility: $visible samples (smoke only)"
             return
         }
@@ -312,7 +312,7 @@ function Check-Pixels([string]$Label, [int]$Pose=0, [double]$ExposureEV=[double]
             $shade=Encode (1-(1000.0/(1000-.1)-(.1*1000/(1000-.1))/3))
             $lit=@($shade,$shade,$shade)
         }
-        if ($Scenario -in @('ui','viewer','viewer-close-minimized','hdr','hdr-close-minimized')) {
+        if ($Scenario -in @('ui','viewer','viewer-close-minimized','hdr','hdr-close-minimized','shadow','shadow-close-minimized')) {
             # Independent body pixel: .06 sRGB style color converted to linear,
             # packed as UNORM8, alpha .94, blended over the tone-mapped scene.
             $color=$bitmap.GetPixel(30,255) # Empty body below controls/diagnostics.
@@ -321,7 +321,7 @@ function Check-Pixels([string]$Label, [int]$Pose=0, [double]$ExposureEV=[double]
             $sceneBackground=@(.04,.08,.16)
             for ($channel=0;$channel -lt 3;++$channel) {
                 $linear=$sceneBackground[$channel]*$exposure
-                $displayed=if ($displayView -eq 'depth') { 0 } elseif ($displayView -eq 'hdr-range') {
+                $displayed=if ($displayView -in @('depth','shadow')) { 0 } elseif ($displayView -eq 'hdr-range') {
                     $sceneBackground[$channel]
                 } else { $linear/(1+$linear) }
                 $expected=Encode ($body*$alpha+$displayed*(1-$alpha))
@@ -336,6 +336,18 @@ function Check-Pixels([string]$Label, [int]$Pose=0, [double]$ExposureEV=[double]
             $u=($x+.5)/$size[0]; $actualV=($y+.5)/$size[1]
             $inside = $forwardEnabled -and [Math]::Abs($u-$center) -lt $halfWidth -and [Math]::Abs($actualV-.5) -lt $halfHeight
             $expected = if (-not $inside) { $background } elseif ($Pose -eq 3 -and $displayView -ne 'depth') { @(0,0,0) } else { $lit }
+            if ($displayView -eq 'shadow') {
+                # Independent orthographic light projection, fixed half extent=2,
+                # distance=4, near=.1, far=8. Sample the 1024-square nearest texel.
+                $su=([Math]::Floor($u*1024)+.5)/1024
+                $sv=([Math]::Floor($actualV*1024)+.5)/1024
+                $angle=if ($Pose -eq 5) { 35*[Math]::PI/180 } else { 0.0 }
+                $worldX=4*($su-.5)/[Math]::Cos($angle)
+                $worldY=4*(.5-$sv)
+                $inside=[Math]::Abs($worldX-$offset) -lt .7 -and [Math]::Abs($worldY) -lt .525
+                $shade=if ($inside) { Encode (1-(4-[Math]::Sin($angle)*$worldX-.1)/7.9) } else { 0 }
+                $expected=@($shade,$shade,$shade)
+            }
             $color = $bitmap.GetPixel($x,$y); $actual=@($color.R,$color.G,$color.B)
             for ($channel=0; $channel -lt 3; ++$channel) {
                 if ([Math]::Abs($actual[$channel]-$expected[$channel]) -gt 3) {
@@ -502,9 +514,45 @@ try {
         [void][CustomPassWindowCheck]::SetWindowPos($windowState.Handle,[IntPtr](-1),30,30,850,650,0x10)
         Wait-Ready; Check-Pixels 'hdr-resized-before-minimize'
     }
+    if ($Scenario -eq 'shadow') {
+        $uiCount=[regex]::Matches((Read-Log),'UI renderer ready;').Count
+        $shadowCount=[regex]::Matches((Read-Log),'Shadow pipeline created;').Count
+        foreach ($view in @('shadow','depth','hdr-range','final','shadow')) {
+            Set-DisplayView $view; Check-Pixels "shadow-switch-$view"
+        }
+        $pipelineCount=[regex]::Matches((Read-Log),'Graphics pipeline created;').Count
+        Click-Client 700 500
+        Select-Pose 1; Check-Pixels 'shadow-ignores-exposure' 1
+        Select-Pose 3; Check-Pixels 'shadow-ignores-irradiance' 3
+        Select-Pose 4; Check-Pixels 'shadow-model-moved' 4
+        Select-Pose 5; Check-Pixels 'shadow-light-rotated' 5
+        Select-Pose 6; Check-Pixels 'shadow-camera-moved' 6
+        Select-Pose 0
+        $referenceLight=@(1,.8,.6); $referenceIrradiance=4*[Math]::PI
+        Set-ReferenceLight @(.25,.1,1) 2
+        Check-Pixels 'shadow-ignores-radiometry' 0 0 @(.25,.1,1) 2
+        Set-ReferenceLight @(1,.8,.6) (4*[Math]::PI)
+        if ([regex]::Matches((Read-Log),'Graphics pipeline created;').Count -ne $pipelineCount) { throw 'Shadow scene edits rebuilt display pipelines' }
+        Set-Forward $false; Check-Pixels 'shadow-forward-off'
+        Set-DisplayView 'depth'; Check-Pixels 'shadow-camera-depth-off'
+        Set-DisplayView 'shadow'; Check-Pixels 'shadow-still-visible'
+        Set-DisplayView 'final'; Check-Pixels 'shadow-final-off'
+        Set-DisplayView 'shadow'; Check-Pixels 'shadow-again'
+        Set-Forward $true; Check-Pixels 'shadow-forward-on'
+        if ([regex]::Matches((Read-Log),'UI renderer ready;').Count -ne $uiCount -or
+            [regex]::Matches((Read-Log),'Shadow pipeline created;').Count -ne $shadowCount) { throw 'Shadow view switch rebuilt UI/shadow pipeline' }
+        [void][CustomPassWindowCheck]::SetWindowPos($windowState.Handle,[IntPtr](-1),30,30,850,650,0x10)
+        Wait-Ready; Check-Pixels 'shadow-resized'
+        if ((Read-Log) -match 'graph request \d+ rejected') { throw 'Valid shadow request rejected' }
+    }
+    if ($Scenario -eq 'shadow-close-minimized') {
+        Set-DisplayView 'shadow'; Check-Pixels 'shadow-before-minimize'
+        [void][CustomPassWindowCheck]::SetWindowPos($windowState.Handle,[IntPtr](-1),30,30,850,650,0x10)
+        Wait-Ready; Check-Pixels 'shadow-resized-before-minimize'
+    }
     [void][CustomPassWindowCheck]::ShowWindow($windowState.Handle,6)
     Wait-Condition { (Read-Log) -match 'rendering paused;' } 'minimize'
-    if ($Scenario -notin @('close-minimized','graph-close-minimized','viewer-close-minimized','hdr-close-minimized')) {
+    if ($Scenario -notin @('close-minimized','graph-close-minimized','viewer-close-minimized','hdr-close-minimized','shadow-close-minimized')) {
         [void][CustomPassWindowCheck]::ShowWindow($windowState.Handle,9)
         Wait-Ready; Check-Pixels 'resumed'
         if ($Scenario -eq 'graph') { Set-Forward $true; Check-Pixels 'enabled-after-resume' }
@@ -519,13 +567,13 @@ try {
             $forwardEnabled=$true
             Check-Pixels 'defaults-final'
         }
-        if ($Scenario -eq 'hdr') {
+        if ($Scenario -in @('hdr','shadow')) {
             Set-Forward $false
             $beforeDefaults=[regex]::Matches((Read-Log),'CustomPass: view final presented\.').Count
             Click-Client 80 118
-            Wait-Condition { [regex]::Matches((Read-Log),'CustomPass: view final presented\.').Count -gt $beforeDefaults } 'HDR defaults restoration'
+            Wait-Condition { [regex]::Matches((Read-Log),'CustomPass: view final presented\.').Count -gt $beforeDefaults } 'viewer defaults restoration'
             $displayView='final'; $forwardEnabled=$true
-            Check-Pixels 'hdr-defaults-final'
+            Check-Pixels 'viewer-defaults-final'
         }
     }
     [void][CustomPassWindowCheck]::PostMessage($windowState.Handle,0x10,[IntPtr]::Zero,[IntPtr]::Zero)
@@ -537,6 +585,9 @@ try {
         $pipelines -ne [regex]::Matches($log,'Swapchain destroyed\.').Count -or
         $pipelines -ne [regex]::Matches($log,'(?s)Frame commands retired.*?Clear renderer destroyed.*?Triangle pipeline destroyed.*?Swapchain destroyed').Count -or
         $log -notmatch '(?s)Swapchain destroyed.*Vertex buffer destroyed.*Shader Module destroyed.*Device destroyed.*Surface destroyed.*Instance destroyed') { throw 'Application destruction count/order mismatch' }
+    if ([regex]::Matches($log,'Shadow pipeline created;').Count -ne $pipelines -or
+        [regex]::Matches($log,'Shadow pipeline destroyed\.').Count -ne $pipelines) { throw 'Shadow pipeline lifetime mismatch' }
+    if ($Scenario -in @('shadow','shadow-close-minimized') -and $log -notmatch 'Shadow -> DepthView -> UI -> Present') { throw 'Shadow viewer graph is missing' }
     foreach ($resource in @('Vertex buffer','Index buffer')) {
         if ([regex]::Matches($log,"$resource uploaded;").Count -ne 1 -or [regex]::Matches($log,"$resource destroyed\.").Count -ne 1) { throw 'Startup geometry was duplicated or leaked' }
     }

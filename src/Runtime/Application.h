@@ -16,6 +16,8 @@ struct ApplicationOptions
     graph::GraphicsGraphFactory graphFactory;
     std::filesystem::path shaderDirectory; // empty: configured build/shaders/triangle
     bool prepareDepthView = false, prepareShadow = false;
+    // Scene entry: fixed world-space coverage for optional shadow snapshots.
+    render::DirectionalShadowView shadowView;
     rhi::ColorFormat forwardColorFormat = rhi::ColorFormat::Presentation;
 };
 struct FrameInfo { float aspect; double deltaSeconds; };
@@ -60,8 +62,8 @@ struct SceneCallbacks
 // packs/uploads startup geometry once and resolves fresh per-frame snapshots.
 // Transform/light edits and instance deletion/restoration using startup geometry
 // are supported; new geometry/materials require restarting this run.
-// This first Scene entry supplies unshadowed forward draws. Advanced shadow
-// snapshots are provided explicitly through runGraphics by existing Sandbox.
+// Forward draws remain unshadowed. prepareShadow additionally extracts light-
+// space shadowDraws with shadowView coverage, independent of the camera.
 [[nodiscard]] int run(const ApplicationOptions& options, scene::Scene& scene,
     const assets::ModelAssets& assets, ecs::Entity camera, const SceneCallbacks& callbacks = {});
 }

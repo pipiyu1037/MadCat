@@ -24,8 +24,10 @@ cmake --build build --config Debug --target CustomPass MadCatShaders CustomPassS
 | 3 | 曝光 +2 EV，亮度乘以 4 |
 | 4 | 关闭方向光，恢复默认曝光和位置 |
 | 5 | 移动模型，恢复默认曝光和灯光 |
+| 6 | 方向光绕世界 Y 轴旋转 35°，恢复默认曝光、模型与相机 |
+| 7 | 相机沿世界 X 移动 .4，恢复默认曝光、模型与灯光 |
 
-曝光变化沿用已有图与管线，只更新本帧参数。
+每个快捷键选择完整预设，未指定的位姿恢复默认；Restore defaults 也恢复相机和光源位姿。曝光变化沿用已有图与管线，只更新本帧参数。
 
 ## 从场景颜色到显示结果
 
@@ -179,6 +181,29 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/CustomPassWindowChecks
 `hdr` 用解析平面与独立的半精度存储／sRGB 参考检查三种视图切换、普通 RGB 预览、等于 1／小于 1、分别只有 R／G／B 大于 1、曝光独立性、关灯／模型移动、Forward 开关、resize、最小化恢复和默认恢复。每状态检查 35 个场景像素及一个 UI 混合参考点；普通参数修改不创建新管线。`hdr-close-minimized` 在 HDR 视图最小化后直接退出；`graph-failures` 同时覆盖 HDR、深度及最终画面的候选失败／恢复与资源回收。
 
 Debug／Release 的 CustomPass、GraphSwitchChecks、CustomPassChecks 构建及各 16 组 CPU 图检查通过，无编译警告；配置仅保留既有 GLM 弃用提示。新 Shader 包编译／SPIR-V 验证和 12 项编译／发布失败恢复检查通过，反汇编核对 Fragment 入口、set 0 的 image 0／sampler 1 及无 Push Constants。两种配置的 hdr 各 24 状态 × 35 个场景像素及 UI 混合参考点通过，涵盖等于 1／小于 1、各 RGB 分量独立超范围和曝光独立性；各 9 个候选请求（4 次发布／5 次保留）通过，覆盖三种视图的失败回退及资源回收。Debug 深度查看 19 状态、参数面板九状态回归，以及 Suzanne HDR 显示／resize／最小化直接退出冒烟通过，截图已查看。设备为 RTX 5060 Ti／NVIDIA 617.42，RGBA16F 97／sRGB 50／D32_SFLOAT 126；Debug 同步验证无 warning／error，Release 未主动启用验证层。旧 Shader 源码及产物未重编；其他 GPU／DPI、真实 GPU 等待／重置／提交失败及性能未验证。
+
+## 阴影图查看
+
+View 选择 Shadow map 后，同一实验执行 `Shadow → DepthView → UI → Present`。Shadow 使用独立的光源视角绘制列表，清除并写入 1024 × 1024 深度图；DepthView 声明采样其输出版本，显示 `1 - lightDepth` 灰度，再由 sRGB 附件编码。背景为黑色，近处较亮。该视图使用正交深度，范围内的灰度与光源视空间距离呈线性关系。
+
+此模式不执行 Forward，也不分配 SceneHDR／SceneDepth。Forward 复选框仍保存选择，切回其他视图后生效；阴影图在关闭 Forward 时继续可见。模型和光源方向影响阴影图，相机位姿、曝光、灯光 RGB／辐照度不影响它。单击场景后按 5 移动模型、6 旋转光源、7 移动相机即可比较，按 1 恢复默认位姿。Restore defaults 同时恢复 Final image、Forward 开启、参数和位姿。整张阴影图铺满主视口，窗口宽高比会拉伸显示比例。
+
+实验设置 `application.prepareShadow=true` 和 `prepareDepthView=true`，运行层复用已有 Shadow／DepthView 管线和 Shader。Scene 入口按更新后的世界变换提取光照，使用 `ApplicationOptions::shadowView` 构造光源矩阵，再提取并解析独立 `RenderFrame::shadowDraws` 快照。默认覆盖中心 `(0,0,0)`、XY 半范围 `(2,2)`、光源距离 4、near=.1／far=8；可在调用 `run` 前修改覆盖配置。范围外几何会被裁剪，当前没有自动适配或级联阴影。Final image 继续使用原无投射阴影的 Lambert／HDR 流程。
+
+每张交换链图像持有自己的阴影纹理和采样绑定。图声明 Depth→Sampled 和下一帧 Sampled→Depth，提交成功后登记状态；视图切换沿用候选图准备、等待完成、命令退役和统一发布，失败保留当前图，resize 保持固定阴影分辨率并沿用生效配置。UI 继续通过已声明的字体和显示颜色叠加，没有隐式读取图内纹理。
+
+可重复执行（`Release` 可替换 `Debug`）：
+
+```powershell
+cmake --build build --config Debug --target CustomPass GraphSwitchChecks MadCatRenderGraphChecks
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/CustomPassWindowChecks.ps1 -Configuration Debug -Scenario shadow
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/CustomPassWindowChecks.ps1 -Configuration Debug -Scenario shadow-close-minimized
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/CustomPassWindowChecks.ps1 -Configuration Debug -Scenario graph-failures
+```
+
+`shadow` 用独立解析平面、光源正交投影和 1024 最近邻采样验证四种视图切换、模型／光源变化、相机和显示参数独立性、Forward 独立性、resize、最小化恢复和默认恢复。`shadow-close-minimized` 检查阴影视图最小化直接退出，也可传入 `-ModelPath assets/models/Lantern/Lantern.gltf` 做贴图模型可见性冒烟。候选检查覆盖四种视图，阴影视图生效后注入第二张图像准备失败、异常和无效请求，验证保留有效图及后续恢复。
+
+2026-11-22 Debug／Release 构建及各 17 组 CPU 图检查通过，shadow 各 21 状态 × 35 个场景像素和 UI 混合参考点、graph-failures 各 9 请求通过。Debug 另通过参数面板九状态、BasicScene 七状态、应用五项和 CustomPass 六项失败回归，以及 Lantern 阴影显示／resize／最小化直接退出冒烟；截图已查看。实际设备为 RTX 5060 Ti／NVIDIA 617.42，RGBA16F 97／sRGB 50／D32_SFLOAT 126；Debug 同步验证无 warning／error，Release 未主动启用验证层。本次沿用既有 Shader 产物；其他 GPU／DPI、真实 GPU 等待／重置／提交失败和性能未验证。
 
 ## 添加自己的实验和 Shader
 

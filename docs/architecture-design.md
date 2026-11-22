@@ -1,6 +1,6 @@
 # MadCat 架构设计
 
-更新日期：2026-11-19。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
+更新日期：2026-11-22。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
 
 ## 文档职责与设计状态
 
@@ -86,7 +86,7 @@ return madcat::runtime::run(application, scene, assets, camera, callbacks);
 
 这里的实验入口与 Pass 的声明／准备／执行是两个层次。实验负责场景与算法组合，具体 Pass 记录 GPU 工作；graphFactory 中可显式调用 Pass 的准备函数，建图不必每帧进行。场景几何仍准备固定的 Forward 和可选 Shadow／DepthView 管线；CustomPass 另通过 RHI 工厂准备图形管线，并把 Prepared 显式交给节点执行。
 
-Scene 入口自动提取无投射阴影的 Lambert 绘制和光照。进阶入口 `runGraphics` 接收启动 GeometryBatch 与逐帧 RenderFrame 回调，供 Sandbox 保留独立相机／阴影绘制和参考场景。启动几何／材质集合固定，支持 Transform／相机／光照修改及已上传几何的实例变化；引入新几何或更新资产材质需重新启动。默认 Shader 路径来自构建配置，ApplicationOptions 可显式覆盖；尚无安装包资源定位。
+Scene 入口自动提取无投射阴影的 Lambert 绘制和光照；`prepareShadow=true` 时另按 `ApplicationOptions::shadowView` 的显式世界覆盖生成光源矩阵，提取并解析独立 `RenderFrame::shadowDraws` 快照，供查看图使用，不自动启用 Forward 阴影比较。进阶入口 `runGraphics` 接收启动 GeometryBatch 与逐帧 RenderFrame 回调，供 Sandbox 保留独立相机／阴影绘制和参考场景。启动几何／材质集合固定，支持 Transform／相机／光照修改及已上传几何的实例变化；引入新几何或更新资产材质需重新启动。默认 Shader 路径来自构建配置，ApplicationOptions 可显式覆盖；尚无安装包资源定位。
 
 两条入口均返回 0 表示正常关闭，非零表示失败。回调异常不越过窗口 C 回调；帧数据失败发生在 acquire 前，准备失败与提交后回调异常均走受控清理。presented 仅表示呈现请求成功，不能当作 GPU／呈现完成信号。运行层为单线程、单应用使用，调用方配置、场景、资产及回调捕获须覆盖整个 run 调用。
 
@@ -97,7 +97,7 @@ Scene 入口自动提取无投射阴影的 Lambert 绘制和光照。进阶入�
 - 应用运行层负责窗口与事件、设备、帧循环和呈现，通过既有 Scene、RenderScene、RenderGraph 和 RHI 接口组织工作。已实现受限整图候选的安全替换与失败保留；Shader 包版本发布和通用单独 Prepared 更新仍待实现。
 - 普通 Pass 通过显式管线、绑定和 Draw／Dispatch 表达工作。现有 `displayDepth()`、按附件选择 Forward／Shadow 管线及固定帧参数工厂是当前验证路径的限制；后续用自定义 Pass 场景驱动接口收敛，避免继续按算法名称扩充通用执行器。
 
-BasicScene、CustomPass 与 Sandbox 共用运行层，前两者消费 Scene 入口，Sandbox 消费帧数据入口。CMake 将后端编入 MadCatRHI，将运行组织及 RenderScene 材质适配编入 MadCatRuntime，CPU Scene／RenderScene／图检查目标继续独立。[CustomPass](../examples/CustomPass/main.cpp)已以 HDR／显示转换验证自定义 Shader、显式管线／绑定、图内颜色资源与参数传递；参数面板、Forward 图开关、主相机深度和 HDR 范围查看已实现，运行期 Shader 更新与其他纹理查看按已有目标逐步接入。
+BasicScene、CustomPass 与 Sandbox 共用运行层，前两者消费 Scene 入口，Sandbox 消费帧数据入口。CMake 将后端编入 MadCatRHI，将运行组织及 RenderScene 材质适配编入 MadCatRuntime，CPU Scene／RenderScene／图检查目标继续独立。[CustomPass](../examples/CustomPass/main.cpp)已以 HDR／显示转换验证自定义 Shader、显式管线／绑定、图内颜色资源与参数传递；参数面板、Forward 图开关、主相机深度、HDR 范围和阴影图查看已实现，运行期 Shader 更新与其他纹理查看按已有目标逐步接入。
 
 ## 模块边界和数据流
 
@@ -934,6 +934,14 @@ CustomPass 以 `createDepthTexture` 声明同窗口大小、可采样的 SceneDe
 [hdr-range.slang](../examples/CustomPass/hdr-range.slang) 直接读取 RGBA16F 存储值，在曝光和 ToneMap 之前判断任一 RGB 分量是否严格大于 1；符合时输出洋红色，否则夹到 0～1 预览，由 sRGB 附件编码一次。标记与曝光独立，灯光和场景更新改变源 HDR。该显示不是像素数值拾取，不能用洋红色唯一地区分原始洋红色材质，也没有独立通道、亮度、NaN 或 HDR 显示器输出能力。
 
 实验的 Shader 根目录由 CMake 注入 `build/shaders`；Final 准备 `custom-display`，HDR 准备 `custom-hdr-range`，Depth 使用运行层预备的深度管线。新包通过 `CustomPassHdrShaders` 手动编译和验证，C++ 构建不隐式触发编译。GPU 管线、图内纹理和 Descriptor 继续按图持有及 GPU 命令退役条件回收；没有实现运行期 Shader 包一致快照或手动更新。使用与验证见[HDR 范围查看](custom-pass.md#hdr-范围查看)。
+
+### CustomPass 阴影图查看（当前实现）
+
+2026-11-22 增加 `DisplayView::Shadow`。该分支仅创建 1024 × 1024 的 DirectionalShadow，连接 `Shadow → DepthView → UI → Present`，不创建主相机 HDR／深度附件或执行 Forward。Forward 开关按完整 DisplaySettings 保存，切回其他模式时使用；阴影生成与该开关独立。Shadow 节点参数使用 Scene 入口生成的独立光源绘制快照，不复用相机绘制矩阵；模型世界变换与方向光方向影响结果，相机位姿、曝光和光源辐照度不影响结果。
+
+`ApplicationOptions::shadowView` 使用既有 DirectionalShadowView，默认中心为原点、XY 半范围 2、距离 4、near=.1／far=8；分辨率由实验图确定。Scene 入口在 update／世界传播后，先提取光照，再构造光源矩阵并提取、解析 shadowDraws；失败在 acquire 前诊断，不提交部分帧。启动几何、材质和 Shadow 管线沿用原有保活规则，普通数值编辑不重建图。
+
+查看节点显式读取 Shadow 深度输出，图安排 Depth→Sampled 和后续 Sampled→Depth，同步状态仅在成功提交后登记。候选全部成功后等待 GPU／呈现并退役命令，再统一替换；失败保留有效图，resize 使用最后成功的配置并保持固定光源分辨率。正交深度显示为 `1 - lightDepth`，单方向光固定覆盖，没有自动范围、级联、通用纹理枚举或 UI 缩略图。运行期 Shader 更新仍待实现。使用与检查见[阴影图查看](custom-pass.md#阴影图查看)。
 
 ## 实现参考建议
 

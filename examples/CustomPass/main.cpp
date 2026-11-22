@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <utility>
 #include <limits>
+#include <glm/gtc/quaternion.hpp>
 
 #ifdef _WIN32
 int wmain(int argc, wchar_t** argv)
@@ -68,6 +69,7 @@ int main(int argc, char** argv)
         application.title="MadCat CustomPass";
         application.forwardColorFormat=rhi::ColorFormat::Rgba16Float;
         application.prepareDepthView=true;
+        application.prepareShadow=true;
         const auto shaderRoot=std::filesystem::path(u8"" MADCAT_EXAMPLE_SHADERS);
         experiment::DisplaySettings requestedGraph,activeGraph,lastPresentedGraph;
         application.graphFactory=experiment::makeDisplayGraph(displayParameters,shaderRoot,activeGraph);
@@ -101,6 +103,16 @@ int main(int argc, char** argv)
             lightParameters.color={controls.color[0],controls.color[1],controls.color[2]};
             lightParameters.irradiance=controls.irradiance;
         };
+        auto setPose=[&](int preset) {
+            modelPose=initialPose;
+            modelPose.translation.x+=preset==4 ? .45f : 0;
+            auto cameraTransform=cameraPose;
+            cameraTransform.translation.x+=preset==6 ? .4f : 0;
+            scene::LocalTransform lightPose;
+            if (preset==5) { lightPose.rotation=glm::angleAxis(glm::radians(35.f),glm::vec3(0,1,0)); }
+            if (!scene.setLocalTransform(instance->root,modelPose) || !scene.setLocalTransform(camera,cameraTransform) ||
+                !scene.setLocalTransform(light,lightPose)) { throw std::runtime_error("Scene edit failed"); }
+        };
         runtime::SceneCallbacks callbacks;
         callbacks.graphRequest=[&] { return std::exchange(pendingGraph,std::nullopt); };
         callbacks.graphUpdated=[&](const runtime::GraphUpdate& update) {
@@ -119,9 +131,8 @@ int main(int argc, char** argv)
             if (ImGui::Button("Restore defaults"))
             {
                 draft=Controls{}; edited=true; mode=0;
-                modelPose=initialPose;
+                setPose(0);
                 if (requestedGraph!=experiment::DisplaySettings{} || activeGraph!=experiment::DisplaySettings{}) { requestGraph({}); }
-                if (!scene.setLocalTransform(instance->root,modelPose)) { throw std::runtime_error("Scene edit failed"); }
             }
             ImGui::SameLine();
             auto graphSettings=requestedGraph;
@@ -129,7 +140,7 @@ int main(int argc, char** argv)
             ImGui::TextUnformatted("Ctrl+click a slider to type a value.");
             ImGui::Text("Active graph: Forward %s",activeGraph.forwardEnabled ? "on" : "off");
             int view=static_cast<int>(graphSettings.view);
-            if (ImGui::Combo("View",&view,"Final image\0Camera depth\0HDR range\0")) {
+            if (ImGui::Combo("View",&view,"Final image\0Camera depth\0HDR range\0Shadow map\0")) {
                 graphSettings.view=static_cast<experiment::DisplayView>(view); requestGraph(graphSettings);
             }
             ImGui::Text("Active view: %s",experiment::displayViewName(activeGraph.view));
@@ -138,20 +149,23 @@ int main(int argc, char** argv)
                 ImGui::TextUnformatted("Magenta: any RGB > 1; else RGB.");
                 ImGui::TextUnformatted("Before exposure and tone mapping.");
             }
+            if (activeGraph.view==experiment::DisplayView::Shadow) {
+                ImGui::TextUnformatted("1 - light depth (orthographic)");
+                ImGui::TextUnformatted("1024 x 1024; independent of Forward.");
+            }
             if (!graphDiagnostic.empty()) { ImGui::TextWrapped("%s",graphDiagnostic.c_str()); }
             if (!diagnostic.empty()) { ImGui::TextWrapped("%s",diagnostic.c_str()); }
             ImGui::PopItemWidth(); ImGui::End();
             if (edited) { request(draft); }
         };
         callbacks.keyPressed=[&](char key) {
-            if (key<'1' || key>'5') { return; }
+            if (key<'1' || key>'7') { return; }
             mode=key-'1';
             Controls draft;
             draft.exposure=mode==1 ? -2.f : mode==2 ? 2.f : 0.f;
             draft.irradiance=mode==3 ? 0.f : 4*3.14159265f;
             request(draft);
-            modelPose.translation.x=initialPose.translation.x+(mode==4 ? .45f : 0);
-            if (!scene.setLocalTransform(instance->root,modelPose)) { throw std::runtime_error("Scene edit failed"); }
+            setPose(mode);
         };
         callbacks.presented=[&] {
             if (activeGraph.forwardEnabled!=lastPresentedGraph.forwardEnabled) {

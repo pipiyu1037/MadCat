@@ -40,6 +40,8 @@ View 下拉框可选择 Final image 或 Camera depth。深度模式在主视口�
 
 View 还可选择 HDR range，直接检查 ToneMap 前的 SceneHDR。任一 RGB 分量大于 1 时整像素标记为洋红色，否则显示 0～1 的线性 RGB，由 sRGB 附件编码；曝光不影响这个视图。使用与阈值验证见[HDR 范围查看](docs/custom-pass.md#hdr-范围查看)。
 
+Shadow map 显示同一场景的方向光深度，独立执行 `Shadow → DepthView → UI → Present`，关闭 Forward 后仍可查看。按 6 旋转光源、7 移动相机、1 恢复默认位姿，可以检查光源视角与主相机的区别；Restore defaults 也恢复这些位姿。固定阴影覆盖范围与验证见[阴影图查看](docs/custom-pass.md#阴影图查看)。
+
 已下载 [Lantern](assets/models/Lantern/README.md) 和 [Box](assets/models/Box/README.md) 原始 glTF 场景，附固定来源、许可与 SHA256 清单。可用 `--fit` 在示例侧居中缩放显示：
 
 ```powershell
