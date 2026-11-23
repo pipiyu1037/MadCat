@@ -11,7 +11,7 @@ cmake --build build --config Debug --target CustomPass MadCatShaders CustomPassS
 .\build\Debug\CustomPass.exe
 ```
 
-默认显示 Suzanne；也可传入一个 glTF／GLB 文件路径。Shader 编译是手动目标，修改 Slang 后关闭程序、构建对应目标，再重新启动：`CustomPassShaders` 编译最终显示，`CustomPassHdrShaders` 编译 HDR 范围查看；修改 C++ 后构建 `CustomPass`。编译失败保留磁盘上上一份已验证产物，当前没有运行期 Shader 包更新流程。
+默认显示 Suzanne；也可传入一个 glTF／GLB 文件路径。启动前先构建 `CustomPassShaders` 和 `CustomPassHdrShaders`，分别生成最终显示和 HDR 范围查看的基础产物。运行中修改这两个用户 Shader 后，点击 Compile + apply 或单击场景后按 R，手动编译并安全应用；修改 C++ 或内置 Forward／Shadow／DepthView Shader 时仍需重新构建并重启。当前编译器保持固定版本，编译失败保留有效版本，完整流程见[安全手动 Shader 更新](#安全手动-shader-更新)。
 
 仓库另包含 [Lantern](../assets/models/Lantern/README.md) 和 [Box](../assets/models/Box/README.md)。`CustomPass.exe --fit assets/models/Lantern/Lantern.gltf` 会按选中场景的节点世界空间 AABB 居中、等比缩放；不带 `--fit` 时保留原有 .7 模型缩放。源文件、节点和贴图不作转换。
 
@@ -117,7 +117,7 @@ callbacks.graphUpdated = [&](const madcat::runtime::GraphUpdate& update) {
 
 RHI 先为所有交换链图像准备候选图和中间资源。任一图编译／准备失败或准备回调抛异常，全部候选回收，当前图保持有效。全部成功后，等待前次 acquire／submit／present 完成，再重置命令池并统一替换图引用。交换链呈现状态及共享深度状态保留，新中间资源从未初始化状态开始。切换不重建交换链、UI 后端、场景几何或材质；当前会重新准备各图的显示管线和 HDR 中间资源，没有缓存或性能承诺。
 
-窗口 resize／恢复使用最后成功的工厂。首次启动、尺寸重建、GPU 完成等待或命令重置失败仍可能停绘；当前没有旧交换链保留或设备丢失恢复。候选发布验证编译、准备和最终 Present 交接，不能证明任意用户 C++ execute 都会成功；执行／提交失败仍停止渲染。Shader 包一致性、运行期编译与手动应用流程尚未接入，修改 Shader 仍按前文关闭程序后重编。
+窗口 resize／恢复使用最后成功的工厂。首次启动、尺寸重建、GPU 完成等待或命令重置失败仍可能停绘；当前没有旧交换链保留或设备丢失恢复。候选发布验证编译、准备和最终 Present 交接，不能证明任意用户 C++ execute 都会成功；执行／提交失败仍停止渲染。显示 Shader 的完整快照、运行期手动编译和应用复用这条候选发布路径，见[安全手动 Shader 更新](#安全手动-shader-更新)。
 
 专项检查：
 
@@ -205,6 +205,66 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/CustomPassWindowChecks
 
 2026-11-22 Debug／Release 构建及各 17 组 CPU 图检查通过，shadow 各 21 状态 × 35 个场景像素和 UI 混合参考点、graph-failures 各 9 请求通过。Debug 另通过参数面板九状态、BasicScene 七状态、应用五项和 CustomPass 六项失败回归，以及 Lantern 阴影显示／resize／最小化直接退出冒烟；截图已查看。实际设备为 RTX 5060 Ti／NVIDIA 617.42，RGBA16F 97／sRGB 50／D32_SFLOAT 126；Debug 同步验证无 warning／error，Release 未主动启用验证层。本次沿用既有 Shader 产物；其他 GPU／DPI、真实 GPU 等待／重置／提交失败和性能未验证。
 
+## 安全手动 Shader 更新
+
+在 `examples/CustomPass/display.slang` 修改 ToneMap 算法，或在 `hdr-range.slang` 修改 HDR 检查逻辑，保存后点击 **Compile + apply**。也可单击场景区域后按 **R**；UI 输入框占用键盘时不会触发实验快捷键。两份用户源文件会先被复制，再编译全部 Vertex／Fragment 阶段并校验；完整候选成功后通过整图切换应用。普通曝光等参数编辑继续使用原有参数快照。
+
+Active view 旁的 Shader 数字表示本次运行中成功发布的版本，初始为 0。失败显示 Update failed，悬停该状态查看诊断；完整编译日志和版本产物保存在 `build/shader-updates/<独立版本目录>/`。修复源文件后再次触发即可恢复，失败不会推进版本号或切换画面。Compile + apply 是同步的开发操作，编译期间窗口暂停更新，超过 60 秒会终止受管编译进程及其子进程并保留旧版本。
+
+启动时会锁定离线构建使用的 `.compile.lock`，把两个已发布包复制到独立目录，验证源码和 SPIR-V 的 manifest SHA256，然后检查实际接口。启动没有有效版本时校验失败会退出；已运行的程序不直接读取可变的 `build/shaders` 目录。窗口缩放、视图切换和 Forward 开关继续使用最后生效的版本，即使源码尚有编译错误，也不会重新读取未应用的文件。运行中重建离线 Shader 目标不会自动改变当前画面；按钮会重新编译保存的用户源文件。
+
+需要配置时能找到 Slang、spirv-val、spirv-dis 和 **spirv-cross**；后者来自本机 Vulkan SDK 1.4.363.0，通过 `MADCAT_SPIRV_CROSS` 配置，作为外部反射工具使用，不增加链接库。工具路径变化后重新执行 `cmake -S . -B build`。候选保存 SPIRV-Cross 的 JSON 反射结果；它用于核对既有固定接口，资源用途与同步仍由 Pass 显式声明。[SPIRV-Cross 官方说明](https://github.com/KhronosGroup/SPIRV-Cross#features)
+
+本轮更新只接受当前显示 ABI：生成三角形的 VertexIndex／Position、location 0 的 vec2 UV、片元 location 0 的 vec4 输出；片元可使用 set 0 image binding 0／sampler binding 1。ToneMap 的 Push Constants 限 offset 0 的一个 float，HDR 检查无 Push Constants；编译器消去未使用资源是允许的。新 Descriptor、数组、不同常量结构、插值修饰、额外设备 capability／extension 等会在 GPU 准备前拒绝。改变资源用途、Pass 连接或 C++ 接口仍需修改并重建程序，没有自动改写绑定或图声明。
+
+所有交换链图像的工厂按值捕获同一版本目录。当前视图的图和管线准备全部成功后，运行层等待 GPU／呈现完成、退役旧命令并统一发布；成功通知后才更新实验的有效目录和版本号。准备失败保持有效工厂与旧目录。Depth／Shadow 模式也能发布新的用户 Shader 版本，切回 Final／HDR 时再从该版本准备对应管线；内置深度、阴影和场景 Shader 保持启动版本。没有通用单独 Prepared 替换、兼容更新复用图计划或异步编译。
+
+生成目录保留源码、manifest、SPIR-V、反射结果和日志以便复现，不自动清理。磁盘上的旧产物不表示旧 GPU 管线仍然存活；GPU 对象仍按命令退役规则回收。程序运行时应保留这些目录，供后续窗口重建使用。可通过 `--shader-sources <目录>` 指向另一份同时包含 `display.slang`／`hdr-range.slang` 的实验源码，默认使用本例源码目录。
+
+```powershell
+cmake --build build --config Debug --target CustomPass CustomPassUpdateChecks MadCatRenderGraphChecks
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/CustomPassWindowChecks.ps1 -Configuration Debug -Scenario reload
+```
+
+`CustomPassUpdateChecks` 验证启动复制、重复目录拒绝、完整编译、语法／入口失败、Descriptor、常量、数组、阶段接口、额外 capability、哈希不符和缺失 manifest，共 13 项。`reload` 使用带空格与中文的独立源码目录，实际点击按钮并重复触发 R，检查最终图像公式和 HDR 标记更新、三类失败保留、恢复、跨视图、resize 和最小化恢复；每状态以独立参考计算 35 个场景像素和 UI 混合。
+
+2026-11-23 Debug／Release 的 CustomPass、GraphSwitchChecks、CustomPassChecks、BasicScene、ApplicationChecks、MadCat 构建及各 17 组 CPU 图检查通过，无编译警告；配置仅有既有 GLM 弃用提示。CustomPassUpdateChecks 的 13 项通过，两种配置 reload 各 17 状态 × 35 个场景像素及 UI 混合参考通过，实际验证 4 次成功、3 次拒绝和后续恢复，涵盖按钮／重复 R、带空格与中文的源码路径、两包更新、跨视图与 resize／最小化恢复。Debug 原显示八状态、参数面板九状态、候选图九请求、BasicScene 七状态、应用五项失败和 Lantern 阴影／最小化退出冒烟通过；更新后画面与拒绝状态截图已检查。GPU 为 RTX 5060 Ti／NVIDIA 617.42，RGBA16F 97／sRGB 50／D32_SFLOAT 126；Debug 同步验证无 warning／error，Release 未主动启用验证层。真实编译超时、GPU 等待／提交失败、其他 GPU／DPI 与性能未验证。
+
+## PBR 直接光照实验
+
+构建后可运行常量因子的 Metallic-Roughness PBR：
+
+```powershell
+cmake --build build --config Debug --target CustomPass MadCatShaders CustomPassShaders CustomPassHdrShaders
+.\build\Debug\CustomPass.exe --pbr-spheres
+.\build\Debug\CustomPass.exe --pbr --fit assets/models/Lantern/Lantern.gltf
+```
+
+`--pbr-spheres` 创建原创的两行五列材质球，上行为介质（metallic=0）、下行为金属（metallic=1），从左到右 roughness 为 0、.2、.4、.7、1。该选项提供自己的场景与缩放，不能与模型路径或 `--fit` 同用。`--pbr` 则使用模型导入的两个因子和已有基础色／贴图；默认启动仍使用 Lambert。外部模型的 MR、法线、发光等贴图尚不参与该实验，外观不代表完整 glTF PBR。
+
+光照为单方向光 GGX／Smith／Schlick 直接光，无环境光。粗糙度最小按 .05 计算，辐亮度写入 RGBA16F 前限制到 65504。最终画面复用曝光和 Reinhard 转换；HDR range 中，青色表示 NaN／Inf，洋红色表示有限 RGB 中至少一个分量大于 1。按 6 旋转光源、7 移动相机、1 恢复；模型移动、关灯、视图／Forward 开关及窗口恢复继续可用。材质因子在启动时固定，面板调整光源和曝光。
+
+对应检查使用独立的平面求交和双精度 BRDF 参考，覆盖曝光、关灯、模型／相机／光源变化、HDR／深度切换、resize 和最小化恢复；材质球检查属于可见性冒烟。
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/CustomPassWindowChecks.ps1 -Configuration Debug -Scenario pbr -Metallic 1 -Roughness 0
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/CustomPassWindowChecks.ps1 -Configuration Debug -Scenario pbr-spheres
+```
+
+内置几何 Shader 仍需通过 `MadCatShaders` 重编后重启；Compile + apply 的两个用户显示包边界保持。当前数据布局与支持范围见[常量因子 PBR](architecture-design.md#常量因子-pbr当前实现)。
+
+## Cornell Box 场景
+
+```powershell
+.\build\Debug\CustomPass.exe --cornell-box
+```
+
+该预设加载仓库中的 [NVIDIA Cornell Box](../assets/models/CornellBox/README.md)，自动应用朝向、居中缩放、45° 相机与斜向方向光，默认启用 PBR。模型路径由预设提供，不能同时传入自己的模型路径或 `--pbr-spheres`。资产包括两个共享立方体 Mesh 的盒子，八个几何实例共用 40 顶点／60 索引的上传数据。
+
+Final image 显示当前方向光直接照明，背光墙面为黑色。View 的 Base color 则将本帧绘制副本切换为无光照材质模式，继续经过曝光／Reinhard 显示转换，便于同时检查红绿墙；它不表示间接光，也不是未经显示转换的数值查看器。白色盒子与背墙在此模式下同色，可用 Camera depth 检查遮挡。其他查看器、Forward 开关、光源／相机快捷键和 Restore defaults 保持可用。
+
+顶灯只保留原始几何／资产数据，尚无自发光、面积光、间接反弹或颜色渗透；最终画面尚未连接投射阴影。该场景用于扩展资产与显示工作流，不能替代完整 Cornell Box 光传输验证。来源、原始发光参数的限制和可重复检查命令见[资产说明](../assets/models/CornellBox/README.md)。
+
 ## 添加自己的实验和 Shader
 
 参考 [CustomPass/CMakeLists.txt](../examples/CustomPass/CMakeLists.txt)：新建可执行目标并链接 `MadCatRuntime`，使用 `madcat_add_graphics_shaders(MyShaders my-display "${CMAKE_CURRENT_SOURCE_DIR}/display.slang")` 登记独立手动编译目标。此函数在根 CMake 的 Shader 工具配置之后加载，因此实验目录也应登记在其后。
@@ -215,7 +275,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/CustomPassWindowChecks
 
 ## 当前范围与验证
 
-可编程图形管线目前限一个颜色附件、由顶点 ID 生成的三角形列表，无深度测试或混合；可选一个片元采样 set（image 0／sampler 1），以及按 4 字节对齐、不超过 128 字节的 Vertex／Fragment Push Constants。该范围足以完成本例；UI 的索引绘制和混合由专用后端负责，不代表通用 RHI 已支持这些能力。现有场景几何绘制仍使用固定 Forward ABI。自定义采样绑定当前覆盖图内纹理，材质贴图仍由 Forward 绑定。图内颜色纹理限 RGBA16F／单 mip／层，采样使用 nearest。已有受限整图候选切换；Compute、任意 Descriptor 布局、Shader 反射验证和运行期 Shader 更新待实现。
+可编程图形管线目前限一个颜色附件、由顶点 ID 生成的三角形列表，无深度测试或混合；可选一个片元采样 set（image 0／sampler 1），以及按 4 字节对齐、不超过 128 字节的 Vertex／Fragment Push Constants。该范围足以完成本例；UI 的索引绘制和混合由专用后端负责，不代表通用 RHI 已支持这些能力。现有场景几何绘制仍使用固定 Forward ABI。自定义采样绑定当前覆盖图内纹理，材质贴图仍由 Forward 绑定。图内颜色纹理限 RGBA16F／单 mip／层，采样使用 nearest。已有受限整图候选切换和本例两种显示 Shader 的固定 ABI 校验／手动更新；Compute、任意 Descriptor 布局与通用 Shader 更新待实现。
 
 2026-11-17 的 HDR 增量已通过 Debug／Release 构建、各 13 组图检查、32 项深度和 68 项既有管线检查；自定义 Shader 编译／SPIR-V 验证和 12 项编译失败恢复通过。两种配置各八个状态、每状态 35 个解析像素通过；两种配置的六项准备／绑定／参数／绘制失败均在提交前拒绝并正确退役。Debug 默认 Suzanne 为可见性冒烟，已查看截图；最小化直接退出也通过。GPU 环境为 RTX 5060 Ti／NVIDIA 617.42，RGBA16F、sRGB 格式 50、D32_SFLOAT。Debug 开启同步验证，无 warning／error；Release 未主动启用验证层。未验证其他 GPU、实际提交失败或性能。
 

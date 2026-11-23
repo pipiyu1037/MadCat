@@ -54,6 +54,26 @@ std::expected<std::vector<MeshDraw>, std::string> extractDraws(
     return extractDraws(scene, assets, view->viewProjection);
 }
 
+std::expected<rhi::FrameLighting, std::string> extractLighting(
+    const scene::Scene& scene, ecs::Entity camera, float aspect)
+{
+    auto result = extractLighting(scene);
+    if (!result) { return result; }
+    const auto matrices = scene::buildCameraMatrices(scene, camera, aspect);
+    if (!matrices) { return std::unexpected("PBR camera is invalid"); }
+    const auto inverse = glm::inverse(glm::dmat4(matrices->viewProjection));
+    for (int c=0; c<4; ++c) { for (int r=0; r<4; ++r) {
+        const double value = inverse[c][r];
+        if (!std::isfinite(value) || std::abs(value)>std::numeric_limits<float>::max())
+        { return std::unexpected("PBR inverse camera matrix exceeds finite float range"); }
+        result->worldFromClip[c*4+r] = static_cast<float>(value);
+    } }
+    const auto& position = (*scene.worldTransform(camera))[3];
+    for (int axis=0; axis<3; ++axis) { result->cameraPosition[axis] = position[axis]; }
+    if (!result->valid()) { return std::unexpected("PBR camera data is invalid"); }
+    return result;
+}
+
 std::expected<glm::mat4, std::string> buildDirectionalShadowMatrix(
     const rhi::FrameLighting& lighting, const DirectionalShadowView& settings)
 {
@@ -168,6 +188,8 @@ std::expected<GeometryBatch, std::string> prepareGeometry(const assets::ModelAss
                 require(material.alphaMode != assets::AlphaMode::Blend, "BLEND materials are not supported by the opaque preview");
                 for (const auto factor : material.baseColor) { require(std::isfinite(factor) && factor >= 0 && factor <= 1, "Material base color factor is invalid"); }
                 require(std::isfinite(material.alphaCutoff) && material.alphaCutoff >= 0, "Material alpha cutoff is invalid");
+                require(std::isfinite(material.metallic) && material.metallic>=0 && material.metallic<=1 &&
+                    std::isfinite(material.roughness) && material.roughness>=0 && material.roughness<=1, "Material metallic/roughness factors are invalid");
                 require(!material.baseColorTexture || *material.baseColorTexture < model->textures.size(), "Material texture is invalid");
                 result.materials.push_back({draw.geometry.model, primitive.material, std::move(material)});
             }
@@ -193,6 +215,9 @@ std::expected<GeometryBatch, std::string> prepareGeometry(const assets::ModelAss
             {
                 const auto position = primitive.positions[index];
                 rhi::ColoredVertex vertex{};
+                const auto& material = result.materials[materialIndex].material;
+                vertex.metallicRoughness[0] = material.metallic;
+                vertex.metallicRoughness[1] = material.roughness;
                 for (int axis = 0; axis < 3; ++axis)
                 {
                     vertex.position[axis] = position[axis];

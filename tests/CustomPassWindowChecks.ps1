@@ -1,8 +1,10 @@
 ﻿param(
     [ValidateSet('Debug','Release')][string]$Configuration = 'Debug',
-    [ValidateSet('reference','ui','ui-failures','graph','graph-failures','graph-close-minimized','viewer','viewer-close-minimized','hdr','hdr-close-minimized','shadow','shadow-close-minimized','model','close-minimized','failures')][string]$Scenario = 'reference',
+    [ValidateSet('reference','pbr','pbr-spheres','cornell','ui','ui-failures','graph','graph-failures','graph-close-minimized','viewer','viewer-close-minimized','hdr','hdr-close-minimized','shadow','shadow-close-minimized','reload','model','close-minimized','failures')][string]$Scenario = 'reference',
     [string]$BuildDirectory = 'build',
-    [string]$ModelPath = ''
+    [string]$ModelPath = '',
+    [ValidateRange(0,1)][double]$Metallic = 0,
+    [ValidateRange(0,1)][double]$Roughness = .4
 )
 $ErrorActionPreference = 'Stop'
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -10,9 +12,12 @@ $buildPath = (Resolve-Path (Join-Path $workspace $BuildDirectory)).Path
 $outputRoot = Join-Path $buildPath 'verification/custom-pass'
 [void][IO.Directory]::CreateDirectory($outputRoot)
 $name = "$($Configuration.ToLower())-$Scenario"
+if ($Scenario -eq 'pbr') { $name += "-m$Metallic-r$Roughness" }
 if ($ModelPath) { $name += '-' + [IO.Path]::GetFileNameWithoutExtension($ModelPath) }
 $forwardEnabled = $true
 $displayView = 'final'
+$shaderScale = 1.0
+$hdrMarker = @(255,0,255)
 $errorPath = Join-Path $outputRoot "$name.stderr.log"
 $outPath = Join-Path $outputRoot "$name.stdout.log"
 
@@ -88,7 +93,7 @@ $fixture = @{
     bufferViews=@(@{buffer=0;byteOffset=0;byteLength=48},@{buffer=0;byteOffset=48;byteLength=48},@{buffer=0;byteOffset=96;byteLength=24})
     accessors=@(@{bufferView=0;componentType=5126;count=4;type='VEC3';min=@(-1,-.75,0);max=@(1,.75,0)},
         @{bufferView=1;componentType=5126;count=4;type='VEC3'},@{bufferView=2;componentType=5125;count=6;type='SCALAR'})
-    materials=@(@{pbrMetallicRoughness=@{baseColorFactor=@(.25,.5,.75,1)}})
+    materials=@(@{pbrMetallicRoughness=@{baseColorFactor=@(.25,.5,.75,1);metallicFactor=$Metallic;roughnessFactor=$Roughness}})
     meshes=@(@{primitives=@(@{attributes=@{POSITION=0;NORMAL=1};indices=2;material=0})})
 }
 $fixturePath = Join-Path $outputRoot 'Flat.gltf'
@@ -121,6 +126,18 @@ try {
         WindowStyle='Hidden'; PassThru=$true; RedirectStandardOutput=$outPath; RedirectStandardError=$errorPath}
     if ($ModelPath) { $launch.ArgumentList = @('--fit',('"' + (Resolve-Path (Join-Path $workspace $ModelPath)).Path + '"')) }
     elseif ($Scenario -notin @('model','graph-failures')) { $launch.ArgumentList = @('"' + $fixturePath + '"') }
+    if ($Scenario -eq 'pbr') { $launch.ArgumentList += '--pbr' }
+    if ($Scenario -eq 'pbr-spheres') { $launch.ArgumentList = @('--pbr-spheres') }
+    if ($Scenario -eq 'cornell') { $launch.ArgumentList = @('--cornell-box') }
+    if ($Scenario -eq 'reload') {
+        $reloadSources=Join-Path $outputRoot "$name sources 测试"
+        [void][IO.Directory]::CreateDirectory($reloadSources)
+        $displaySource=[IO.File]::ReadAllText((Join-Path $workspace 'examples/CustomPass/display.slang'))
+        $hdrSource=[IO.File]::ReadAllText((Join-Path $workspace 'examples/CustomPass/hdr-range.slang'))
+        [IO.File]::WriteAllText((Join-Path $reloadSources 'display.slang'),$displaySource,(New-Object Text.UTF8Encoding($false)))
+        [IO.File]::WriteAllText((Join-Path $reloadSources 'hdr-range.slang'),$hdrSource,(New-Object Text.UTF8Encoding($false)))
+        $launch.ArgumentList=@('--shader-sources',('"'+$reloadSources+'"'),('"'+$fixturePath+'"'))
+    }
     $appProcess = Start-Process @launch
     $null = $appProcess.Handle
 } finally { $env:VK_LAYER_VALIDATE_SYNC = $previousSync }
@@ -192,12 +209,12 @@ function Set-Forward([bool]$Enabled) {
 function Set-View([bool]$Depth) {
     Set-DisplayView $(if ($Depth) { 'depth' } else { 'final' })
 }
-function Set-DisplayView([ValidateSet('final','depth','hdr-range','shadow')][string]$View) {
+function Set-DisplayView([ValidateSet('final','depth','hdr-range','shadow','base-color')][string]$View) {
     if ($script:displayView -eq $View) { return }
     $before=[regex]::Matches((Read-Log),'CustomPass: view').Count
     Click-Client 100 174
     # Fixed Latin font and layout: popup rows directly below the View combo.
-    $row=@('final','depth','hdr-range','shadow').IndexOf($View)
+    $row=@('final','depth','hdr-range','shadow','base-color').IndexOf($View)
     Click-Client 100 (196+17*$row)
     Wait-Condition { [regex]::Matches((Read-Log),'CustomPass: view').Count -gt $before -and
         (Read-Log) -match "CustomPass: view $View presented\." } 'viewer graph publication'
@@ -243,7 +260,7 @@ function Range-Color([double[]]$Linear) {
         $unit=[Math]::Pow(2,$exponent-10)
         [Math]::Round($value/$unit)*$unit
     }
-    if (($stored | Measure-Object -Maximum).Maximum -gt 1) { return @(255,0,255) }
+    if (($stored | Measure-Object -Maximum).Maximum -gt 1) { return $script:hdrMarker }
     return @($stored | ForEach-Object { Encode ([Math]::Max(0.0,[Math]::Min(1.0,[double]$_))) })
 }
 function Set-ReferenceLight([double[]]$Color,[double]$Irradiance) {
@@ -274,16 +291,22 @@ function Check-Pixels([string]$Label, [int]$Pose=0, [double]$ExposureEV=[double]
         $bitmap.Save((Join-Path $outputRoot "$name-$Label.png"))
         $exposure = if ($Pose -eq 1) { .25 } elseif ($Pose -eq 2) { 4.0 } else { 1.0 }
         if (-not [double]::IsNaN($ExposureEV)) { $exposure=[Math]::Pow(2,$ExposureEV) }
+        if ($displayView -eq 'final') { $exposure*=$shaderScale }
         $background = if ($displayView -in @('depth','shadow')) { @(0,0,0) } elseif ($displayView -eq 'hdr-range') {
             Range-Color @(.04,.08,.16)
         } else { @((Tone .04 $exposure),(Tone .08 $exposure),(Tone .16 $exposure)) }
-        if ($Scenario -eq 'model' -or $ModelPath) {
-            $visible = 0
+        if ($Scenario -in @('model','pbr-spheres','cornell') -or $ModelPath) {
+            $visible = 0; $redWall=0; $greenWall=0
             # Dense enough to hit thin poles/chains, without counting the UI.
             for ($y=1; $y -lt 60; ++$y) { for ($x=1; $x -lt 60; ++$x) {
                 $px=[int]($size[0]*$x/60); $py=[int]($size[1]*$y/60)
                 if ($px -lt 360 -and $py -lt 290) { continue } # Exclude UI from model visibility.
                 $color = $bitmap.GetPixel($px,$py)
+                if ($Scenario -eq 'cornell' -and $displayView -eq 'hdr-range' -and $color.R -lt 5 -and $color.G -gt 250 -and $color.B -gt 250) {
+                    throw 'Cornell HDR viewer reported a nonfinite value'
+                }
+                if ($color.R -gt $color.G*1.5 -and $color.R -gt $color.B*1.5 -and $color.R -gt 70) { ++$redWall }
+                if ($color.G -gt $color.R*1.3 -and $color.G -gt $color.B*1.3 -and $color.G -gt 70) { ++$greenWall }
                 if (-not $forwardEnabled -and $displayView -ne 'shadow') {
                     if ([Math]::Abs($color.R-$background[0]) -gt 3 -or [Math]::Abs($color.G-$background[1]) -gt 3 -or
                         [Math]::Abs($color.B-$background[2]) -gt 3) { throw 'Disabled Forward left scene geometry visible' }
@@ -291,12 +314,16 @@ function Check-Pixels([string]$Label, [int]$Pose=0, [double]$ExposureEV=[double]
                 if ([Math]::Abs($color.R-$background[0])+[Math]::Abs($color.G-$background[1])+[Math]::Abs($color.B-$background[2]) -gt 12) { ++$visible }
             } }
             if (($forwardEnabled -or $displayView -eq 'shadow') -and $visible -lt 5) { throw 'External model is not visible' }
+            if ($Scenario -eq 'cornell' -and $displayView -eq 'base-color' -and $forwardEnabled -and ($redWall -lt 5 -or $greenWall -lt 5)) {
+                throw "Cornell base-color walls missing: red=$redWall, green=$greenWall"
+            }
             Write-Output "$Label model visibility: $visible samples (smoke only)"
             return
         }
         $aspect = $size[0]/[double]$size[1]
         $offset = if ($Pose -eq 4) { .45 } else { 0.0 }
-        $center = .5+[Math]::Sqrt(3)*$offset/(6*$aspect)
+        $cameraX = if ($Pose -eq 6) { .4 } else { 0.0 }
+        $center = .5+[Math]::Sqrt(3)*($offset-$cameraX)/(6*$aspect)
         $halfWidth = [Math]::Sqrt(3)*.7/(6*$aspect)
         $halfHeight = [Math]::Sqrt(3)*.525/6
         $lit = @((Tone (.25*$LightColor[0]*$Irradiance/[Math]::PI) $exposure),
@@ -312,7 +339,7 @@ function Check-Pixels([string]$Label, [int]$Pose=0, [double]$ExposureEV=[double]
             $shade=Encode (1-(1000.0/(1000-.1)-(.1*1000/(1000-.1))/3))
             $lit=@($shade,$shade,$shade)
         }
-        if ($Scenario -in @('ui','viewer','viewer-close-minimized','hdr','hdr-close-minimized','shadow','shadow-close-minimized')) {
+        if ($Scenario -in @('ui','viewer','viewer-close-minimized','hdr','hdr-close-minimized','shadow','shadow-close-minimized','reload')) {
             # Independent body pixel: .06 sRGB style color converted to linear,
             # packed as UNORM8, alpha .94, blended over the tone-mapped scene.
             $color=$bitmap.GetPixel(30,255) # Empty body below controls/diagnostics.
@@ -331,11 +358,41 @@ function Check-Pixels([string]$Label, [int]$Pose=0, [double]$ExposureEV=[double]
         $checked = 0
         # Keep the analytic scene grid below the fixed-height parameter panel,
         # including the smallest client extent used by the resize checks.
-        foreach ($nx in @(-.32,-.24,-.12,0,.12,.24,.32)) { foreach ($v in @(.48,.52,.56,.62,.72)) {
+        $sampleRows=if ($Scenario -eq 'pbr') { @(.48,.5,.52,.56,.62,.72) } else { @(.48,.52,.56,.62,.72) }
+        foreach ($nx in @(-.32,-.24,-.12,0,.12,.24,.32)) { foreach ($v in $sampleRows) {
             $x = [int][Math]::Floor((.5+$nx/$aspect)*$size[0]); $y=[int][Math]::Floor($v*$size[1])
             $u=($x+.5)/$size[0]; $actualV=($y+.5)/$size[1]
             $inside = $forwardEnabled -and [Math]::Abs($u-$center) -lt $halfWidth -and [Math]::Abs($actualV-.5) -lt $halfHeight
             $expected = if (-not $inside) { $background } elseif ($Pose -eq 3 -and $displayView -ne 'depth') { @(0,0,0) } else { $lit }
+            if ($Scenario -eq 'pbr' -and $inside -and $displayView -in @('final','hdr-range')) {
+                # Independent ray/plane intersection and double-precision BRDF.
+                # Smith G is evaluated as lambda terms, independently of the
+                # shader's visibility form. No engine matrices or output readback.
+                $vx=-3*(2*$u-1)*$aspect/[Math]::Sqrt(3)
+                $vy=-3*(1-2*$actualV)/[Math]::Sqrt(3)
+                $vz=3.0; $length=[Math]::Sqrt($vx*$vx+$vy*$vy+$vz*$vz)
+                $vx/=$length; $vy/=$length; $vz/=$length
+                $angle=if ($Pose -eq 5) { 35*[Math]::PI/180 } else { 0.0 }
+                $nl=[Math]::Cos($angle)
+                $hx=$vx+[Math]::Sin($angle); $hy=$vy; $hz=$vz+$nl
+                $hLength=[Math]::Sqrt($hx*$hx+$hy*$hy+$hz*$hz)
+                $hx/=$hLength; $hy/=$hLength; $hz/=$hLength
+                $vh=[Math]::Min(1,[Math]::Max(0,$vx*$hx+$vy*$hy+$vz*$hz))
+                $a2=[Math]::Pow([Math]::Max(.05,$Roughness),4)
+                $distribution=$a2/([Math]::PI*[Math]::Pow(1-$hz*$hz+$hz*$hz*$a2,2))
+                $lambdaV=([Math]::Sqrt(1+$a2*(1/($vz*$vz)-1))-1)/2
+                $lambdaL=([Math]::Sqrt(1+$a2*(1/($nl*$nl)-1))-1)/2
+                $masking=1/(1+$lambdaV+$lambdaL)
+                $radiance=for ($channel=0;$channel -lt 3;++$channel) {
+                    $base=@(.25,.5,.75)[$channel]
+                    $f0=.04*(1-$Metallic)+$base*$Metallic
+                    $fresnel=$f0+(1-$f0)*[Math]::Pow(1-$vh,5)
+                    $brdf=(1-$fresnel)*(1-$Metallic)*$base/[Math]::PI + $fresnel*$distribution*$masking/(4*$nl*$vz)
+                    $power=if ($Pose -eq 3) { 0.0 } else { $Irradiance }
+                    [Math]::Min(65504.0,$brdf*$LightColor[$channel]*$power*$nl)
+                }
+                $expected=if ($displayView -eq 'hdr-range') { Range-Color $radiance } else { @($radiance | ForEach-Object { Tone $_ $exposure }) }
+            }
             if ($displayView -eq 'shadow') {
                 # Independent orthographic light projection, fixed half extent=2,
                 # distance=4, near=.1, far=8. Sample the 1024-square nearest texel.
@@ -397,14 +454,39 @@ try {
     Wait-Ready
     Check-Pixels 'initial'
     Click-Client 700 500 # Give experiment shortcuts the scene's keyboard focus.
-    if ($Scenario -eq 'reference') {
+    if ($Scenario -eq 'cornell') {
+        Set-DisplayView 'base-color'; Check-Pixels 'cornell-base-color'
+        Set-DisplayView 'depth'; Check-Pixels 'cornell-depth'
+        Set-DisplayView 'shadow'; Check-Pixels 'cornell-shadow'
+        Set-DisplayView 'hdr-range'; Check-Pixels 'cornell-hdr'
+        Set-DisplayView 'final'; Check-Pixels 'cornell-final'
+        Click-Client 700 500 # Return keyboard focus from the View combo to the scene.
+        Select-Pose 5; Check-Pixels 'cornell-light-rotated' 5
+        Select-Pose 6; Check-Pixels 'cornell-camera-moved' 6
+        Select-Pose 0; Check-Pixels 'cornell-restored'
+        Set-Forward $false; Check-Pixels 'cornell-forward-off'
+        Set-Forward $true; Check-Pixels 'cornell-forward-on'
+        Set-DisplayView 'base-color'
+        [void][CustomPassWindowCheck]::SetWindowPos($windowState.Handle,[IntPtr](-1),30,30,850,650,0x10)
+        Wait-Ready; Check-Pixels 'cornell-resized'
+    }
+    if ($Scenario -in @('reference','pbr','pbr-spheres')) {
         $pipelineCount = [regex]::Matches((Read-Log),'Graphics pipeline created;').Count
         Select-Pose 1; Check-Pixels 'exposure-minus2' 1
         Select-Pose 2; Check-Pixels 'exposure-plus2' 2
         Select-Pose 3; Check-Pixels 'light-off' 3
         Select-Pose 4; Check-Pixels 'model-moved' 4
+        if ($Scenario -in @('pbr','pbr-spheres')) {
+            Select-Pose 5; Check-Pixels 'light-rotated' 5
+            Select-Pose 6; Check-Pixels 'camera-moved' 6
+        }
         Select-Pose 0; Check-Pixels 'restored'
         if ([regex]::Matches((Read-Log),'Graphics pipeline created;').Count -ne $pipelineCount) { throw 'Scene edits rebuilt pipeline' }
+        if ($Scenario -eq 'pbr') {
+            Set-DisplayView 'hdr-range'; Check-Pixels 'pbr-hdr'
+            Set-DisplayView 'depth'; Check-Pixels 'pbr-depth'
+            Set-DisplayView 'final'; Check-Pixels 'pbr-final'
+        }
         [void][CustomPassWindowCheck]::SetWindowPos($windowState.Handle,[IntPtr](-1),30,30,850,650,0x10)
         Wait-Ready; Check-Pixels 'resized'
     }
@@ -550,6 +632,65 @@ try {
         [void][CustomPassWindowCheck]::SetWindowPos($windowState.Handle,[IntPtr](-1),30,30,850,650,0x10)
         Wait-Ready; Check-Pixels 'shadow-resized-before-minimize'
     }
+    if ($Scenario -eq 'reload') {
+        function Write-Reload([string]$Display,[string]$Hdr) {
+            [IO.File]::WriteAllText((Join-Path $reloadSources 'display.slang'),$Display,(New-Object Text.UTF8Encoding($false)))
+            [IO.File]::WriteAllText((Join-Path $reloadSources 'hdr-range.slang'),$Hdr,(New-Object Text.UTF8Encoding($false)))
+        }
+        function Apply-Reload([bool]$Accepted,[bool]$Button=$false) {
+            $pattern=if ($Accepted) { 'CustomPass: Shader revision \d+ applied;' } else { 'CustomPass: Shader update rejected;' }
+            $before=[regex]::Matches((Read-Log),$pattern).Count
+            if ($Button) { Click-Client 270 155 }
+            else {
+                Click-Client 700 500
+                [void][CustomPassWindowCheck]::PostMessage($windowState.Handle,0x100,[IntPtr]0x52,[IntPtr]0x00130001)
+                [void][CustomPassWindowCheck]::PostMessage($windowState.Handle,0x101,[IntPtr]0x52,[IntPtr]0xC0130001)
+            }
+            Wait-Condition { [regex]::Matches((Read-Log),$pattern).Count -gt $before } 'Shader update outcome'
+            Start-Sleep -Milliseconds 250
+        }
+        $dimmed=$displaySource.Replace('float3 exposed=radiance*exp2(parameters.exposureEV);','float3 exposed=radiance*exp2(parameters.exposureEV)*0.25;')
+        $cyan=$hdrSource.Replace('float3(1,0,1)','float3(0,1,1)')
+        Write-Reload $dimmed $cyan
+        Apply-Reload $true $true
+        $shaderScale=.25; $hdrMarker=@(0,255,255)
+        Check-Pixels 'reload-dimmed'
+        Set-DisplayView 'hdr-range'; Check-Pixels 'reload-cyan-hdr'
+        Set-DisplayView 'depth'; Check-Pixels 'reload-depth'
+        Set-DisplayView 'shadow'; Check-Pixels 'reload-shadow'
+        Set-DisplayView 'final'; Check-Pixels 'reload-final'
+        $pipelinesBeforeReject=[regex]::Matches((Read-Log),'Graphics pipeline created;').Count
+        Write-Reload ($displaySource+"`ninvalid source text") $hdrSource
+        Apply-Reload $false; Check-Pixels 'reload-syntax-keeps-valid'
+        Write-Reload ($displaySource.Replace('binding(0, 0)','binding(0, 1)')) $hdrSource
+        Apply-Reload $false; Check-Pixels 'reload-layout-keeps-valid'
+        Write-Reload $displaySource ($hdrSource+"`ninvalid source text")
+        Apply-Reload $false; Check-Pixels 'reload-second-package-keeps-valid'
+        if ([regex]::Matches((Read-Log),'Graphics pipeline created;').Count -ne $pipelinesBeforeReject) { throw 'Invalid Shader candidate reached GPU pipeline creation' }
+        # Source edits without a successful request cannot affect view/resize.
+        Set-DisplayView 'hdr-range'; Check-Pixels 'reload-retained-cyan'
+        Set-DisplayView 'final'; Check-Pixels 'reload-retained-dimmed'
+        [void][CustomPassWindowCheck]::SetWindowPos($windowState.Handle,[IntPtr](-1),30,30,850,650,0x10)
+        Wait-Ready; Check-Pixels 'reload-resized-valid'
+        Write-Reload $displaySource $hdrSource
+        Apply-Reload $true
+        $shaderScale=1.0; $hdrMarker=@(255,0,255)
+        Check-Pixels 'reload-recovered'
+        # Compile while a fixed engine viewer is active, then prepare the new
+        # display pipeline from the same captured version when switching back.
+        Set-DisplayView 'shadow'
+        Write-Reload $dimmed $cyan
+        Apply-Reload $true
+        Check-Pixels 'reload-in-shadow'
+        Set-DisplayView 'final'; $shaderScale=.25; $hdrMarker=@(0,255,255)
+        Check-Pixels 'reload-shadow-to-dimmed'
+        Write-Reload $displaySource $hdrSource
+        Apply-Reload $true
+        $shaderScale=1.0; $hdrMarker=@(255,0,255)
+        Check-Pixels 'reload-restored'
+        if ([regex]::Matches((Read-Log),'CustomPass: Shader revision \d+ applied;').Count -ne 4 -or
+            [regex]::Matches((Read-Log),'CustomPass: Shader update rejected;').Count -ne 3) { throw 'Wrong Shader update outcome counts' }
+    }
     [void][CustomPassWindowCheck]::ShowWindow($windowState.Handle,6)
     Wait-Condition { (Read-Log) -match 'rendering paused;' } 'minimize'
     if ($Scenario -notin @('close-minimized','graph-close-minimized','viewer-close-minimized','hdr-close-minimized','shadow-close-minimized')) {
@@ -580,6 +721,9 @@ try {
     if (-not $appProcess.WaitForExit(10000)) { throw 'CustomPass did not exit' }
     $log = Read-Log
     if ($appProcess.ExitCode -ne 0 -or $log -match 'Vulkan \[(error|warning)\]|Vulkan error:|GLFW error|MadCat .*failed:|MadCat error:|CustomPass failed:') { throw "CustomPass failed (see $errorPath)" }
+    if ($Scenario -eq 'cornell' -and ($log -notmatch 'Vertex buffer uploaded; 2080 bytes' -or $log -notmatch 'Index buffer uploaded; 240 bytes')) {
+        throw 'Cornell geometry sharing/upload size mismatch'
+    }
     $pipelines = [regex]::Matches($log,'Triangle pipeline created;').Count
     if ($pipelines -lt 1 -or $pipelines -ne [regex]::Matches($log,'Triangle pipeline destroyed\.').Count -or
         $pipelines -ne [regex]::Matches($log,'Swapchain destroyed\.').Count -or

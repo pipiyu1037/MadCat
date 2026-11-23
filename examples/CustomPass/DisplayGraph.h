@@ -7,7 +7,7 @@
 
 namespace experiment
 {
-enum class DisplayView { Final, Depth, HdrRange, Shadow };
+enum class DisplayView { Final, Depth, HdrRange, Shadow, BaseColor };
 struct DisplaySettings
 {
     bool forwardEnabled=true;
@@ -15,7 +15,7 @@ struct DisplaySettings
     bool operator==(const DisplaySettings&) const = default;
 };
 inline const char* displayViewName(DisplayView view)
-{ return view==DisplayView::Shadow ? "shadow" : view==DisplayView::HdrRange ? "hdr-range" : view==DisplayView::Depth ? "depth" : "final"; }
+{ return view==DisplayView::BaseColor ? "base-color" : view==DisplayView::Shadow ? "shadow" : view==DisplayView::HdrRange ? "hdr-range" : view==DisplayView::Depth ? "depth" : "final"; }
 
 // Structural settings are captured by value. Parameters remain owned by the
 // experiment, then copied at the frame's record boundary. Do not outlive run().
@@ -78,7 +78,11 @@ inline madcat::graph::GraphicsGraphFactory makeDisplayGraph(const ToneMapPass::P
                 std::span<const rhi::IndexedDraw> draws,std::span<const rhi::IndexedDraw> shadowDraws) {
             std::vector<std::any> values(count);
             if (clearNode!=UINT32_MAX) { values[clearNode]=passes::ClearPass::Parameters{color}; }
-            if (forwardNode!=UINT32_MAX) { values[forwardNode]=passes::ForwardPass::Parameters{{draws.begin(),draws.end()}}; }
+            if (forwardNode!=UINT32_MAX) {
+                passes::ForwardPass::Parameters forward{{draws.begin(),draws.end()}};
+                if (view==DisplayView::BaseColor) { for (auto& draw:forward.draws) { draw.transform.view=rhi::GeometryView::Material; } }
+                values[forwardNode]=std::move(forward);
+            }
             if (shadowNode!=UINT32_MAX) { values[shadowNode]=passes::ShadowPass::Parameters{{shadowDraws.begin(),shadowDraws.end()}}; }
             if (view==DisplayView::Depth || view==DisplayView::Shadow) { values[displayNode]=passes::DepthViewPass::Parameters{}; }
             else if (view==DisplayView::HdrRange) { values[displayNode]=HdrRangePass::Parameters{}; }

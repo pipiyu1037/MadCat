@@ -348,7 +348,7 @@ ClearFrameResult VulkanClearRenderer::drawIndexed(const std::array<float, 4>& co
     {
         if (draw.indexCount == 0 || draw.indexCount % 3 != 0 || draw.firstIndex > frame.triangle->indexCount() ||
             draw.indexCount > frame.triangle->indexCount() - draw.firstIndex ||
-            !draw.transform.valid() || (frame.materialKeepAlive.empty() ? (draw.material != 0 || draw.transform.view == GeometryView::Material || draw.transform.view == GeometryView::Lit) : draw.material >= frame.materialKeepAlive.size()))
+            !draw.transform.valid() || (frame.materialKeepAlive.empty() ? (draw.material != 0 || draw.transform.view == GeometryView::Material || draw.transform.view == GeometryView::Lit || draw.transform.view == GeometryView::Pbr) : draw.material >= frame.materialKeepAlive.size()))
         {
             std::fprintf(stderr, "Vulkan error: invalid indexed Draw snapshot before acquisition.\n");
             return ClearFrameResult::Failed;

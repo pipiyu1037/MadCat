@@ -1,6 +1,6 @@
 # MadCat 架构设计
 
-更新日期：2026-11-22。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
+更新日期：2026-11-23。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
 
 ## 文档职责与设计状态
 
@@ -30,7 +30,7 @@
 | 决定 | 约定 | 取舍与状态 |
 |---|---|---|
 | 场景对象 | 所有场景 Object 统一由 Entity 管理，通过 Transform、Mesh、Material 等组件组合表达 | 2026-10-29 用户确认；CPU 模型实例与 RenderScene／共享 GPU 几何绘制已接通，实例材质覆盖等仍待实现 |
-| 首版用户入口 | 在仓库中新建 C++ 渲染实验，加载场景并编写、组合自己的 Pass | 可复用运行层、BasicScene 及 CustomPass 图形／HDR 示例已实现；工具与运行期更新待实现 |
+| 首版用户入口 | 在仓库中新建 C++ 渲染实验，加载场景并编写、组合自己的 Pass | 可复用运行层、BasicScene 及 CustomPass 图形／HDR、参数／查看工具和受限显示 Shader 手动更新已实现 |
 | Pass 分阶段 | 声明、准备、执行；界面通过参数入口提交修改 | 生命周期清楚，作者需表达三个阶段 |
 | Pass 阶段数据流 | 声明结果随具体图保存，准备结果由算法模块管理，执行显式接收二者及本帧参数 | 首版使用普通 C++ 类型和函数约定，不要求共同基类；活动图与候选图分别保存声明数据 |
 | C++ 输入输出 | 明确的输入／输出结构和图资源句柄直接连接 | 编译器检查字段及基本资源类型，格式、尺寸和依赖仍由图检查 |
@@ -82,7 +82,7 @@ return madcat::runtime::run(application, scene, assets, camera, callbacks);
 |---|---|
 | 场景初始化 | 用户在调用 run 前导入资产并创建 Scene／相机／灯光；run 更新初始世界变换、打包和上传启动几何，首次缺少几何或有效相机则诊断失败 |
 | 每帧更新 | keyPressed 提供数字／大写字母输入；update 在世界变换更新和 RenderScene 提取前执行。结构性修改遵守现有查询边界，纯数值变化不重建图。FrameInfo 提供输出宽高比及距上次渲染尝试的时间，暂停等待时间计入间隔 |
-| 建图 | ApplicationOptions.graphFactory 提供初始图，运行期 GraphRequest 可提交整图候选；每张交换链图像独立准备，全部成功后统一切换。resize 使用最后成功的工厂；计划不随普通数值参数重建，Shader 版本发布流程待实现 |
+| 建图 | ApplicationOptions.graphFactory 提供初始图，运行期 GraphRequest 可提交整图候选；每张交换链图像独立准备，全部成功后统一切换。resize 使用最后成功的工厂；计划不随普通数值参数重建，CustomPass 显示 Shader 以完整候选图发布 |
 
 这里的实验入口与 Pass 的声明／准备／执行是两个层次。实验负责场景与算法组合，具体 Pass 记录 GPU 工作；graphFactory 中可显式调用 Pass 的准备函数，建图不必每帧进行。场景几何仍准备固定的 Forward 和可选 Shadow／DepthView 管线；CustomPass 另通过 RHI 工厂准备图形管线，并把 Prepared 显式交给节点执行。
 
@@ -94,10 +94,10 @@ Scene 入口自动提取无投射阴影的 Lambert 绘制和光照；`prepareSha
 
 - 用户实验持有 CPU 场景、资产及算法模块的长期状态。运行层组织它们的调用，RenderScene 管理派生 GPU 场景数据，图管理执行计划和中间资源；导入图不转移逻辑所有权。
 - 实验对象覆盖完整运行期；运行结束时停止提交，完成相关 GPU 工作及呈现资源退役，再释放被借用的实验和算法状态。记录与提交所用的准备版本、绑定、上传内存和资源引用仍由 RHI 按完成条件保活。
-- 应用运行层负责窗口与事件、设备、帧循环和呈现，通过既有 Scene、RenderScene、RenderGraph 和 RHI 接口组织工作。已实现受限整图候选的安全替换与失败保留；Shader 包版本发布和通用单独 Prepared 更新仍待实现。
+- 应用运行层负责窗口与事件、设备、帧循环和呈现，通过既有 Scene、RenderScene、RenderGraph 和 RHI 接口组织工作。已实现受限整图候选的安全替换与失败保留；CustomPass 通过同一机制发布受限显示 Shader 包，通用单独 Prepared 更新仍待实现。
 - 普通 Pass 通过显式管线、绑定和 Draw／Dispatch 表达工作。现有 `displayDepth()`、按附件选择 Forward／Shadow 管线及固定帧参数工厂是当前验证路径的限制；后续用自定义 Pass 场景驱动接口收敛，避免继续按算法名称扩充通用执行器。
 
-BasicScene、CustomPass 与 Sandbox 共用运行层，前两者消费 Scene 入口，Sandbox 消费帧数据入口。CMake 将后端编入 MadCatRHI，将运行组织及 RenderScene 材质适配编入 MadCatRuntime，CPU Scene／RenderScene／图检查目标继续独立。[CustomPass](../examples/CustomPass/main.cpp)已以 HDR／显示转换验证自定义 Shader、显式管线／绑定、图内颜色资源与参数传递；参数面板、Forward 图开关、主相机深度、HDR 范围和阴影图查看已实现，运行期 Shader 更新与其他纹理查看按已有目标逐步接入。
+BasicScene、CustomPass 与 Sandbox 共用运行层，前两者消费 Scene 入口，Sandbox 消费帧数据入口。CMake 将后端编入 MadCatRHI，将运行组织及 RenderScene 材质适配编入 MadCatRuntime，CPU Scene／RenderScene／图检查目标继续独立。[CustomPass](../examples/CustomPass/main.cpp)已以 HDR／显示转换验证自定义 Shader、显式管线／绑定、图内颜色资源与参数传递；参数面板、Forward 图开关、主相机深度、HDR 范围、阴影图查看及两个用户显示包的安全手动 Shader 更新已实现，其他接口与纹理查看按已有目标逐步接入。
 
 ## 模块边界和数据流
 
@@ -199,7 +199,7 @@ Pass 作者使用 `BufferRef` 等 RHI 类型，`std::shared_ptr` 及 Vulkan 对�
 | 写入与同步 | 创建时一次写入，之后不可变；普通同线程主机写入完成后才提交使用它的 Draw，coherent 内存无需 flush，队列提交建立主机到设备的写入依赖；没有 transfer 命令或 queue ownership 变化 |
 | 资源保活 | 应用和三角形管线各持 BufferRef，单在途帧上下文初始化时复制固定顶点引用，保留到析构等待 acquisition／GPU／呈现完成并释放命令后；该固定路径保守地覆盖上下文整个寿命，尚无任意资源的通用提交登记 |
 | 销毁与父对象 | 最后一个引用释放时先销毁 Buffer 再释放内存；Device 覆盖所有引用寿命。引用计数不查询 GPU 状态，使用原生命令的后端调用方仍负责完成判断与保活 |
-| 几何验证路径 | ColoredVertex 固定 44 字节；binding 0，位置 location 0／float3／offset 0，颜色 location 1／float3／offset 12，法线 location 2／float3／offset 24，UV location 3／float2／offset 36；当前管线校验同 Device、Vertex 用途、完整顶点步长和可表示数量，再配对下节索引缓冲绘制 |
+| 几何验证路径 | ColoredVertex 固定 52 字节；binding 0，位置 location 0／float3／offset 0，颜色 location 1／float3／offset 12，法线 location 2／float3／offset 24，UV location 3／float2／offset 36，金属度／粗糙度 location 4／float2／offset 44；当前管线校验同 Device、Vertex 用途、完整顶点步长和可表示数量，再配对下节索引缓冲绘制 |
 | 重建与访问声明 | 每次运行上传一次，resize／交换链重建复用；首次使用在完成 coherent 主机写入后的提交中读取。Render Graph 尚未接入，未来导入必须显式声明 Vertex Input／Vertex Attribute Read，不能由引用或反射代替 |
 
 选择直接 coherent 上传，是为了先验证实际可用的缓冲、顶点输入与 GPU 完成后释放路径；没有性能结论。符合 memoryTypeBits 的 coherent 类型缺失时诊断失败，不静默使用非 coherent 内存。staging／设备本地复制、非 coherent 回退、子分配、Storage 缓冲和可变上传区按后续需求扩展，索引已在下节接入。[Khronos 主机写入与提交规则](https://docs.vulkan.org/spec/latest/chapters/synchronization.html#synchronization-submission-host-writes)、[映射与访问同步要求](https://docs.vulkan.org/refpages/latest/refpages/source/vkMapMemory.html)
@@ -219,7 +219,7 @@ Pass 作者使用 `BufferRef` 等 RHI 类型，`std::shared_ptr` 及 Vulkan 对�
 | 保活和同步 | 应用、管线、单在途帧上下文分别持有两个引用；上下文先等待 acquisition／提交／呈现并释放命令，再释放引用；resize 不重新上传，Device 覆盖所有引用寿命 |
 | Render Graph 交接 | 同线程 coherent 写入完成后提交读取；未来图外导入须分别声明 Vertex Attribute Input／Vertex Attribute Read 与 Index Input／Index Read，强引用和元信息不代替实际访问声明 |
 
-该索引增量当时上传四个 20 字节顶点和九个 uint32 索引：中心、绿、红、蓝；`{2,3,0, 3,1,0, 1,2,0}` 共享顶点组成三个小三角形。中心局部位置 `(0,-.2)`、颜色各 1/3，外轮廓与原有渐变保持一致，独立解析投影／深度像素检查继续适用；顺序读顶点无法替代此索引路径。两个模型及七种姿态共享这组数据。后续三维布局曾将顶点升级为 24 字节，当前法线／UV 增量使用 44 字节，见[模型预览](#gltf-静态预览当前实现)。
+该索引增量当时上传四个 20 字节顶点和九个 uint32 索引：中心、绿、红、蓝；`{2,3,0, 3,1,0, 1,2,0}` 共享顶点组成三个小三角形。中心局部位置 `(0,-.2)`、颜色各 1/3，外轮廓与原有渐变保持一致，独立解析投影／深度像素检查继续适用；顺序读顶点无法替代此索引路径。两个模型及七种姿态共享这组数据。后续三维布局曾将顶点升级为 24 字节，当前增加 PBR 因子后使用 52 字节，见[模型预览](#gltf-静态预览当前实现)。
 
 Debug／Release 各 40 项缓冲、45 项管线及既有 26 项深度、35 项 Shader Module、5 组场景检查与主程序构建通过。覆盖两种用途的失败清理、设备索引范围、错误用途／步长／顶点边界／三角形数量、索引绑定与 DrawIndexed 参数、不同索引数及双引用释放。实际两种配置的遮挡／反序／resize／恢复，Debug 相机／裁剪、最小化退出和连续尺寸变化通过，Debug 同步验证无 warning／error。Shader 未修改且沿用既有已验证产物。该索引增量当时为固定 float2 位置／float3 颜色布局；后续三维格式与 glTF GPU 预览见下文，Scene 资产组件与 RenderScene 仍待实现；无 uint16 索引、staging、通用 Draw 接口和图状态计划。[Khronos 索引绑定](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdBindIndexBuffer.html)、[DrawIndexed](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdDrawIndexed.html)、[索引范围](https://docs.vulkan.org/spec/latest/chapters/features.html#features-fullDrawIndexUint32)
 
@@ -744,7 +744,7 @@ Debug／Release 各 4 组解析场景绘制、34 项管线、19 项缓冲、35 �
 
 当前转换 glTF 2.0／GLB 静态 TRIANGLES 的 FLOAT VEC3 POSITION、可选 NORMAL／TEXCOORD_0、u8／u16／u32 索引与节点数据。2026-11-04 补齐的 NORMAL 要求非 normalized FLOAT VEC3、有限值与单位长度（`abs(length - 1) < 1e-4`），保留原值和 Mesh 局部空间；UV 支持非 normalized FLOAT 或 normalized u8／u16 VEC2，解码为有限 float2，保留源方向及范围。可选属性缺失时向量为空，不生成法线或 UV；存在时数量与 POSITION 一致。语义预检先于 cgltf 的通用校验，格式／数量错误带 Mesh／Primitive 上下文；数值错误在复制阶段拒绝。支持分离与交错布局，检查顶点属性的四字节 offset／stride 对齐。
 
-缓冲支持本地外部 URI、GLB BIN 与 base64；不加载远程 URI。其他顶点属性（含额外 UV 集）、相机、灯光和 extras 被忽略；基础材质、图片与采样器当前契约见下文，必需扩展、稀疏 accessor、压缩、蒙皮、动画、形变及 GPU instancing 明确拒绝。此接口是几何转换器，不是完整 glTF 合规验证器，资产库本身不承担 GPU 上传。ModelAssets 与 SceneModels 桥接已提供稳定库内 ID 和逐节点 CPU 实例，见[实例契约](#模型资产与-scene-实例化当前实现)；Sandbox 静态预览见下节。RenderScene 已提取 MeshInstance 并接入共享 GPU 几何，已通过显式 44 字节顶点布局上传位置／诊断色／法线／UV；不能直接把 CPU 数学类型作为上传布局。验证与命令见 [README](../README.md#cpu-gltf-几何导入)。
+缓冲支持本地外部 URI、GLB BIN 与 base64；不加载远程 URI。其他顶点属性（含额外 UV 集）、相机、灯光和 extras 被忽略；基础材质、图片与采样器当前契约见下文，必需扩展、稀疏 accessor、压缩、蒙皮、动画、形变及 GPU instancing 明确拒绝。此接口是几何转换器，不是完整 glTF 合规验证器，资产库本身不承担 GPU 上传。ModelAssets 与 SceneModels 桥接已提供稳定库内 ID 和逐节点 CPU 实例，见[实例契约](#模型资产与-scene-实例化当前实现)；Sandbox 静态预览见下节。RenderScene 已提取 MeshInstance 并接入共享 GPU 几何，已通过显式 52 字节顶点布局上传位置／诊断色／法线／UV／PBR 因子；不能直接把 CPU 数学类型作为上传布局。验证与命令见 [README](../README.md#cpu-gltf-几何导入)。
 
 ## glTF 静态预览（当前实现）
 
@@ -805,7 +805,7 @@ RenderScene 为启动几何去重材质键 `(ModelAssetId, optional materialInde
 
 TextureBindingRef 共享拥有 DescriptorPool／SetLayout／Set、Sampler 和 TextureRef。固定 set 0：具名 BaseColorImageBinding=0（SAMPLED_IMAGE）、BaseColorSamplerBinding=1（SAMPLER），仅 Fragment 可见；Slang 使用相同槽位。每份绑定建立后不可修改；不同 Sampler 共享同一图像，不同材质可共享同一绑定。无贴图材质绑定白色回退图像。管线和帧上下文各保留绑定，命令在 fence／呈现退役后释放，再销毁绑定及图像。resize 重用绑定和图片；空材质跨度仅用于无 Descriptor 的 Shader 模拟练习，不能记录 Material 模式。
 
-M 输出线性因子乘 sRGB 图像采样，交换链执行显示编码；MASK 相乘后裁剪，OPAQUE 忽略 alpha。按 doubleSided 和世界行列式符号处理面向，诊断模式保留原有双面可见性。`discard` 生成 DemoteToHelperInvocation，因此 Vulkan 1.3 查询记录该 feature，Device 只按支持启用，Sandbox 选择支持它的设备。基础光照见下节；PBR、其他材质纹理、透明混合、实例材质覆盖、运行期替换与通用绑定／图尚未实现。
+M 输出线性因子乘 sRGB 图像采样，交换链执行显示编码；MASK 相乘后裁剪，OPAQUE 忽略 alpha。按 doubleSided 和世界行列式符号处理面向，诊断模式保留原有双面可见性。`discard` 生成 DemoteToHelperInvocation，因此 Vulkan 1.3 查询记录该 feature，Device 只按支持启用，Sandbox 选择支持它的设备。基础光照见下节，常量因子 PBR 见后文；其他材质纹理、透明混合、实例材质覆盖和运行期材质替换尚未实现。
 
 ### 方向光与帧光照数据（当前实现）
 
@@ -813,7 +813,7 @@ M 输出线性因子乘 sRGB 图像采样，交换链执行显示编码；MASK �
 
 `extractLighting(const Scene&)` 要求查询外、世界矩阵已更新；返回拥有数据的 [FrameLighting](../src/RHI/FrameLighting.h) 值快照，无组件指针或 GPU 对象。第一版支持零或一盏方向光：零盏得到零辐照度，多盏返回错误，不静默丢弃。负值、非有限参数和 RGB 乘缩放溢出 float 均返回诊断。
 
-当前上传 ABI 为 112 字节／16 字节对齐：offset 0 为单位 `toLight.xyz`，offset 16 为线性 RGB `irradiance.xyz`，两个 w 均为零；后附矩阵／参数见 Forward 阴影小节。固定 set 1／binding 0、UNIFORM_BUFFER、Vertex／Fragment 可见；set 0 的材质绑定和 128 字节顶点 Push Constant 不变。管线拥有布局；[帧上下文](../src/RHI/Vulkan/VulkanClearRenderer.cpp)独立拥有 [coherent 映射 UBO 与 DescriptorPool／Set](../src/RHI/Vulkan/VulkanFrameLighting.h)，不同上下文不共享可变内存。Descriptor 在创建后不更新，逐帧只修改缓冲内容。
+当前上传 ABI 为 192 字节／16 字节对齐：offset 0 为单位 `toLight.xyz`，offset 16 为线性 RGB `irradiance.xyz`，两个 w 均为零；后附矩阵／参数见 Forward 阴影及 PBR 小节。固定 set 1／binding 0、UNIFORM_BUFFER、Vertex／Fragment 可见；set 0 的材质绑定和 128 字节顶点 Push Constant 不变。管线拥有布局；[帧上下文](../src/RHI/Vulkan/VulkanClearRenderer.cpp)独立拥有 [coherent 映射 UBO 与 DescriptorPool／Set](../src/RHI/Vulkan/VulkanFrameLighting.h)，不同上下文不共享可变内存。Descriptor 在创建后不更新，逐帧只修改缓冲内容。
 
 `drawIndexed(..., const FrameLighting&)` 在 acquire 前校验数据，在上一帧提交和呈现等待完成后写入自己的缓冲，随后记录并提交；调用后不借用 CPU 快照。HOST_COHERENT 写入发生于队列提交前，提交提供 host→device 内存域操作；不需要额外 transfer 命令。销毁时等待 GPU／呈现完成，释放命令池后销毁 Descriptor 和缓冲，管线布局与 Device 保持有效。相关规则见 [Vulkan 同步规范](https://docs.vulkan.org/spec/latest/chapters/synchronization.html#synchronization-submission-host-writes)。当前最小图显式声明该 Uniform 读取，不把它视为隐藏的场景访问。
 
@@ -869,7 +869,7 @@ CPU 九组图检查覆盖内部尺寸／用途／未初始化、描述快照、�
 
 2026-11-16 增加 `--shadows`，由 [buildShadowedForwardGraph](../src/Passes/ShadowPass.h) 连接 `Shadow → Clear → Forward → Present`。帧参数工厂接收两组独立 `IndexedDraw` 快照，Shadow 使用光源裁剪矩阵，Forward 使用相机裁剪矩阵；两组均在 acquire 前检查并在记录时固定，空帧仍清除深度。Forward 输入含明确的 shadow 资源／版本，声明 Sampled 并由 PassContext 校验；未声明／旧版本不能作为阴影绑定。图安排 Depth→Sampled 和后续 Sampled→Depth 依赖。
 
-[FrameLighting](../src/RHI/FrameLighting.h) 当前为 112 字节／16 对齐：原 toLight、irradiance 仍在 0／16，offset 32 为列主序 `shadowFromClip`，offset 96 为常量 bias、斜率 bias、enabled 和 PCF radius。Sandbox 计算 `lightClipFromWorld × inverse(cameraClipFromWorld)`，顶点 Shader 将当前相机 clip 位置变换到 light clip，片元透视插值后除 w；无需扩大 128 字节 Draw ABI。CPU 的矩阵关系检查覆盖相机变化和非均匀缩放。所有浮点参数必须有限，bias 非负，enabled 为 0／1，radius 为 0／1。
+[FrameLighting](../src/RHI/FrameLighting.h) 当前为 192 字节／16 对齐（保留原 112 字节前缀，新增相机字段见 PBR 小节）：原 toLight、irradiance 仍在 0／16，offset 32 为列主序 `shadowFromClip`，offset 96 为常量 bias、斜率 bias、enabled 和 PCF radius。Sandbox 计算 `lightClipFromWorld × inverse(cameraClipFromWorld)`，顶点 Shader 将当前相机 clip 位置变换到 light clip，片元透视插值后除 w；无需扩大 128 字节 Draw ABI。CPU 的矩阵关系检查覆盖相机变化和非均匀缩放。所有浮点参数必须有限，bias 非负，enabled 为 0／1，radius 为 0／1。
 
 UBO 的 set 1／binding 0 和图 Uniform 同步范围均扩展到 Vertex／Fragment。Forward 新增 set 2 图像／采样器，复用固定采样绑定布局；每个交换链图像的图内阴影 Descriptor 创建后不更新，保活到该图命令退役。禁用阴影或未使用阴影图的 Forward 路径仍将保活的材质绑定作为静态 set 2 回退，Shader 在 enabled=0 时不采样它；材质图像已经由 Forward 声明。Shadow 管线继续省略 UBO 和 set 2。启用阴影却未提供图声明的深度绑定时，后端拒绝 Draw，不猜测资源。
 
@@ -942,6 +942,36 @@ CustomPass 以 `createDepthTexture` 声明同窗口大小、可采样的 SceneDe
 `ApplicationOptions::shadowView` 使用既有 DirectionalShadowView，默认中心为原点、XY 半范围 2、距离 4、near=.1／far=8；分辨率由实验图确定。Scene 入口在 update／世界传播后，先提取光照，再构造光源矩阵并提取、解析 shadowDraws；失败在 acquire 前诊断，不提交部分帧。启动几何、材质和 Shadow 管线沿用原有保活规则，普通数值编辑不重建图。
 
 查看节点显式读取 Shadow 深度输出，图安排 Depth→Sampled 和后续 Sampled→Depth，同步状态仅在成功提交后登记。候选全部成功后等待 GPU／呈现并退役命令，再统一替换；失败保留有效图，resize 使用最后成功的配置并保持固定光源分辨率。正交深度显示为 `1 - lightDepth`，单方向光固定覆盖，没有自动范围、级联、通用纹理枚举或 UI 缩略图。运行期 Shader 更新仍待实现。使用与检查见[阴影图查看](custom-pass.md#阴影图查看)。
+
+### CustomPass 安全手动 Shader 更新（当前实现）
+
+2026-11-23 在现有整图发布上接入两个用户显示包的完整版本。`shader::prepareGraphicsUpdate` 负责隐藏启动受监督的 CMake 子进程、诊断和独立输出目录；Windows Job 在异常／超时结束时终止其子进程树。编译由用户按钮或场景 R 快捷键显式触发，发生在 UI 收集之后、场景提取与 acquire 之前。当前同步暂停窗口，最多等待 60 秒；不使用后台编译线程或改写 RHI 生命周期。
+
+启动模式持有离线构建的 `.compile.lock`，复制并校验两个已发布包的源码和 SPIR-V SHA256；更新模式先捕获两份用户源文件，再编译所有阶段。`UpdateShaders.cmake` 校验两个包的实际 SPIR-V，只有全部成功才写入 ready 标记。每次操作保留独立产物及诊断，不覆盖之前的目录或共享离线包；生成目录是运行期 resize／切换所需的 CPU 依赖，保留在 build/shader-updates。
+
+`CheckDisplayShader.cmake` 使用 SDK 的 spirv-val、spirv-dis 和 SPIRV-Cross JSON，拒绝超出现有显示 ABI 的 entry、阶段 IO、Descriptor、数组、Push Constants、插值、capability 和 extension。验证限生成三角形的 VertexIndex／Position、UV vec2 location 0、片元 vec4 location 0，片元 set 0 image 0／sampler 1，以及 ToneMap 的一个 offset-0 float；HDR 检查没有常量。消去未使用资源允许通过。反射只核对布局，图仍显式声明采样与附件访问；不支持自动扩展布局或通过反射推断资源用途。
+
+实验把候选目录和完整结构配置按值捕获到 GraphRequest 工厂，所有交换链图像从同一版本准备。编译或接口校验失败不创建 GPU 管线；当前图的准备失败沿用既有回退。候选全部成功后退役旧命令并统一发布，成功通知后才推进实验的目录与版本号；失败保留当前有效版本。旧 GPU 资源仍由帧图及 RHI 按完成条件回收，保留磁盘产物不延长其 GPU 使用期。
+
+后续视图切换、Forward 开关与 resize 使用已生效目录，不从共享发布目录重读。Depth／Shadow 也可更新用户 Shader 包，显示管线在切回对应模式时准备；内置 Forward／Shadow／DepthView Shader 仍为启动版本。当前采用完整图候选，兼容 Shader 更新也重编图；单独 Prepared 替换、计划复用、通用接口更新与历史迁移仍待实现。使用与验证见[安全手动 Shader 更新](custom-pass.md#安全手动-shader-更新)。
+
+### 常量因子 PBR（当前实现）
+
+2026-11-23 接入可选 `ApplicationOptions::physicallyBased`／`GeometryView::Pbr`。Scene 入口默认保持 Lambert；CustomPass 的 `--pbr` 读取模型已有 metallic／roughness 因子，`--pbr-spheres` 使用原创的两行五列材质球。基础色因子／sRGB 贴图、MASK、单双面及镜像法线规则共用原路径。
+
+当前几何和材质在启动时固定，因此 `prepareGeometry` 为 Primitive 的每个顶点写入同一组 float2 因子，经 location 4、flat varying 传递；ColoredVertex 从 44 扩为 52 字节。该数据属于图已声明的 Vertex 读取，不新增隐藏材质缓冲或 Descriptor。CPU 校验因子有限且位于 [0,1]；默认材质遵循既有 metallic=roughness=1。额外代价是每顶点重复 8 字节；尚无实例材质覆盖或运行期材质编辑。Draw Push Constants 保持 128 字节。
+
+`extractLighting(scene,camera,aspect)` 在当前世界变换和所选相机上生成完整帧快照：FrameLighting 的原 112 字节前缀保留，offset 112 为 `inverse(cameraClipFromWorld)` 列主序矩阵，176 为相机世界位置 float4（w=1），总计 192 字节。必须与 `extractDraws` 使用同一相机和 aspect。顶点从 clip 重建世界点并生成指向相机的向量，片元透视插值后归一化；继承缩放／剪切的相机仍采用完整逆矩阵。非有限数据及逆矩阵溢出在 acquire 前拒绝。更新和图中 Uniform 声明、完成后复用规则沿用现有 UBO。
+
+直接光采用单次散射 GGX 分布、相关 Smith 可见性与 Schlick Fresnel；介质 F0=.04，金属 F0=基础色，漫反射按 `(1-F)*(1-metallic)` 缩放。公式依据 [Khronos Sample Renderer BRDF](https://github.com/KhronosGroup/glTF-Sample-Renderer/blob/main/source/Renderer/shaders/brdf.glsl)。感知粗糙度下限 .05（alpha 下限 .0025），零粗糙度近似为平滑粗糙表面；背光／背向视线直接光为零，无环境光。PBR 辐亮度在写入 RGBA16F 前限制到 65504，再乘阴影可见性，避免半精度溢出；CustomPass 仍未连接投射阴影。HDR 查看器优先用青色标记 NaN／Inf，有限 RGB>1 继续标洋红色。MR／法线等贴图、IBL 和完整 PBR 验收尚未完成。
+
+本次字段扩展取代前文历史增量中的 stride 44／FrameLighting 112 字节；同步和资源所有权规则保持。使用与验证见 [PBR 直接光照实验](custom-pass.md#pbr-直接光照实验)。
+
+### Cornell Box 预设与基础色查看（当前实现）
+
+CustomPass 的 `--cornell-box` 在用户实验层加载固定版本的 [NVIDIA Cornell Box](../assets/models/CornellBox/README.md)，通过实例根完成缩放／朝向／偏移，并设置相机与方向光；不修改 Scene／Assets／RHI 接口或原始资产。运行层继续从原始层级提取八个几何实例，并复用唯一 Primitive 的上传数据。
+
+`DisplayView::BaseColor` 与最终画面使用同一 HDR／ToneMap 图形路径，参数构造时只修改本帧 Draw 列表副本的 `GeometryView::Material`；原始渲染快照保持不变。结构选择按值捕获并使用已有候选图安全发布，图仍声明几何、帧 UBO、采样图像及 UI 资源。该模式是经过显示转换的基础色预览；不添加环境光或推断顶灯发光。当前 Cornell Box 不具备面积光、间接反弹与颜色渗透，不能视为路径追踪完成。
 
 ## 实现参考建议
 

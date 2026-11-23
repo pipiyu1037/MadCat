@@ -1,5 +1,7 @@
 #include "Runtime/Application.h"
 #include "DisplayGraph.h"
+#include "PbrSpheres.h"
+#include "Shader/GraphicsUpdate.h"
 #include <imgui.h>
 #include <algorithm>
 #include <cstdio>
@@ -19,16 +21,30 @@ int main(int argc, char** argv)
     try
     {
         auto path=std::filesystem::path(u8"" MADCAT_EXAMPLE_ASSETS)/"models/Suzanne/Suzanne.gltf";
-        bool fit=false,hasPath=false;
+        bool fit=false,hasPath=false,pbr=false,spheres=false,cornell=false;
+        auto shaderSources=std::filesystem::path(u8"" MADCAT_UPDATE_SOURCES);
         for (int arg=1;arg<argc;++arg) {
             const std::filesystem::path value(argv[arg]);
             if (value=="--fit" && !fit) { fit=true; }
-            else if (!hasPath && value!="--fit") { path=value; hasPath=true; }
-            else { throw std::runtime_error("Usage: CustomPass [--fit] [model.gltf|model.glb]"); }
+            else if (value=="--pbr") { pbr=true; }
+            else if (value=="--pbr-spheres") { spheres=true; pbr=true; }
+            else if (value=="--cornell-box") { cornell=true; pbr=true; }
+            else if (value=="--shader-sources") {
+                if (++arg==argc) { throw std::runtime_error("--shader-sources requires a directory"); }
+                shaderSources=std::filesystem::path(argv[arg]);
+            }
+            else if (!hasPath && !value.native().starts_with(std::filesystem::path("--").native())) { path=value; hasPath=true; }
+            else { throw std::runtime_error("Usage: CustomPass [--fit] [--pbr | --pbr-spheres | --cornell-box] [--shader-sources directory] [model.gltf|model.glb]"); }
         }
-        auto imported=assets::importGltfGeometry(path);
+        if (cornell) {
+            if (spheres || hasPath) { throw std::runtime_error("--cornell-box supplies its own scene"); }
+            path=std::filesystem::path(u8"" MADCAT_EXAMPLE_ASSETS)/"models/CornellBox/CornellBox.gltf"; fit=true;
+        }
+        if (spheres && (hasPath || fit)) { throw std::runtime_error("--pbr-spheres supplies its own scene and framing"); }
+        auto imported=spheres ? std::expected<assets::GltfGeometry,assets::GltfError>(experiment::makePbrSpheres()) : assets::importGltfGeometry(path);
         if (!imported) { throw std::runtime_error(imported.error().message); }
         scene::LocalTransform initialPose; initialPose.scale=glm::vec3(.7f);
+        if (spheres) { initialPose.scale=glm::vec3(1); }
         if (fit)
         {
             glm::dvec3 minimum(std::numeric_limits<double>::max()), maximum(-std::numeric_limits<double>::max());
@@ -50,6 +66,12 @@ int main(int argc, char** argv)
             initialPose.scale=glm::vec3(static_cast<float>(.7/halfExtent));
             initialPose.translation=glm::vec3(-(minimum+maximum)*.5*(.7/halfExtent));
         }
+        if (cornell) {
+            // Source room opens toward -Z. Face it toward our +Z camera and
+            // leave room for the parameter panel without editing the asset.
+            initialPose.rotation=glm::angleAxis(glm::radians(180.f),glm::vec3(0,1,0));
+            initialPose.translation.x+=.4f;
+        }
         assets::ModelAssets assets;
         const auto model=assets.add(std::move(*imported));
         scene::Scene scene;
@@ -58,7 +80,9 @@ int main(int argc, char** argv)
         const auto camera=scene.create(), light=scene.create();
         scene::LocalTransform modelPose=initialPose, cameraPose;
         cameraPose.translation.z=3;
-        if (!scene.setLocalTransform(instance->root,modelPose) || !scene.add<scene::PerspectiveCamera>(camera) ||
+        auto* cameraParameters=scene.add<scene::PerspectiveCamera>(camera);
+        if (cornell && cameraParameters) { cameraParameters->verticalFov=glm::radians(45.f); }
+        if (!scene.setLocalTransform(instance->root,modelPose) || !cameraParameters ||
             !scene.setLocalTransform(camera,cameraPose)) { throw std::runtime_error("Scene setup failed"); }
         auto* sunlight=scene.add<scene::DirectionalLight>(light);
         if (!sunlight) { throw std::runtime_error("Light setup failed"); }
@@ -68,16 +92,29 @@ int main(int argc, char** argv)
         runtime::ApplicationOptions application;
         application.title="MadCat CustomPass";
         application.forwardColorFormat=rhi::ColorFormat::Rgba16Float;
+        application.physicallyBased=pbr;
+        if (pbr) { std::fprintf(stderr,"CustomPass: PBR constant factors; roughness floor .05.\n"); }
         application.prepareDepthView=true;
         application.prepareShadow=true;
-        const auto shaderRoot=std::filesystem::path(u8"" MADCAT_EXAMPLE_SHADERS);
+        const shader::GraphicsUpdateOptions shaderUpdate{
+            std::filesystem::path(u8"" MADCAT_UPDATE_CMAKE),std::filesystem::path(u8"" MADCAT_UPDATE_SCRIPT),
+            std::filesystem::path(u8"" MADCAT_UPDATE_OUTPUT),shaderSources,std::filesystem::path(u8"" MADCAT_EXAMPLE_SHADERS)};
+        auto startupShaders=shader::prepareGraphicsUpdate(shaderUpdate,false);
+        if (!startupShaders) { throw std::runtime_error(startupShaders.error()); }
+        auto shaderRoot=std::move(*startupShaders);
+        std::fprintf(stderr,"CustomPass: Shader revision 0 captured; %s.\n",shaderRoot.string().c_str());
         experiment::DisplaySettings requestedGraph,activeGraph,lastPresentedGraph;
         application.graphFactory=experiment::makeDisplayGraph(displayParameters,shaderRoot,activeGraph);
         uint64_t graphRequestId=0;
         std::optional<runtime::GraphRequest> pendingGraph;
+        std::optional<std::filesystem::path> pendingShaders;
+        bool compileRequested=false,shaderRejected=false;
+        uint64_t shaderRevision=0;
+        std::string shaderDiagnostic="Display and HDR shaders captured. Compile + apply explicitly rebuilds both.";
         std::string graphDiagnostic;
         auto requestGraph=[&](experiment::DisplaySettings settings) {
             requestedGraph=settings;
+            pendingShaders.reset();
             pendingGraph=runtime::GraphRequest{++graphRequestId,
                 experiment::makeDisplayGraph(displayParameters,shaderRoot,settings)};
         };
@@ -110,14 +147,58 @@ int main(int argc, char** argv)
             cameraTransform.translation.x+=preset==6 ? .4f : 0;
             scene::LocalTransform lightPose;
             if (preset==5) { lightPose.rotation=glm::angleAxis(glm::radians(35.f),glm::vec3(0,1,0)); }
+            if (cornell) {
+                // Direct illumination from the opening, above and to one side.
+                // This is not the source scene's emissive ceiling area light.
+                const glm::vec3 direction=glm::normalize(glm::vec3(.4f,.8f,1));
+                const auto alignment=glm::normalize(glm::quat(1.f+direction.z,-direction.y,direction.x,0));
+                lightPose.rotation=alignment*lightPose.rotation;
+            }
             if (!scene.setLocalTransform(instance->root,modelPose) || !scene.setLocalTransform(camera,cameraTransform) ||
                 !scene.setLocalTransform(light,lightPose)) { throw std::runtime_error("Scene edit failed"); }
         };
+        if (cornell) { setPose(0); }
         runtime::SceneCallbacks callbacks;
-        callbacks.graphRequest=[&] { return std::exchange(pendingGraph,std::nullopt); };
+        callbacks.graphRequest=[&] {
+            if (std::exchange(compileRequested,false))
+            {
+                auto candidate=shader::prepareGraphicsUpdate(shaderUpdate,true);
+                if (!candidate)
+                {
+                    shaderRejected=true; shaderDiagnostic=candidate.error();
+                    std::fprintf(stderr,"CustomPass: Shader update rejected; keeping revision %llu.\n%s\n",
+                        static_cast<unsigned long long>(shaderRevision),shaderDiagnostic.c_str());
+                }
+                else
+                {
+                    pendingShaders=std::move(*candidate);
+                    pendingGraph=runtime::GraphRequest{++graphRequestId,
+                        experiment::makeDisplayGraph(displayParameters,*pendingShaders,requestedGraph)};
+                }
+            }
+            return std::exchange(pendingGraph,std::nullopt);
+        };
         callbacks.graphUpdated=[&](const runtime::GraphUpdate& update) {
             if (update.applied) { activeGraph=requestedGraph; }
             graphDiagnostic=update.diagnostic;
+            if (pendingShaders)
+            {
+                shaderRejected=!update.applied;
+                if (update.applied)
+                {
+                    shaderRoot=std::move(*pendingShaders); ++shaderRevision;
+                    shaderDiagnostic="Display and HDR shaders applied. Hover here for the latest result.";
+                    std::fprintf(stderr,"CustomPass: Shader revision %llu applied; %s.\n",
+                        static_cast<unsigned long long>(shaderRevision),shaderRoot.string().c_str());
+                }
+                else
+                {
+                    shaderDiagnostic=update.diagnostic;
+                    std::fprintf(stderr,"CustomPass: Shader preparation rejected; keeping revision %llu.\n",
+                        static_cast<unsigned long long>(shaderRevision));
+                }
+                pendingShaders.reset();
+            }
         };
         callbacks.ui=[&] {
             auto draft=controls;
@@ -139,19 +220,39 @@ int main(int argc, char** argv)
             if (ImGui::Checkbox("Forward",&graphSettings.forwardEnabled)) { requestGraph(graphSettings); }
             ImGui::TextUnformatted("Ctrl+click a slider to type a value.");
             ImGui::Text("Active graph: Forward %s",activeGraph.forwardEnabled ? "on" : "off");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Compile + apply")) { compileRequested=true; }
+            if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Rebuild display/HDR shaders and apply a complete candidate.\nR is the scene shortcut. Compilation pauses this window."); }
             int view=static_cast<int>(graphSettings.view);
-            if (ImGui::Combo("View",&view,"Final image\0Camera depth\0HDR range\0Shadow map\0")) {
+            if (ImGui::Combo("View",&view,"Final image\0Camera depth\0HDR range\0Shadow map\0Base color\0")) {
                 graphSettings.view=static_cast<experiment::DisplayView>(view); requestGraph(graphSettings);
             }
             ImGui::Text("Active view: %s",experiment::displayViewName(activeGraph.view));
+            ImGui::SameLine();
+            if (shaderRejected) { ImGui::TextColored({1,.4f,.3f,1},"Update failed"); }
+            else { ImGui::Text("Shader %llu",static_cast<unsigned long long>(shaderRevision)); }
+            if (ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip(); ImGui::PushTextWrapPos(550);
+                ImGui::TextUnformatted(shaderDiagnostic.c_str());
+                ImGui::PopTextWrapPos(); ImGui::EndTooltip();
+            }
             if (activeGraph.view==experiment::DisplayView::Depth) { ImGui::TextUnformatted("1 - device depth (nonlinear)"); }
             if (activeGraph.view==experiment::DisplayView::HdrRange) {
                 ImGui::TextUnformatted("Magenta: any RGB > 1; else RGB.");
-                ImGui::TextUnformatted("Before exposure and tone mapping.");
+                ImGui::TextUnformatted("Cyan: NaN/Inf; before exposure.");
             }
             if (activeGraph.view==experiment::DisplayView::Shadow) {
                 ImGui::TextUnformatted("1 - light depth (orthographic)");
                 ImGui::TextUnformatted("1024 x 1024; independent of Forward.");
+            }
+            if (spheres && activeGraph.view==experiment::DisplayView::Final) {
+                ImGui::TextUnformatted("Top: dielectric; bottom: metal.");
+                ImGui::TextUnformatted("Roughness L->R: 0, .2, .4, .7, 1.");
+            }
+            if (activeGraph.view==experiment::DisplayView::BaseColor) { ImGui::TextUnformatted("Unlit base color, then tone mapping."); }
+            else if (cornell && activeGraph.view==experiment::DisplayView::Final) {
+                ImGui::TextUnformatted("Directional PBR; no area light/GI.");
+                ImGui::TextUnformatted("Use Base color to inspect both walls.");
             }
             if (!graphDiagnostic.empty()) { ImGui::TextWrapped("%s",graphDiagnostic.c_str()); }
             if (!diagnostic.empty()) { ImGui::TextWrapped("%s",diagnostic.c_str()); }
@@ -159,6 +260,7 @@ int main(int argc, char** argv)
             if (edited) { request(draft); }
         };
         callbacks.keyPressed=[&](char key) {
+            if (key=='R') { compileRequested=true; return; }
             if (key<'1' || key>'7') { return; }
             mode=key-'1';
             Controls draft;

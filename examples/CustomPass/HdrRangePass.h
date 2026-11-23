@@ -25,7 +25,7 @@ struct HdrRangePass
         desc.vertexShader=shaderDirectory/"vertex.spv"; desc.fragmentShader=shaderDirectory/"fragment.spv";
         desc.sampledTexture=true;
         auto pipeline=factory(desc);
-        if (!pipeline) { return std::unexpected("HDR range preparation failed; build CustomPassHdrShaders then restart"); }
+        if (!pipeline) { return std::unexpected("HDR range pipeline preparation failed"); }
         return Prepared{std::move(pipeline)};
     }
     bool execute(madcat::graph::PassContext& context,const Declared& declared,

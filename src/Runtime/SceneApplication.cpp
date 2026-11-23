@@ -31,11 +31,11 @@ int run(const ApplicationOptions& options, scene::Scene& scene, const assets::Mo
             if (!draws) { return std::unexpected(draws.error()); }
             auto resolved = render::resolveDraws(*geometry, *draws);
             if (!resolved) { return std::unexpected(resolved.error()); }
-            auto lighting = render::extractLighting(scene);
+            auto lighting = options.physicallyBased ? render::extractLighting(scene, camera, info.aspect) : render::extractLighting(scene);
             if (!lighting) { return std::unexpected(lighting.error()); }
             RenderFrame frame;
             frame.draws = std::move(*resolved);
-            for (auto& draw : frame.draws) { draw.transform.view = rhi::GeometryView::Lit; }
+            for (auto& draw : frame.draws) { draw.transform.view = options.physicallyBased ? rhi::GeometryView::Pbr : rhi::GeometryView::Lit; }
             frame.lighting = *lighting;
             if (options.prepareShadow)
             {

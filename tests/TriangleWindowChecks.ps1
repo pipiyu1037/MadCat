@@ -541,12 +541,12 @@ try {
     $moduleCount = if ($ShadowView) { 6 } elseif ($DepthView -or $Shadows) { 4 } else { 2 }
     if ([regex]::Matches($log, 'Shader Module created;').Count -ne $moduleCount -or [regex]::Matches($log, 'Shader Module destroyed\.').Count -ne $moduleCount -or
         $log -notmatch '(?s)Triangle pipeline destroyed.*Swapchain destroyed.*Shader Module destroyed.*Shader Module destroyed.*Device destroyed.*Surface destroyed.*Instance destroyed') { throw 'Module/Device destruction count or order mismatch' }
-    $vertexBytes = 176; $indexBytes = 36; $indexCount = 9
+    $vertexBytes = 208; $indexBytes = 36; $indexCount = 9
     if ($hasModel) {
         $preview = [regex]::Match($log, 'shared model geometry ready; (\d+) primitives, (\d+) vertices, (\d+) indices; (\d+) initial draws\.')
         if (-not $preview.Success) { throw 'Missing model preparation statistics' }
         if ($referenceModel -and $preview.Value -ne 'shared model geometry ready; 2 primitives, 6 vertices, 6 indices; 8 initial draws.') { throw 'Shared glTF geometry count mismatch' }
-        $vertexBytes = 44 * [int]$preview.Groups[2].Value
+        $vertexBytes = 52 * [int]$preview.Groups[2].Value
         $indexCount = [int]$preview.Groups[3].Value
         $indexBytes = 4 * $indexCount
         if ($Scenario -eq 'model') {

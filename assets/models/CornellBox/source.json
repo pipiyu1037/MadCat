@@ -1,0 +1,43 @@
+{
+  "repository": "NVIDIA-RTX/RTXDI-Assets",
+  "commit": "1da7b749ef0e3fb606ab46dde8e5bfbacd078a02",
+  "license": "MIT",
+  "retrieval": "Git sparse checkout with Git LFS; upstream files unchanged",
+  "files": [
+    {
+      "file": "CornellBox.gltf",
+      "bytes": 9705,
+      "sha256": "3884b22c26acb5ac8ba975e39d50e055abed285a8fb8d47bc8404c13ed3f0028",
+      "source": "https://github.com/NVIDIA-RTX/RTXDI-Assets/blob/1da7b749ef0e3fb606ab46dde8e5bfbacd078a02/CornellBox/CornellBox.gltf",
+      "download": "https://media.githubusercontent.com/media/NVIDIA-RTX/RTXDI-Assets/1da7b749ef0e3fb606ab46dde8e5bfbacd078a02/CornellBox/CornellBox.gltf"
+    },
+    {
+      "file": "CornellBox.bin",
+      "bytes": 1610,
+      "sha256": "79b0535e5f30e78c5fc1878513d056c1a2d28c538d0133581c3c3a86598a75c3",
+      "source": "https://github.com/NVIDIA-RTX/RTXDI-Assets/blob/1da7b749ef0e3fb606ab46dde8e5bfbacd078a02/CornellBox/CornellBox.bin",
+      "download": "https://media.githubusercontent.com/media/NVIDIA-RTX/RTXDI-Assets/1da7b749ef0e3fb606ab46dde8e5bfbacd078a02/CornellBox/CornellBox.bin"
+    },
+    {
+      "file": "White.png",
+      "bytes": 131,
+      "sha256": "9b44fe4ce990a75163d3f440d861f127e8394b328e28cf03c15d480071c8dff3",
+      "source": "https://github.com/NVIDIA-RTX/RTXDI-Assets/blob/1da7b749ef0e3fb606ab46dde8e5bfbacd078a02/CornellBox/White.png",
+      "download": "https://media.githubusercontent.com/media/NVIDIA-RTX/RTXDI-Assets/1da7b749ef0e3fb606ab46dde8e5bfbacd078a02/CornellBox/White.png"
+    },
+    {
+      "file": "LICENSE.txt",
+      "bytes": 1073,
+      "sha256": "e3151c4e72486708e3f1273cb32943467b6f96cd66f3d2f0d89f99b404ef6db9",
+      "source": "https://github.com/NVIDIA-RTX/RTXDI-Assets/blob/1da7b749ef0e3fb606ab46dde8e5bfbacd078a02/LICENSE",
+      "download": "https://raw.githubusercontent.com/NVIDIA-RTX/RTXDI-Assets/1da7b749ef0e3fb606ab46dde8e5bfbacd078a02/LICENSE"
+    },
+    {
+      "file": "upstream-readme.txt",
+      "bytes": 116,
+      "sha256": "0398901ad15cf374aeb1383d43d6f2b2e82c3163c9bea6c8a5d6581fda5d83c8",
+      "source": "https://github.com/NVIDIA-RTX/RTXDI-Assets/blob/1da7b749ef0e3fb606ab46dde8e5bfbacd078a02/README.md",
+      "download": "https://raw.githubusercontent.com/NVIDIA-RTX/RTXDI-Assets/1da7b749ef0e3fb606ab46dde8e5bfbacd078a02/README.md"
+    }
+  ]
+}

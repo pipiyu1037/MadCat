@@ -34,6 +34,10 @@ cmake --build build --config Debug --target CustomPass MadCatShaders CustomPassS
 
 窗口内的 Dear ImGui 面板可连续调节曝光 EV、方向光线性 RGB 颜色和辐照度，提供恢复默认值；Ctrl＋单击滑条可输入数值。单击场景区域后，按 1 默认、2 曝光 −2 EV、3 曝光 +2 EV、4 关灯、5 移动模型。UI 编辑时抑制实验快捷键，普通参数变化不重建图或管线。图执行 `ClearHDR → ForwardHDR → ToneMap → UI → Present`，UI 保留场景颜色并声明字体采样。
 
+使用 `.\build\Debug\CustomPass.exe --pbr-spheres` 查看两行五列金属度／粗糙度材质球，或 `--pbr --fit <模型路径>` 使用模型因子。当前支持单方向光 PBR 直接光照及原基础色贴图；MR／法线贴图、IBL 尚未实现。运行方式、数值边界与验证见 [PBR 实验](docs/custom-pass.md#pbr-直接光照实验)。
+
+使用 `.\build\Debug\CustomPass.exe --cornell-box` 打开已随仓库保存的 [Cornell Box](assets/models/CornellBox/README.md)，预设会处理场景朝向、缩放、相机和方向光。View 新增 Base color，可检查红绿墙的基础色；Final image 保持 PBR 直接光。当前尚无顶灯面积光和间接颜色渗透。
+
 Forward 复选框可在运行中移除／恢复场景绘制节点；关闭时保留 `ClearHDR → ToneMap → UI → Present`，显示背景和面板。新图为所有交换链图像准备成功后统一切换，失败保留当前图并显示原因。窗口重建继续使用最后生效的图。
 
 View 下拉框可选择 Final image 或 Camera depth。深度模式在主视口显示 `1 - deviceDepth` 灰度，近处较亮、清除背景为黑色，参数面板继续可用。它表示非线性设备深度；曝光和灯光不影响该显示。Restore defaults 恢复最终画面和 Forward 开启。使用与验证见[主相机深度查看](docs/custom-pass.md#主相机深度查看)。
@@ -48,7 +52,7 @@ Shadow map 显示同一场景的方向光深度，独立执行 `Shadow → Depth
 .\build\Debug\CustomPass.exe --fit assets/models/Lantern/Lantern.gltf
 ```
 
-修改 Slang 后关闭程序，手动构建对应目标再启动：`CustomPassShaders` 编译最终显示，`CustomPassHdrShaders` 编译 HDR 范围查看。自定义图形路径当前限颜色附件、全屏三角形、一个片元采样 set 和小块 Push Constants；Compute、任意布局与运行期 Shader 更新待实现。详细机制、扩展步骤和验证命令见[教程](docs/custom-pass.md)。
+修改 `examples/CustomPass/display.slang` 或 `hdr-range.slang` 后，点击 **Compile + apply**，或单击场景后按 **R**，即可在运行中手动编译并应用两个显示 Shader。完整候选通过校验与管线准备后才发布；失败保持有效画面，悬停 Shader 状态可查看诊断。编译期间窗口暂停更新。启动仍需上面的手动 Shader 目标；启动快照和后续版本保存在 `build/shader-updates/`。该入口需要 SDK 的 `spirv-cross`／`spirv-dis` 等工具，接口变化会被拒绝；内置 Forward／Shadow／DepthView Shader 仍需重编后重启。自定义图形路径当前限颜色附件、全屏三角形、一个片元采样 set 和小块 Push Constants；Compute 和任意布局待实现。详见[安全手动 Shader 更新](docs/custom-pass.md#安全手动-shader-更新)。
 
 ## 构建与运行
 
@@ -548,7 +552,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.p
 
 L 模式在线性空间计算 `基础色 × 辐照度 × max(dot(N,L),0) / π`，交换链执行 sRGB 显示编码。法线按世界逆转置传递、插值后归一化；双面材质有效背面的法线翻转，镜像补偿绕序，MASK 保留透明裁剪。缺失法线、奇异法线变换或零插值法线显示洋红色。无环境光，关灯后的有效表面为黑色。投射阴影需使用后文的 `--shadows`；当前仍无 HDR／色调映射、PBR 或更多灯型，输出超出 SDR 范围时截断。
 
-光照数据使用独立的 [112 字节帧 Uniform Buffer](src/RHI/FrameLighting.h)，set 1／binding 0、顶点和片元可见；原 32 字节灯光数据后附加阴影矩阵及参数，Draw 常量仍为 128 字节。每个帧上下文独立拥有 UBO 和不可变 Descriptor，等待上一帧提交完成后才更新，GPU／呈现退役并释放命令后销毁。C++ 与 Shader 必须一起更新，重新编译前先关闭旧程序。
+光照数据使用独立的 [192 字节帧 Uniform Buffer](src/RHI/FrameLighting.h)，set 1／binding 0、顶点和片元可见；原灯光数据后附加阴影与 PBR 相机矩阵及参数，Draw 常量仍为 128 字节。每个帧上下文独立拥有 UBO 和不可变 Descriptor，等待上一帧提交完成后才更新，GPU／呈现退役并释放命令后销毁。C++ 与 Shader 必须一起更新，重新编译前先关闭旧程序。
 
 2026-11-06 光照增量的 Debug／Release RenderScene 10 组、管线 66 项与材质 3 组检查通过，Slang 编译／SPIR-V 验证及 12 项编译失败恢复通过。原创 [LightingProbe](assets/models/README.md#方向光参考资产)的八次采样每次 54 个独立解析像素均通过，覆盖灯光旋转／关闭、非均匀缩放、镜像、反序、resize 和最小化恢复；Debug 同步验证无 warning／error，Release 未主动启用验证层。另通过 Debug 原材质五次采样及 Suzanne 光照八次可见性冒烟；Suzanne 没有逐像素参考。后续图内深度和光源深度绘制进展见下文。
 
@@ -630,7 +634,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/TriangleWindowChecks.p
 
 原创 [ShadowProbe](assets/models/README.md#投射阴影参考资产) 使用接收平面和带 MASK 孔洞的遮挡板。Debug／Release 各通过 15 组 GPU 解析像素检查：默认帧 227 点包含亮区、完全阴影和 33 个 PCF 过渡点，硬阴影过渡计数为零，关闭时接收面全部受光；同时覆盖方向／关灯、相机变化、非均匀缩放、镜像、删除至空／恢复、反序、resize 与最小化恢复。Debug 原光照八组、主相机深度八组、原阴影查看与投射阴影最小化直接退出回归通过，同步验证无 warning／error。Release 未主动启用验证层。两种配置各 11 组 RenderScene、11 组图和 68 项管线模拟检查、三个 Shader 包编译／验证及各 12 项失败恢复通过。
 
-实际 GPU 为 RTX 5060 Ti、D32_SFLOAT；截图已检查，日志／截图在 `build/verification/triangle/`，文件名包含 `shadow-lighting-shadows-ShadowProbe`。未测性能或验证其他 GPU／驱动。当前只有单方向光和固定范围阴影，无级联、接触硬化或透明混合投影；仍直接输出 SDR，PBR 和路径追踪尚未实现。可复用运行层与 BasicScene 已实现，后续以 HDR／显示转换检验 CustomPass 工作流，见[近期实施顺序](docs/project-development.md#用户使用方式与近期实施顺序)。
+实际 GPU 为 RTX 5060 Ti、D32_SFLOAT；截图已检查，日志／截图在 `build/verification/triangle/`，文件名包含 `shadow-lighting-shadows-ShadowProbe`。未测性能或验证其他 GPU／驱动。当前只有单方向光和固定范围阴影，无级联、接触硬化或透明混合投影；该 Sandbox 路径仍直接输出 SDR；CustomPass 已有 HDR 和常量因子 PBR，完整路径追踪尚未实现。可复用运行层与 BasicScene 已实现，CustomPass 提供渲染实验工作流，见[近期实施顺序](docs/project-development.md#用户使用方式与近期实施顺序)。
 
 ## 手动编译 Shader
 
@@ -741,7 +745,7 @@ cmake --build build --config Release --target MadCatBufferChecks MadCatTriangleC
 
 ## 三角形绘制与检查
 
-[`VulkanTrianglePipeline`](src/RHI/Vulkan/VulkanTrianglePipeline.h) 是当前后端验证场景的专用封装：一个 128 字节 Vertex Push Constant 范围、Triangle List、一个与 Swapchain 格式匹配的颜色附件和匹配实际深度纹理的附件格式、单采样、填充且不剔除，启用 LESS 深度测试／写入，不启用混合。它通过 `VkPipelineRenderingCreateInfo` 接入动态渲染，采用 set 0 的基础色图像／采样器绑定。`ColoredVertex` 固定为 44 字节，binding 0、逐顶点，位置 location 0／float3／offset 0，颜色 location 1／float3／offset 12，法线 location 2／float3／offset 24，UV location 3／float2／offset 36。
+[`VulkanTrianglePipeline`](src/RHI/Vulkan/VulkanTrianglePipeline.h) 是当前后端验证场景的专用封装：一个 128 字节 Vertex Push Constant 范围、Triangle List、一个与 Swapchain 格式匹配的颜色附件和匹配实际深度纹理的附件格式、单采样、填充且不剔除，启用 LESS 深度测试／写入，不启用混合。它通过 `VkPipelineRenderingCreateInfo` 接入动态渲染，采用 set 0 的基础色图像／采样器绑定。`ColoredVertex` 固定为 52 字节，binding 0、逐顶点，位置 location 0／float3／offset 0，颜色 location 1／float3／offset 12，法线 location 2／float3／offset 24，UV location 3／float2／offset 36，金属度／粗糙度 location 4／float2／offset 44。
 
 初始化接收同 Device 的 Vertex／Index 两个 BufferRef，拒绝用途混用、不完整顶点步长、少于三个或超出 uint32 数量的顶点、非三角形索引数及越界索引；失败不创建管线对象。`recordDraw` 绑定管线、正高度 viewport／scissor、顶点及 uint32 索引缓冲，录入有限的 DrawTransform，再记录 `vkCmdDrawIndexed(indexCount, 1, 0, 0, 0)`，索引偏移与 vertexOffset 均为零，primitive restart 关闭。矩阵仍由 Scene／相机提取。[动态渲染格式](https://docs.vulkan.org/refpages/latest/refpages/source/VkPipelineRenderingCreateInfo.html)、[索引绑定](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdBindIndexBuffer.html)、[索引绘制](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdDrawIndexed.html)
 

@@ -18,6 +18,8 @@ struct FrameLighting
     float4 irradiance;
     column_major float4x4 shadowFromClip;
     float4 shadow;
+    column_major float4x4 worldFromClip;
+    float4 cameraPosition;
 };
 [[vk::binding(0, 1)]] ConstantBuffer<FrameLighting> frameLighting;
 [[vk::binding(0, 2)]] Texture2D<float> shadowTexture;
@@ -34,14 +36,20 @@ struct VertexOutput
     nointerpolation float4 factor : COLOR1;
     nointerpolation float cutoff : TEXCOORD4;
     float4 shadowClip : TEXCOORD5;
+    float3 toCamera : TEXCOORD6;
+    nointerpolation float2 metallicRoughness : TEXCOORD7;
 };
 
 [shader("vertex")]
-VertexOutput vertexMain(float3 position : POSITION, float3 color : COLOR0, float3 normal : NORMAL, float2 uv : TEXCOORD0)
+VertexOutput vertexMain(float3 position : POSITION, float3 color : COLOR0, float3 normal : NORMAL, float2 uv : TEXCOORD0,
+    float2 metallicRoughness : TEXCOORD1)
 {
     VertexOutput output;
     output.position = mul(drawTransform.clipFromLocal, float4(position, 1.0));
     output.shadowClip = mul(frameLighting.shadowFromClip, output.position);
+    float4 world = mul(frameLighting.worldFromClip, output.position);
+    output.toCamera = frameLighting.cameraPosition.xyz * world.w - world.xyz;
+    output.metallicRoughness = metallicRoughness;
     output.color = color;
     output.worldNormal = drawTransform.normalColumn0.xyz * normal.x + drawTransform.normalColumn1.xyz * normal.y + drawTransform.normalColumn2.xyz * normal.z;
     output.uv = uv;
@@ -77,7 +85,7 @@ float shadowVisibility(float4 shadowClip, float cosine)
 [shader("fragment")]
 float4 fragmentMain(VertexOutput input, bool frontFace : SV_IsFrontFace) : SV_Target0
 {
-    if (input.view == 3 || input.view == 4)
+    if (input.view == 3 || input.view == 4 || input.view == 5)
     {
         bool mirrored = (input.attributes & 8) != 0;
         if ((input.attributes & 16) == 0 && (frontFace == mirrored)) discard;
@@ -87,7 +95,7 @@ float4 fragmentMain(VertexOutput input, bool frontFace : SV_IsFrontFace) : SV_Ta
         float4 texel = baseColorTexture.Sample(baseColorSampler, input.uv);
         if ((input.attributes & 64) != 0) color *= texel;
         if ((input.attributes & 32) != 0 && color.a < input.cutoff) discard;
-        if (input.view == 4)
+        if (input.view == 4 || input.view == 5)
         {
             if ((input.attributes & 5) != 5) return float4(1, 0, 1, 1);
             float magnitude = max(abs(input.worldNormal.x), max(abs(input.worldNormal.y), abs(input.worldNormal.z)));
@@ -97,7 +105,40 @@ float4 fragmentMain(VertexOutput input, bool frontFace : SV_IsFrontFace) : SV_Ta
             // a double-sided surface, after inverse-transpose normal transport.
             if (frontFace == mirrored) normal = -normal;
             float cosine = max(dot(normal, frameLighting.toLight.xyz), 0.0);
-            color.rgb *= (frameLighting.irradiance.xyz / 3.141592653589793) * cosine * shadowVisibility(input.shadowClip, cosine);
+            if (input.view == 5)
+            {
+                // Single-scattering GGX / height-correlated Smith / Schlick.
+                // Equations: Khronos glTF-Sample-Renderer, shaders/brdf.glsl.
+                // Zero roughness is approximated by perceptual roughness .05.
+                float viewScale = max(abs(input.toCamera.x), max(abs(input.toCamera.y), abs(input.toCamera.z)));
+                if (!(viewScale > 0) || !all(isfinite(input.toCamera))) return float4(0,0,0,1);
+                float3 view = normalize(input.toCamera / viewScale);
+                float ndv = dot(normal, view);
+                if (ndv <= 0 || cosine <= 0) return float4(0,0,0,1);
+                float3 halfSum = view + frameLighting.toLight.xyz;
+                float halfScale = max(abs(halfSum.x), max(abs(halfSum.y), abs(halfSum.z)));
+                if (!(halfScale > 0)) return float4(0,0,0,1);
+                float3 halfVector = normalize(halfSum / halfScale);
+                float ndh = saturate(dot(normal, halfVector));
+                float vdh = saturate(dot(view, halfVector));
+                float metal = saturate(input.metallicRoughness.x);
+                float alpha = max(input.metallicRoughness.y * input.metallicRoughness.y, .0025);
+                float alpha2 = alpha * alpha;
+                // Cross product avoids cancellation at ndh=1 for smooth materials.
+                float3 perpendicular = cross(normal, halfVector);
+                float denominator = dot(perpendicular, perpendicular) + ndh * ndh * alpha2;
+                float distribution = alpha2 / (3.141592653589793 * denominator * denominator);
+                float visibility = .5 / max(1e-7, cosine * sqrt(ndv*ndv*(1-alpha2)+alpha2) +
+                    ndv * sqrt(cosine*cosine*(1-alpha2)+alpha2));
+                float3 f0 = lerp(float3(.04), color.rgb, metal);
+                float3 fresnel = f0 + (1-f0) * pow(1-vdh, 5);
+                float3 diffuse = (1-fresnel) * (1-metal) * color.rgb / 3.141592653589793;
+                // Bound radiance before the RGBA16F store (and before a zero
+                // shadow factor could multiply an overflowing light product).
+                color.rgb = min((diffuse + fresnel * distribution * visibility) * cosine * frameLighting.irradiance.xyz,
+                    float3(65504)) * shadowVisibility(input.shadowClip, cosine);
+            }
+            else color.rgb *= (frameLighting.irradiance.xyz / 3.141592653589793) * cosine * shadowVisibility(input.shadowClip, cosine);
         }
         return float4(color.rgb, 1);
     }

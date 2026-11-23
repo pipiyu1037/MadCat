@@ -287,6 +287,7 @@ set_target_properties(MadCatRHI PROPERTIES CXX_EXTENSIONS OFF)
 add_library(MadCatRuntime STATIC
     src/Runtime/Application.cpp
     src/Runtime/SceneApplication.cpp
+    src/Shader/GraphicsUpdate.cpp
     src/RenderScene/VulkanMaterials.cpp
 )
 target_compile_features(MadCatRuntime PUBLIC cxx_std_23)

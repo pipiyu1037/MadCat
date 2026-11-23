@@ -339,6 +339,49 @@ void lightingBoundaries()
     auto invalid = rhi::FrameLighting{}; invalid.toLight[2] = 0;
     check(!invalid.valid(), "Zero GPU light direction accepted");
 }
+
+void pbrMaterialAndCamera()
+{
+    auto cpu=source();
+    assets::Material material; material.metallic=.35f; material.roughness=0;
+    cpu.materials.push_back(material);
+    cpu.meshes[0].primitives[0].material=0;
+    assets::ModelAssets assets;
+    const auto id=assets.add(cpu);
+    const render::MeshDraw requested{{},{id,0,0},{}};
+    const auto packed=render::prepareGeometry(assets,std::span(&requested,1));
+    check(packed.has_value(),"PBR factors rejected");
+    for (const auto& vertex:packed->vertices) {
+        near(vertex.metallicRoughness[0],.35f); near(vertex.metallicRoughness[1],0);
+    }
+    for (float bad : {-1.f,2.f,std::numeric_limits<float>::quiet_NaN()}) {
+        cpu.materials[0].roughness=bad;
+        assets::ModelAssets invalid;
+        const auto badId=invalid.add(cpu);
+        const render::MeshDraw badDraw{{},{badId,0,0},{}};
+        check(!render::prepareGeometry(invalid,std::span(&badDraw,1)),"Invalid PBR factor accepted");
+    }
+    Fixture fixture;
+    const auto parent=fixture.scene.create();
+    scene::LocalTransform pose; pose.translation={.3f,-.4f,1}; pose.scale={2,.5f,1.5f};
+    check(fixture.scene.setLocalTransform(parent,pose) && fixture.scene.setParent(fixture.camera,parent) &&
+        fixture.scene.updateWorldTransforms(),"PBR camera parent setup failed");
+    const auto lighting=render::extractLighting(fixture.scene,fixture.camera,1.7f);
+    const auto camera=scene::buildCameraMatrices(fixture.scene,fixture.camera,1.7f);
+    check(lighting && camera && lighting->valid(),"PBR camera extraction failed");
+    glm::mat4 inverse(0);
+    for(int c=0;c<4;++c)for(int r=0;r<4;++r)inverse[c][r]=lighting->worldFromClip[c*4+r];
+    const glm::vec4 world(.4f,.2f,-.7f,1);
+    const auto restored=inverse*camera->viewProjection*world;
+    for(int i=0;i<4;++i)near(restored[i],world[i]);
+    const auto position=(*fixture.scene.worldTransform(fixture.camera))[3];
+    for(int i=0;i<3;++i)near(lighting->cameraPosition[i],position[i]);
+    check(!render::extractLighting(fixture.scene,fixture.camera,0),"Invalid PBR camera aspect accepted");
+    check(fixture.scene.setLocalTransform(fixture.camera,{}) &&
+        !render::extractLighting(fixture.scene,fixture.camera,1),"Stale PBR camera worlds accepted");
+    auto invalid=*lighting; invalid.worldFromClip[0]=std::numeric_limits<float>::infinity();
+    check(!invalid.valid(),"Nonfinite inverse camera accepted");
+}
 }
 
 int main(int argc, char** argv)
@@ -349,8 +392,8 @@ int main(int argc, char** argv)
         directory = argv[1];
         extractionAndSharing(); editsAndSnapshots(); invalidInputs(); invalidGeometry(); assetIdentity(); realModels();
         attributesAndNormalTransforms(); invalidAttributes();
-        directionalLighting(); lightingBoundaries(); shadowViews();
-        std::printf("RenderScene checks: 11 groups passed.\n"); return 0;
+        directionalLighting(); lightingBoundaries(); shadowViews(); pbrMaterialAndCamera();
+        std::printf("RenderScene checks: 12 groups passed.\n"); return 0;
     }
     catch (const std::exception& error) { std::fprintf(stderr, "RenderScene checks failed: %s\n", error.what()); return 1; }
 }

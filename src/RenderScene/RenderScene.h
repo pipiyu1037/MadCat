@@ -14,6 +14,10 @@ namespace madcat::render
 // collapsed world +Z or invalid/overflowing radiometry return a diagnostic.
 // Returned values own their data; no component or GPU objects are borrowed.
 [[nodiscard]] std::expected<rhi::FrameLighting, std::string> extractLighting(const scene::Scene& scene);
+// Adds inverse view-projection and world camera position for PBR. The same
+// selected camera/aspect must be used for extractDraws in this frame.
+[[nodiscard]] std::expected<rhi::FrameLighting, std::string> extractLighting(
+    const scene::Scene& scene, ecs::Entity camera, float aspect);
 
 // Explicit world-space coverage. Independent of camera and light translation.
 struct DirectionalShadowView

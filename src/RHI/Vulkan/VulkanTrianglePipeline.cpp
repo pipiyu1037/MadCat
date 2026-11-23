@@ -151,18 +151,19 @@ bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat col
     stages[1].pName = "fragmentMain";
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    static_assert(std::is_standard_layout_v<ColoredVertex> && sizeof(ColoredVertex) == 11 * sizeof(float));
+    static_assert(std::is_standard_layout_v<ColoredVertex> && sizeof(ColoredVertex) == 13 * sizeof(float));
     const VkVertexInputBindingDescription binding{0, sizeof(ColoredVertex), VK_VERTEX_INPUT_RATE_VERTEX};
     const VkVertexInputAttributeDescription attributes[] = {
         {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(ColoredVertex, position)},
         {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(ColoredVertex, color)},
         {2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(ColoredVertex, normal)},
-        {3, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(ColoredVertex, texcoord)}
+        {3, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(ColoredVertex, texcoord)},
+        {4, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(ColoredVertex, metallicRoughness)}
     };
     vertexInput.vertexBindingDescriptionCount = 1;
     vertexInput.pVertexBindingDescriptions = &binding;
     const VkVertexInputAttributeDescription shadowAttributes[]{attributes[0],attributes[3]};
-    vertexInput.vertexAttributeDescriptionCount = depthOnly ? 2 : 4;
+    vertexInput.vertexAttributeDescriptionCount = depthOnly ? 2 : 5;
     vertexInput.pVertexAttributeDescriptions = depthOnly ? shadowAttributes : attributes;
     VkPipelineInputAssemblyStateCreateInfo assembly{};
     assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -263,7 +264,7 @@ bool VulkanTrianglePipeline::recordIndexedDraw(VkCommandBuffer commandBuffer, Vk
     if (shadow && (state_->depthOnly || detail::TextureBindingAccess::device(shadow)!=state_->device)) { return false; }
     if ((!state_->materials.empty() && (draw.material >= state_->materials.size() || (!state_->depthOnly && !lighting))) ||
         (state_->materials.empty() && (draw.material != 0 || (!state_->depthOnly &&
-            (draw.transform.view == GeometryView::Material || draw.transform.view == GeometryView::Lit))))) { return false; }
+            (draw.transform.view == GeometryView::Material || draw.transform.view == GeometryView::Lit || draw.transform.view == GeometryView::Pbr))))) { return false; }
     const auto& state = *state_;
     VkViewport viewport{};
     viewport.width = static_cast<float>(extent.width);

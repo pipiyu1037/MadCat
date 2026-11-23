@@ -19,6 +19,7 @@ struct ApplicationOptions
     // Scene entry: fixed world-space coverage for optional shadow snapshots.
     render::DirectionalShadowView shadowView;
     rhi::ColorFormat forwardColorFormat = rhi::ColorFormat::Presentation;
+    bool physicallyBased = false; // Scene entry: constant-factor metallic/roughness direct light
 };
 struct FrameInfo { float aspect; double deltaSeconds; };
 // A one-shot request. Factories capture structural options by value and borrow

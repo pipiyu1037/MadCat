@@ -333,15 +333,15 @@ VKAPI_ATTR VkResult VKAPI_CALL createPipelines(VkDevice device, VkPipelineCache 
     const auto& input = *info->pVertexInputState;
     if (expectedDepthOnly)
     {
-        check(input.vertexBindingDescriptionCount==1 && input.pVertexBindingDescriptions[0].stride==44 &&
+        check(input.vertexBindingDescriptionCount==1 && input.pVertexBindingDescriptions[0].stride==52 &&
             input.vertexAttributeDescriptionCount==2 && input.pVertexAttributeDescriptions[0].location==0 &&
             input.pVertexAttributeDescriptions[0].offset==0 && input.pVertexAttributeDescriptions[1].location==3 &&
             input.pVertexAttributeDescriptions[1].offset==36, "Wrong shadow position/UV layout");
     }
     else
     {
-    check(input.vertexBindingDescriptionCount == 1 && input.vertexAttributeDescriptionCount == 4 &&
-        input.pVertexBindingDescriptions[0].binding == 0 && input.pVertexBindingDescriptions[0].stride == 44 &&
+    check(input.vertexBindingDescriptionCount == 1 && input.vertexAttributeDescriptionCount == 5 &&
+        input.pVertexBindingDescriptions[0].binding == 0 && input.pVertexBindingDescriptions[0].stride == 52 &&
         input.pVertexBindingDescriptions[0].inputRate == VK_VERTEX_INPUT_RATE_VERTEX &&
         input.pVertexAttributeDescriptions[0].location == 0 && input.pVertexAttributeDescriptions[0].binding == 0 &&
         input.pVertexAttributeDescriptions[0].format == VK_FORMAT_R32G32B32_SFLOAT && input.pVertexAttributeDescriptions[0].offset == 0 &&
@@ -350,7 +350,9 @@ VKAPI_ATTR VkResult VKAPI_CALL createPipelines(VkDevice device, VkPipelineCache 
         input.pVertexAttributeDescriptions[2].location == 2 && input.pVertexAttributeDescriptions[2].binding == 0 &&
         input.pVertexAttributeDescriptions[2].format == VK_FORMAT_R32G32B32_SFLOAT && input.pVertexAttributeDescriptions[2].offset == 24 &&
         input.pVertexAttributeDescriptions[3].location == 3 && input.pVertexAttributeDescriptions[3].binding == 0 &&
-        input.pVertexAttributeDescriptions[3].format == VK_FORMAT_R32G32_SFLOAT && input.pVertexAttributeDescriptions[3].offset == 36,
+        input.pVertexAttributeDescriptions[3].format == VK_FORMAT_R32G32_SFLOAT && input.pVertexAttributeDescriptions[3].offset == 36 &&
+        input.pVertexAttributeDescriptions[4].location == 4 && input.pVertexAttributeDescriptions[4].binding == 0 &&
+        input.pVertexAttributeDescriptions[4].format == VK_FORMAT_R32G32_SFLOAT && input.pVertexAttributeDescriptions[4].offset == 44,
         "Wrong vertex buffer layout");
     }
     check(info->pInputAssemblyState->topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST && info->pInputAssemblyState->primitiveRestartEnable == VK_FALSE &&
@@ -902,7 +904,7 @@ void triangleChecks(const std::filesystem::path& root)
             {
                 auto invalid = expectedTransform;
                 if (mode == 0) { invalid.normalFromLocal[4] = std::numeric_limits<float>::quiet_NaN(); }
-                if (mode == 1) { invalid.view = static_cast<madcat::rhi::GeometryView>(5); }
+                if (mode == 1) { invalid.view = static_cast<madcat::rhi::GeometryView>(6); }
                 if (mode == 2) { invalid.attributes = 128; }
                 recorded.clear();
                 check(!pipeline.recordDraw(commandToken, expectedExtent, invalid) && recorded.empty(), "Invalid normal/view/flags reached Vulkan");

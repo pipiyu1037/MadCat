@@ -27,7 +27,7 @@ struct ToneMapPass
         desc.vertexShader=shaderDirectory/"vertex.spv"; desc.fragmentShader=shaderDirectory/"fragment.spv";
         desc.sampledTexture=true; desc.pushConstantBytes=sizeof(Parameters);
         auto pipeline=factory(desc);
-        if (!pipeline) { return std::unexpected("ToneMap preparation failed; build CustomPassShaders then restart"); }
+        if (!pipeline) { return std::unexpected("ToneMap pipeline preparation failed"); }
         return Prepared{std::move(pipeline)};
     }
     bool execute(madcat::graph::PassContext& context, const Declared& declared,
