@@ -1,6 +1,8 @@
 # MadCat 架构设计
 
-更新日期：2026-11-23。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
+2026-11-25 起，自动测试范围精简为 Cornell Box、Lantern 和 PBR 材质球，见 [复杂场景测试](../README.md#复杂场景测试)。本文旧测试数量与解析参考是历史证据，对应独立检查已移除；资源声明、同步和生命周期契约继续适用。
+
+更新日期：2026-11-25。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
 
 ## 文档职责与设计状态
 
@@ -627,7 +629,7 @@ Registry 按 C++ 类型惰性创建并独占组件池，通过标准 RTTI 识别
 
 组件指针和引用属于借用。调用方在该类型成功添加／删除、销毁带有该类型组件的实体后，应重新通过 Entity 获取；存储不保证稳定地址。Registry 析构使所有引用失效。修改组件字段、创建空 Entity 或操作其他类型的池不影响本类型引用；查询期间的额外限制见下一节。当前通过回调提供查询，不公开存储迭代器。
 
-Debug／Release 各 13 项[组件检查](../tests/ComponentChecks.cpp)通过，包括资源清理、构造失败恢复、别名参数、稀疏扩容及混合操作模型；未注入分配失败，未接入真实场景组件或 GPU 渲染。
+Debug／Release 各 13 项历史组件检查通过，包括资源清理、构造失败恢复、别名参数、稀疏扩容及混合操作模型；未注入分配失败，未接入真实场景组件或 GPU 渲染。
 
 ## ECS 查询与遍历边界（当前实现）
 
@@ -641,7 +643,7 @@ Debug／Release 各 13 项[组件检查](../tests/ComponentChecks.cpp)通过，�
 
 遍历后的修改由调用方实现：回调收集 Entity 值，最外层 `each()` 返回后再调用增删接口并检查结果。组件引用不能作为延迟目标保存；旧句柄在实体销毁／槽位复用后会被拒绝。此版本没有自动命令队列、事务回滚或延迟创建的临时实体。完整示例及复现命令见 [README](../README.md#ecs-组合查询与遍历后修改)。
 
-Debug／Release 各 12 组[查询检查](../tests/QueryChecks.cpp)通过，覆盖交集、引用 const 性、修改拒绝、嵌套／异常恢复、遍历后增删和代际复用，以及 1024 步参考模型；各 13 项组件与 8 项 Entity 回归、主程序构建通过。该查询增量未运行 GPU 场景，后续 Scene 与 Transform 进度见下节。
+Debug／Release 各 12 组历史查询检查通过，覆盖交集、引用 const 性、修改拒绝、嵌套／异常恢复、遍历后增删和代际复用，以及 1024 步参考模型；各 13 项组件与 8 项 Entity 回归、主程序构建通过。该查询增量未运行 GPU 场景，后续 Scene 与 Transform 进度见下节。
 
 ## Scene 层级与 Transform（当前实现）
 
@@ -667,7 +669,7 @@ Debug／Release 各 12 组[查询检查](../tests/QueryChecks.cpp)通过，覆�
 
 实现采用已有建议中的保留局部挂接、拒绝普通父节点删除、显式子树删除和每次全量更新；理由是层级维护本身不需要逆矩阵／TRS 分解，受控写入与可验证行为优先于优化。2026-11-01 为模型实例化增加局部 TRS／完整矩阵两种互斥表示，避免对已支持的 glTF 仿射矩阵分解而丢失剪切；切换表示使旧局部借用失效。显式矩阵 setter 与 TRS setter 均允许查询内字段更新，`isIterating()` 只读报告查询状态。保持世界位置挂接、dirty 更新、渲染提取和场景版本待后续增量。构建命令和用法见 [README](../README.md#scene-层级与-transform)。
 
-该 CPU 增量的 Debug／Release 各 12 组[场景检查](../tests/SceneChecks.cpp)、33 组 ECS 回归与主程序构建通过，包含剪切、2048 层和 512 步层级模型；README 示例两种构建均输出 `12` 并返回 0。当时尚未运行实际场景渲染，后续 Sandbox 接入见[矩阵绘制契约](#sandbox-矩阵绘制当前实现)。
+该 CPU 增量的 Debug／Release 各 12 组历史场景检查、33 组 ECS 回归与主程序构建通过，包含剪切、2048 层和 512 步层级模型；README 示例两种构建均输出 `12` 并返回 0。当时尚未运行实际场景渲染，后续 Sandbox 接入见[矩阵绘制契约](#sandbox-矩阵绘制当前实现)。
 
 ## 相机数据与矩阵（当前实现）
 
@@ -684,7 +686,7 @@ Debug／Release 各 12 组[查询检查](../tests/QueryChecks.cpp)通过，覆�
 | 数值边界 | 求逆、投影系数和组合使用 double 中间结果；窄化前检查 float 范围，并拒绝窄化后退化的矩阵。输出仍为 float，不保证病态矩阵的精度 |
 | 参数和尺寸修改 | 组件字段按 ECS 规则编辑，每次提取重新校验；宽高比由实际输出决定，零尺寸暂停、resize 后重提取；不新增场景版本或缓存失效机制 |
 
-该 CPU 相机增量的 Debug／Release 各 10 组[相机检查](../tests/CameraChecks.cpp)通过，覆盖解析视锥边界、深度、视口映射、位姿继承、缩放／剪切、快照与失效、无效参数和数值边界；原有 45 组 Scene／ECS 检查及主程序构建通过。完整示例和命令见 [README](../README.md#相机与视图投影)。后续 Sandbox 矩阵传输见下节；没有通用 RenderScene、自由相机控制器、正交投影或自动主相机选择。
+该 CPU 相机增量的 Debug／Release 各 10 组历史相机检查通过，覆盖解析视锥边界、深度、视口映射、位姿继承、缩放／剪切、快照与失效、无效参数和数值边界；原有 45 组 Scene／ECS 检查及主程序构建通过。完整示例和命令见 [README](../README.md#相机与视图投影)。后续 Sandbox 矩阵传输见下节；没有通用 RenderScene、自由相机控制器、正交投影或自动主相机选择。
 
 ### Sandbox 矩阵绘制（当前实现）
 
@@ -761,7 +763,7 @@ Debug／Release 各 4 组解析场景绘制、34 项管线、19 项缓冲、35 �
 
 Sandbox 的 `--gltf <路径>` 在 GLFW／Vulkan 初始化前完成导入和预览转换，支持中文／空格路径；相对路径以当前工作目录为准，失败诊断并返回 1。成功后在初次绘制前上传一次，resize 复用。模型依旧由现有 Scene 模型 Entity 的外层矩阵驱动，按键 1～7 沿用；所有 glTF 节点在这个增量中只是资产内部的静态事实，没有创建平行于 Entity 的可写场景对象。
 
-[原创 TransformProbe](../assets/models/README.md) 提供可复现的层级／共享 Mesh／多 Primitive／未选中场景验证；CPU 和 [GPU 像素参考](../tests/ModelPixelReference.ps1)独立使用解析世界坐标、AABB、投影、透视颜色及最小深度，不能从上传值或应用日志生成预期结果。Debug／Release 8 组转换与相关回归、真实两种配置的 22 点参考帧、中文路径、模型裁剪及窗口生命周期检查通过，Debug 同步验证无 warning／error。Box.glb 仅作为 Release 冒烟与截图验证，不声称材质或完整像素验收；命令和证据见 [README](../README.md#gltf-静态模型预览)。
+[原创 TransformProbe](../assets/models/README.md) 提供可复现的层级／共享 Mesh／多 Primitive／未选中场景验证；CPU 和 历史GPU 像素参考独立使用解析世界坐标、AABB、投影、透视颜色及最小深度，不能从上传值或应用日志生成预期结果。Debug／Release 8 组转换与相关回归、真实两种配置的 22 点参考帧、中文路径、模型裁剪及窗口生命周期检查通过，Debug 同步验证无 warning／error。Box.glb 仅作为 Release 冒烟与截图验证，不声称材质或完整像素验收；命令和证据见 [README](../README.md#gltf-静态模型预览)。
 
 CPU 资产引用、MeshInstance 组件与 Scene 节点实例化已由[实例契约](#模型资产与-scene-实例化当前实现)实现，当前窗口使用下面的 RenderScene 链路。法线／UV 已导入 CPU 模型并支持 GPU 可视化；基础材质与图片采样已接通，光照、运行期替换和通用 Draw／Pass／Render Graph 仍未实现，F03 尚未完成。
 
@@ -791,17 +793,17 @@ DrawTransform 的裁剪矩阵位于 offset 0；三个法线 float4 列位于 64�
 
 RenderScene 在 double 中计算世界线性矩阵的逆转置，统一除以其最大绝对分量后转换为 float；片元在透视插值后归一化。这个正公共比例不改变方向，避免直接上传逆缩放溢出。奇异矩阵清除法线可用标志，保留颜色／UV 绘制；片元零法线或缺失所选属性显示洋红色。负缩放按逆转置保留方向，不额外翻转；世界法线不乘相机矩阵。UV 原值传输，仅在显示 RG 时取 frac，不翻转、不裁剪，不代表采样器或材质行为。
 
-Sandbox 模型默认 M 基础材质模式，无模型默认颜色模式；N／U／C 请求在下一帧快照应用；模型按键 9 提供第一个实例旋转加非均匀缩放。8 组 RenderScene CPU 检查覆盖打包、存在标志、逆转置、剪切／反射、奇异／极小缩放与相机独立性；[原创参考资产](../assets/models/AttributeProbe.gltf) 和[独立像素计算](../tests/AttributePixelReference.ps1)验证真实 GPU 插值。本段验证限属性显示；基础材质与图片见下节，自动法线生成、通用 Pass 或 Render Graph 尚未实现。
+Sandbox 模型默认 M 基础材质模式，无模型默认颜色模式；N／U／C 请求在下一帧快照应用；模型按键 9 提供第一个实例旋转加非均匀缩放。8 组 RenderScene CPU 检查覆盖打包、存在标志、逆转置、剪切／反射、奇异／极小缩放与相机独立性；[原创参考资产](../assets/models/AttributeProbe.gltf) 和历史独立像素计算验证真实 GPU 插值。本段验证限属性显示；基础材质与图片见下节，自动法线生成、通用 Pass 或 Render Graph 尚未实现。
 
 ### 基础材质、图片与不可变采样绑定
 
-2026-11-05 接通 CPU 导入到真实纹理采样。[Material／ModelTexture／Image](../src/Assets/Gltf.h)由模型拥有；Primitive 可选材质索引指向同模型数组，缺省材质为白色。材质存基础色因子／纹理、金属度／粗糙度标量、alpha／双面事实；CPU 可保存 BLEND，但当前 RenderScene 不透明预览在 GPU 初始化前拒绝 BLEND、有贴图无 UV0 或坏引用。
+2026-11-05 接通 CPU 导入到真实纹理采样，2026-11-24 增加 MR 纹理引用。[Material／ModelTexture／Image](../src/Assets/Gltf.h)由模型拥有；Primitive 可选材质索引指向同模型数组，缺省材质为白色。材质存基础色因子／纹理、金属度／粗糙度因子及 MR 纹理、alpha／双面事实；CPU 可保存 BLEND，但当前 RenderScene 不透明预览在 GPU 初始化前拒绝 BLEND、任一种贴图无 UV0 或坏引用。
 
 [Image](../src/Assets/Image.h)为无 GPU 类型的 RGBA8、顶行优先、非预乘数组。[GltfImages](../src/Assets/GltfImages.cpp)读取外部相对 URI、base64 或 bufferView，复用 cgltf 的 URI／base64 接口；[Image.cpp](../src/Assets/Image.cpp)仅包装开源 stb_image 的 PNG／JPEG 内存解码，不执行 ICC 或方向变换。[GltfMaterials](../src/Assets/GltfMaterials.cpp)单独转换材质和采样器引用，Gltf.cpp 统一组织各阶段与失败发布边界。stb_image 2.30 固定提交，实现在单独私有 C 翻译单元编译，不依赖系统图片解码或 COM。输入与输出各限 256 MiB，尺寸 1～16384；检查 MIME／格式／范围，失败不发布模型，分配异常可传播。公共 API 不暴露 stb_image／cgltf 对象。
 
-RenderScene 为启动几何去重材质键 `(ModelAssetId, optional materialIndex)`，PrimitiveRange 保存材质槽，resolveDraws 复制基础因子／裁剪／双面／镜像标志与槽号；快照不借用资产对象。法线列的 xyz 与 offset 不变，w 复用为 RGB 因子，120／124 为 alpha／cutoff，仍满足固定 128 字节布局。[VulkanMaterials](../src/RenderScene/VulkanMaterials.h)是由运行层调用的 RenderScene GPU 材质适配：模型／图片键只上传一次，同一纹理键共享绑定，不作为通用资产缓存。
+RenderScene 为启动几何去重材质键 `(ModelAssetId, optional materialIndex)`，PrimitiveRange 保存材质槽，resolveDraws 复制基础因子／裁剪／双面／镜像标志与槽号；快照不借用资产对象。法线列的 xyz 与 offset 不变，w 复用为 RGB 因子，120／124 为 alpha／cutoff，仍满足固定 128 字节布局。[VulkanMaterials](../src/RenderScene/VulkanMaterials.h)是由运行层调用的 RenderScene GPU 材质适配：每个模型／图片／编码键只上传一次，同一模型／纹理／编码键共享绑定，不作为通用资产缓存。
 
-[RHI 采样上传](../src/RHI/Vulkan/VulkanSampledTexture.h)查询 RGBA8 sRGB 的 sampled／linear／blit 能力和尺寸，coherent staging 复制 mip 0，逐级线性 blit，再转为 `SHADER_READ_ONLY_OPTIMAL`、Fragment sampled-read；每次启动上传使用专用命令池和 fence，完成后才发布并释放上传区。返回资源只读，队列为当前 Graphics／Compute／Present 队列，未来图导入必须声明这一外部状态。图像、视图和内存由 TextureRef 共享拥有；深度和采样图像复用私有资源记录，不混淆其用途或初始状态。
+[RHI 采样上传](../src/RHI/Vulkan/VulkanSampledTexture.h)查询所选 RGBA8 sRGB／UNORM 格式的 sampled／linear／blit 能力和尺寸，coherent staging 复制 mip 0，逐级线性 blit，再转为 `SHADER_READ_ONLY_OPTIMAL`、Fragment sampled-read；每次启动上传使用专用命令池和 fence，完成后才发布并释放上传区。返回资源只读，队列为当前 Graphics／Compute／Present 队列，图导入显式声明这一外部状态。图像、视图和内存由 TextureRef 共享拥有；深度和采样图像复用私有资源记录，不混淆其用途或初始状态。
 
 TextureBindingRef 共享拥有 DescriptorPool／SetLayout／Set、Sampler 和 TextureRef。固定 set 0：具名 BaseColorImageBinding=0（SAMPLED_IMAGE）、BaseColorSamplerBinding=1（SAMPLER），仅 Fragment 可见；Slang 使用相同槽位。每份绑定建立后不可修改；不同 Sampler 共享同一图像，不同材质可共享同一绑定。无贴图材质绑定白色回退图像。管线和帧上下文各保留绑定，命令在 fence／呈现退役后释放，再销毁绑定及图像。resize 重用绑定和图片；空材质跨度仅用于无 Descriptor 的 Shader 模拟练习，不能记录 Material 模式。
 
@@ -963,9 +965,33 @@ CustomPass 以 `createDepthTexture` 声明同窗口大小、可采样的 SceneDe
 
 `extractLighting(scene,camera,aspect)` 在当前世界变换和所选相机上生成完整帧快照：FrameLighting 的原 112 字节前缀保留，offset 112 为 `inverse(cameraClipFromWorld)` 列主序矩阵，176 为相机世界位置 float4（w=1），总计 192 字节。必须与 `extractDraws` 使用同一相机和 aspect。顶点从 clip 重建世界点并生成指向相机的向量，片元透视插值后归一化；继承缩放／剪切的相机仍采用完整逆矩阵。非有限数据及逆矩阵溢出在 acquire 前拒绝。更新和图中 Uniform 声明、完成后复用规则沿用现有 UBO。
 
-直接光采用单次散射 GGX 分布、相关 Smith 可见性与 Schlick Fresnel；介质 F0=.04，金属 F0=基础色，漫反射按 `(1-F)*(1-metallic)` 缩放。公式依据 [Khronos Sample Renderer BRDF](https://github.com/KhronosGroup/glTF-Sample-Renderer/blob/main/source/Renderer/shaders/brdf.glsl)。感知粗糙度下限 .05（alpha 下限 .0025），零粗糙度近似为平滑粗糙表面；背光／背向视线直接光为零，无环境光。PBR 辐亮度在写入 RGBA16F 前限制到 65504，再乘阴影可见性，避免半精度溢出；CustomPass 仍未连接投射阴影。HDR 查看器优先用青色标记 NaN／Inf，有限 RGB>1 继续标洋红色。MR／法线等贴图、IBL 和完整 PBR 验收尚未完成。
+直接光采用单次散射 GGX 分布、相关 Smith 可见性与 Schlick Fresnel；介质 F0=.04，金属 F0=基础色，漫反射按 `(1-F)*(1-metallic)` 缩放。公式依据 [Khronos Sample Renderer BRDF](https://github.com/KhronosGroup/glTF-Sample-Renderer/blob/main/source/Renderer/shaders/brdf.glsl)。感知粗糙度下限 .05（alpha 下限 .0025），零粗糙度近似为平滑粗糙表面；背光／背向视线直接光为零，无环境光。PBR 辐亮度在写入 RGBA16F 前限制到 65504，再乘阴影可见性，避免半精度溢出；CustomPass 仍未连接投射阴影。HDR 查看器优先用青色标记 NaN／Inf，有限 RGB>1 继续标洋红色。后续 MR 贴图接入见下节；法线贴图的后续实现见下节专门契约；遮蔽／发光、IBL 和完整 PBR 验收尚未完成。
 
 本次字段扩展取代前文历史增量中的 stride 44／FrameLighting 112 字节；同步和资源所有权规则保持。使用与验证见 [PBR 直接光照实验](custom-pass.md#pbr-直接光照实验)。
+
+### Metallic-Roughness 贴图（当前实现）
+
+2026-11-24～25 将 `Material::metallicRoughnessTexture` 从 glTF 导入到 GPU。引用限定 TEXCOORD_0、无纹理变换；RenderScene 在上传前拒绝无 UV0 或越界引用。CPU 图片仍是原始 RGBA8 数组；`createSampledTexture` 增加 `TextureEncoding`，默认 Srgb，MR 选择 Linear／R8G8B8A8_UNORM，分别查询格式能力和生成 mip。同图兼作基础色和 MR 时分配两份 GPU 图像；同用途不同 sampler 共享图像，同一纹理与用途共享绑定。
+
+`MaterialBinding` 保存基础色和 MR 的两个不可变 TextureBindingRef，复用现有 image0／sampler1 布局；Forward 保持 set0 基础色、set1 帧 UBO、set2 阴影，新增 set3 MR。没有 MR 的材质绑定共享的白色 UNORM 回退；共增加一张 1×1 数据回退图及绑定。Shadow 仍仅使用 set0。52 字节顶点、192 字节帧 UBO、128 字节 Draw 常量不变，材质仍在启动时固定。
+
+Forward 的片元采样在 alpha 裁剪及 BRDF 的逐片元分支前完成，以保留隐式 LOD 导数；PBR 使用 `metallicFactor × B` 和 `roughnessFactor × G`，随后按原规则限制粗糙度，忽略 MR 的 R／A。Lambert 和 Base color 不使用 MR 值改变颜色。规则依据 [glTF Metallic-Roughness 材质规范](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#metallic-roughness-material)。
+
+图执行器按实际 GPU 图像导入两类材质纹理，显式交接 sampled-read 状态及完整 mip 范围；各材质保留两个资源槽。Forward Draw 要求两个槽均在 Pass 读取声明内，Shadow 要求基础色槽；遗漏 MR 声明在提交前拒绝。现有 Pass 使用去重后的材质纹理集合声明读取。应用、管线和帧上下文保留整组绑定，GPU 完成并释放命令后回收，resize 和候选图切换复用启动图片。没有新增依赖、通用绑定框架或运行期材质编辑；法线／遮蔽／发光贴图及完整 PBR 尚未验收。使用和参考场景见 [PBR 实验](custom-pass.md#pbr-直接光照实验)。
+
+### 法线贴图与切线（当前实现）
+
+2026-11-25 在 MR 链路上接通法线贴图。本节取代前文增量中 52 字节顶点、两纹理槽及 set3 单 MR 的旧布局；材质仍在启动时固定。Assets 保存局部 `tangents`（FLOAT VEC4，xyz 单位长度容差 1e-4，w=±1，三角形内符号一致）、`normalTexture` 和有限 `normalScale`。法线引用限 UV0、无纹理变换；RenderScene 在 GPU 初始化前拒绝缺 NORMAL／TANGENT／UV0、越界引用、平行法线／切线和非法数值。不实现自动生成或 MikkTSpace，属于已声明的导入子集。
+
+ColoredVertex 当前 72 字节：原位置／颜色／法线／UV 和 MR 因子偏移保持，normalScale 位于 52、tangent float4 位于 56。location4 从 vec2 扩为 vec3（metallic／roughness／normalScale），location5 为 vec4 tangent。Draw 常量仍为 128 字节，FrameLighting 仍为 192 字节。HasTangent=128、HasNormalTexture=256。两种光照模式均需使用 `extractLighting(scene,camera,aspect)`，与绘制使用同一相机和 aspect；低层 runGraphics 调用者也须提供匹配的逆相机矩阵。
+
+顶点通过 `worldFromClip * clipFromLocal * float4(tangent.xyz,0)` 得到世界切线方向，复用现有相机 UBO，不增加逐物体矩阵资源。法线继续使用 CPU 计算、按共同正比例缩放的逆转置；片元对切线做 Gram-Schmidt 正交化并归一化，`B = cross(N,T) * tangent.w * mirrorSign`，mirrorSign 由世界变换行列式提供。法线 RGB 线性采样，按 `2*RGB-1` 解码、xy 乘 normalScale 后归一化，再转换到世界空间；doubleSided 背面翻转最终法线。scale=0 绕过扰动、精确使用几何法线，避免 8 位平坦纹理的 128/255 偏差。无效世界法线／切线基底显示洋红色。规则依据 [glTF 法线及附加纹理规范](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#additional-textures)；WorldNormal 查看继续表示几何法线。
+
+RHI 继续使用四个 set：0 基础色，1 帧 UBO，2 阴影，3 固定 MR／法线组合；set3 image0／sampler1 为 MR，image2／sampler3 为法线。`MaterialBinding` 保存 baseColor 与 data 两个不可变引用。`createMaterialDataBinding` 拥有自己的 DescriptorPool／SetLayout／Set，并保留两份源绑定及其采样器／图片；不是通用任意布局接口。源图仍按 `(model,image,encoding)` 缓存，MR 与法线均为 UNORM，同图数据用途可共享，sRGB 用途仍分开上传。无 MR 使用白色回退，无法线使用共享平坦 UNORM 回退且不设置 HasNormalTexture。
+
+Forward 在 alpha 裁剪／BRDF 分支前采样三类纹理；图显式导入三个实际图像、完整 mip 范围及 sampled-read 初始状态，按实际图像去重。逐材质保存三个资源槽，Forward 录制前要求全部读取声明；Shadow 仍只消费并要求基础色槽。应用、管线与帧上下文保留组合引用，GPU／呈现完成并退役命令后才释放，组合先释放描述符再释放其源引用；resize 和候选图切换复用启动图片。
+
+CustomPass 的 `DisplaySettings::normalMapping` 按值固定到候选图，并只修改本帧 Forward Draw 副本的标志，不改变 CPU 资产、原始快照或纹理读取声明。UI 复选框、恢复默认值、视图切换与窗口恢复使用原安全发布边界。复杂场景加入开关差异、旋转／非均匀缩放与镜像检查，仍为可见性／生命周期验证，没有独立逐像素、双面法线贴图或极端条件数矩阵的外观参考。
 
 ### Cornell Box 预设与基础色查看（当前实现）
 

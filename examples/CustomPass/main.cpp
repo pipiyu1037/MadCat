@@ -143,6 +143,10 @@ int main(int argc, char** argv)
         auto setPose=[&](int preset) {
             modelPose=initialPose;
             modelPose.translation.x+=preset==4 ? .45f : 0;
+            if (preset==7 || preset==8) {
+                modelPose.scale *= glm::vec3(preset==8 ? -1.25f : 1.25f,.75f,1.1f);
+                modelPose.rotation = modelPose.rotation * glm::angleAxis(glm::radians(25.f),glm::vec3(0,1,0));
+            }
             auto cameraTransform=cameraPose;
             cameraTransform.translation.x+=preset==6 ? .4f : 0;
             scene::LocalTransform lightPose;
@@ -218,6 +222,8 @@ int main(int argc, char** argv)
             ImGui::SameLine();
             auto graphSettings=requestedGraph;
             if (ImGui::Checkbox("Forward",&graphSettings.forwardEnabled)) { requestGraph(graphSettings); }
+            ImGui::SameLine();
+            if (ImGui::Checkbox("Normal map",&graphSettings.normalMapping)) { requestGraph(graphSettings); }
             ImGui::TextUnformatted("Ctrl+click a slider to type a value.");
             ImGui::Text("Active graph: Forward %s",activeGraph.forwardEnabled ? "on" : "off");
             ImGui::SameLine();
@@ -261,7 +267,7 @@ int main(int argc, char** argv)
         };
         callbacks.keyPressed=[&](char key) {
             if (key=='R') { compileRequested=true; return; }
-            if (key<'1' || key>'7') { return; }
+            if (key<'1' || key>'9') { return; }
             mode=key-'1';
             Controls draft;
             draft.exposure=mode==1 ? -2.f : mode==2 ? 2.f : 0.f;
@@ -270,6 +276,9 @@ int main(int argc, char** argv)
             setPose(mode);
         };
         callbacks.presented=[&] {
+            if (activeGraph.normalMapping!=lastPresentedGraph.normalMapping) {
+                std::fprintf(stderr,"CustomPass: normal map %s presented.\n",activeGraph.normalMapping ? "on" : "off");
+            }
             if (activeGraph.forwardEnabled!=lastPresentedGraph.forwardEnabled) {
                 std::fprintf(stderr,"CustomPass: Forward %s presented.\n",activeGraph.forwardEnabled ? "on" : "off");
             }

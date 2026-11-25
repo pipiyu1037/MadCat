@@ -12,6 +12,7 @@ struct DisplaySettings
 {
     bool forwardEnabled=true;
     DisplayView view=DisplayView::Final;
+    bool normalMapping=true;
     bool operator==(const DisplaySettings&) const = default;
 };
 inline const char* displayViewName(DisplayView view)
@@ -73,7 +74,7 @@ inline madcat::graph::GraphicsGraphFactory makeDisplayGraph(const ToneMapPass::P
         const auto present=graph.addPass("Present",passes::PresentPass{},passes::PresentPass::Inputs{ui.outputs.color});
         auto plan=graph.compile();
         if (!plan) { return std::unexpected(plan.error()); }
-        auto parameters=[&display,view=settings.view,clearNode,forwardNode,shadowNode,displayNode,uiNode=ui.node,
+        auto parameters=[&display,view=settings.view,normalMapping=settings.normalMapping,clearNode,forwardNode,shadowNode,displayNode,uiNode=ui.node,
             presentNode=present.node,count=plan->nodes().size()](const std::array<float,4>& color,
                 std::span<const rhi::IndexedDraw> draws,std::span<const rhi::IndexedDraw> shadowDraws) {
             std::vector<std::any> values(count);
@@ -81,6 +82,7 @@ inline madcat::graph::GraphicsGraphFactory makeDisplayGraph(const ToneMapPass::P
             if (forwardNode!=UINT32_MAX) {
                 passes::ForwardPass::Parameters forward{{draws.begin(),draws.end()}};
                 if (view==DisplayView::BaseColor) { for (auto& draw:forward.draws) { draw.transform.view=rhi::GeometryView::Material; } }
+                if (!normalMapping) { for (auto& draw:forward.draws) { draw.transform.attributes &= ~uint32_t(rhi::HasNormalTexture); } }
                 values[forwardNode]=std::move(forward);
             }
             if (shadowNode!=UINT32_MAX) { values[shadowNode]=passes::ShadowPass::Parameters{{shadowDraws.begin(),shadowDraws.end()}}; }

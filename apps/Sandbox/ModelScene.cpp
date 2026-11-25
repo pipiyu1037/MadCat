@@ -143,7 +143,7 @@ std::expected<std::vector<render::MeshDraw>, std::string> ModelScene::shadowDraw
 std::expected<rhi::FrameLighting, std::string> ModelScene::lighting(float aspect, int shadowMode)
 {
     if (!scene_.worldTransformsCurrent() && !scene_.updateWorldTransforms()) { return std::unexpected("Light world update failed"); }
-    auto result=render::extractLighting(scene_);
+    auto result=aspect==0 ? render::extractLighting(scene_) : render::extractLighting(scene_,camera_,aspect);
     if (!result || aspect==0) { return result; }
     if (shadowMode<0 || shadowMode>2) { return std::unexpected("Invalid shadow mode"); }
     const auto lightMatrix=render::buildDirectionalShadowMatrix(*result);

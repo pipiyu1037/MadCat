@@ -84,13 +84,14 @@ struct GeometryBatch
 
 // Packs each referenced Primitive once, in Mesh local coordinates. Instances do
 // not duplicate vertices. Diagnostic colors use each Primitive's local AABB.
-// Copies optional local normals/UV0 with per-Primitive presence flags; absent
+// Copies optional local normals/tangents/UV0 with per-Primitive presence flags; absent
 // values have zero-filled storage. CPU GLM objects are never the upload ABI.
 // Indices are rebased into the shared vertex buffer. Validates geometry before
 // publication, including the current Device's guaranteed 24-bit index range.
 // Rebuild/upload explicitly when introducing geometry not in this startup batch.
 // Deduplicates material IDs and packs base factors/alpha/culling per draw.
-// BLEND rendering and textured primitives without UV0 are rejected explicitly.
+// BLEND and textures without UV0 are rejected; normal maps require normals and
+// valid tangents. Factors/normal scale remain immutable vertex data.
 [[nodiscard]] std::expected<GeometryBatch, std::string> prepareGeometry(
     const assets::ModelAssets& assets, std::span<const MeshDraw> draws);
 

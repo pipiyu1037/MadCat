@@ -134,6 +134,7 @@ struct PrimitiveAttributes
 {
     const cgltf_accessor* positions = nullptr;
     const cgltf_accessor* normals = nullptr;
+    const cgltf_accessor* tangents = nullptr;
     const cgltf_accessor* texcoords0 = nullptr;
 };
 
@@ -152,6 +153,11 @@ PrimitiveAttributes primitiveAttributes(const cgltf_primitive& primitive)
             require(attribute.index == 0 && !result.normals, "duplicate or invalid NORMAL attribute");
             result.normals = attribute.data;
         }
+        else if (attribute.type == cgltf_attribute_type_tangent)
+        {
+            require(attribute.index == 0 && !result.tangents, "duplicate or invalid TANGENT attribute");
+            result.tangents = attribute.data;
+        }
         else if (attribute.type == cgltf_attribute_type_texcoord && attribute.index == 0)
         {
             require(!result.texcoords0, "duplicate TEXCOORD_0 attribute");
@@ -167,6 +173,12 @@ PrimitiveAttributes primitiveAttributes(const cgltf_primitive& primitive)
             "NORMAL must be non-normalized FLOAT VEC3");
         require(normals->count == positions->count, "NORMAL count must match POSITION");
     }
+    if (const auto* tangents = result.tangents)
+    {
+        require(tangents->component_type == cgltf_component_type_r_32f && tangents->type == cgltf_type_vec4 && !tangents->normalized,
+            "TANGENT must be non-normalized FLOAT VEC4");
+        require(tangents->count == positions->count, "TANGENT count must match POSITION");
+    }
     if (const auto* uv = result.texcoords0)
     {
         const bool floatUv = uv->component_type == cgltf_component_type_r_32f && !uv->normalized;
@@ -174,7 +186,7 @@ PrimitiveAttributes primitiveAttributes(const cgltf_primitive& primitive)
         require(uv->type == cgltf_type_vec2 && (floatUv || integerUv), "TEXCOORD_0 must be FLOAT or normalized unsigned byte/short VEC2");
         require(uv->count == positions->count, "TEXCOORD_0 count must match POSITION");
     }
-    for (const auto* accessor : {result.positions, result.normals, result.texcoords0})
+    for (const auto* accessor : {result.positions, result.normals, result.tangents, result.texcoords0})
     {
         if (accessor) { require(accessor->offset % 4 == 0 && accessor->stride % 4 == 0, "vertex attribute requires 4-byte offset and stride alignment"); }
     }
@@ -302,6 +314,19 @@ std::expected<GltfGeometry, GltfError> importGltfGeometry(const std::filesystem:
                         converted.normals[index] = {value[0], value[1], value[2]};
                     }
                 }
+                if (const auto* tangents = attributes.tangents)
+                {
+                    converted.tangents.resize(tangents->count);
+                    for (size_t index = 0; index < tangents->count; ++index)
+                    {
+                        float value[4]{};
+                        require(cgltf_accessor_read_float(tangents, index, value, 4) != 0, "cannot read TANGENT");
+                        const auto length = glm::length(glm::dvec3(value[0], value[1], value[2]));
+                        require(std::isfinite(length) && std::abs(length-1) < .0001 &&
+                            (value[3] == 1 || value[3] == -1), "TANGENT must be finite, unit length within 1e-4, with w=+1/-1");
+                        converted.tangents[index] = {value[0], value[1], value[2], value[3]};
+                    }
+                }
                 if (const auto* uv = attributes.texcoords0)
                 {
                     converted.texcoords0.resize(uv->count);
@@ -326,6 +351,12 @@ std::expected<GltfGeometry, GltfError> importGltfGeometry(const std::filesystem:
                     for (const auto index : converted.indices) { require(index < positions->count && index != restart, "index out of range or primitive restart index"); }
                 }
                 else { std::iota(converted.indices.begin(), converted.indices.end(), uint32_t{0}); }
+                for (size_t index = 0; !converted.tangents.empty() && index < count; index += 3)
+                {
+                    const auto sign = converted.tangents[converted.indices[index]].w;
+                    require(sign == converted.tangents[converted.indices[index+1]].w && sign == converted.tangents[converted.indices[index+2]].w,
+                        "triangle TANGENT handedness must be consistent");
+                }
                 output.primitives.push_back(std::move(converted));
             }
         }

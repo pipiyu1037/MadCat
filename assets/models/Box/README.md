@@ -13,10 +13,9 @@
 ```powershell
 cmake --build build --config Debug --target CustomPass MadCatShaders CustomPassShaders
 .\build\Debug\CustomPass.exe --fit assets/models/Box/Box.gltf
-powershell -NoProfile -ExecutionPolicy Bypass -File tests/CustomPassWindowChecks.ps1 -Configuration Debug -Scenario graph -ModelPath assets/models/Box/Box.gltf
 ```
 
-`--fit` 在示例侧把选中场景的节点世界空间 AABB 居中、等比缩放，最长半边为 0.7；原始资产保持不变。面板的 Forward 复选框控制真实图节点连接，关闭后显示背景与 UI。仅验证静态导入、当前 Lambert／基础色路径的可见性、切换与生命周期；外部模型没有完整逐像素外观参考，不能据此声称 PBR、法线贴图或自发光已经支持。解析平面另有独立参考像素检查。
+`--fit` 在示例侧把选中场景的节点世界空间 AABB 居中、等比缩放，最长半边为 0.7；原始资产保持不变。面板的 Forward 复选框控制真实图节点连接，关闭后显示背景与 UI。仅验证静态导入、当前 Lambert／基础色路径的可见性、切换与生命周期；外部模型没有完整逐像素外观参考，不能据此声称 PBR、法线贴图或自发光已经支持。历史解析平面参考检查已移除；本模型继续供手动预览，当前自动检查见[复杂场景测试](../../../README.md#复杂场景测试)。
 
 | 文件 | 字节数 | SHA256 |
 |---|---:|---|

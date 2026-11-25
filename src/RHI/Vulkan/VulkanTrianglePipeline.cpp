@@ -18,7 +18,7 @@ struct VulkanTrianglePipeline::State
     BufferRef vertices;
     BufferRef indices;
     uint32_t indexCount = 0;
-    std::vector<TextureBindingRef> materials;
+    std::vector<MaterialBinding> materials;
     VkDevice device = VK_NULL_HANDLE;
     VkFormat format = VK_FORMAT_UNDEFINED;
     VkFormat depthFormat = VK_FORMAT_UNDEFINED;
@@ -80,7 +80,7 @@ VulkanTrianglePipeline::~VulkanTrianglePipeline()
 
 bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat colorFormat,
     const VulkanShaderModule& vertex, const VulkanShaderModule& fragment, BufferRef vertices, BufferRef indices, VkFormat depthFormat,
-    std::span<const TextureBindingRef> materials, bool depthOnly)
+    std::span<const MaterialBinding> materials, bool depthOnly)
 {
     if (state_)
     {
@@ -102,7 +102,11 @@ bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat col
         return false;
     }
     auto created = std::make_unique<State>();
-    for (const auto& binding : materials) { if (detail::TextureBindingAccess::device(binding) != device.handle()) { return false; } }
+    for (const auto& binding : materials) {
+        if (detail::TextureBindingAccess::device(binding.baseColor) != device.handle() ||
+            detail::TextureBindingAccess::device(binding.data) != device.handle() ||
+            !detail::TextureBindingAccess::normalTexture(binding.data)) { return false; }
+    }
     created->materials.assign(materials.begin(), materials.end());
     created->device = device.handle();
     created->vertices = std::move(vertices);
@@ -134,9 +138,10 @@ bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat col
     const VkPushConstantRange transformRange{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(DrawTransform)};
     layout.pushConstantRangeCount = 1;
     layout.pPushConstantRanges = &transformRange;
-    const auto materialLayout = materials.empty() ? VK_NULL_HANDLE : detail::TextureBindingAccess::layout(materials.front());
-    const VkDescriptorSetLayout setLayouts[]{materialLayout, created->lightingLayout, materialLayout};
-    layout.setLayoutCount = materials.empty() ? 0 : depthOnly ? 1 : 3; layout.pSetLayouts = materialLayout ? setLayouts : nullptr;
+    const auto materialLayout = materials.empty() ? VK_NULL_HANDLE : detail::TextureBindingAccess::layout(materials.front().baseColor);
+    const auto dataLayout = materials.empty() ? VK_NULL_HANDLE : detail::TextureBindingAccess::layout(materials.front().data);
+    const VkDescriptorSetLayout setLayouts[]{materialLayout, created->lightingLayout, materialLayout, dataLayout};
+    layout.setLayoutCount = materials.empty() ? 0 : depthOnly ? 1 : 4; layout.pSetLayouts = materialLayout ? setLayouts : nullptr;
     VkPipelineLayout createdLayout = VK_NULL_HANDLE;
     if (!detail::checkResult(created->createLayout(created->device, &layout, nullptr, &createdLayout), "vkCreatePipelineLayout")) { return false; }
     created->layout = createdLayout;
@@ -151,19 +156,20 @@ bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat col
     stages[1].pName = "fragmentMain";
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    static_assert(std::is_standard_layout_v<ColoredVertex> && sizeof(ColoredVertex) == 13 * sizeof(float));
+    static_assert(std::is_standard_layout_v<ColoredVertex> && sizeof(ColoredVertex) == 18 * sizeof(float));
     const VkVertexInputBindingDescription binding{0, sizeof(ColoredVertex), VK_VERTEX_INPUT_RATE_VERTEX};
     const VkVertexInputAttributeDescription attributes[] = {
         {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(ColoredVertex, position)},
         {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(ColoredVertex, color)},
         {2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(ColoredVertex, normal)},
         {3, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(ColoredVertex, texcoord)},
-        {4, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(ColoredVertex, metallicRoughness)}
+        {4, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(ColoredVertex, metallicRoughness)},
+        {5, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(ColoredVertex, tangent)}
     };
     vertexInput.vertexBindingDescriptionCount = 1;
     vertexInput.pVertexBindingDescriptions = &binding;
     const VkVertexInputAttributeDescription shadowAttributes[]{attributes[0],attributes[3]};
-    vertexInput.vertexAttributeDescriptionCount = depthOnly ? 2 : 5;
+    vertexInput.vertexAttributeDescriptionCount = depthOnly ? 2 : 6;
     vertexInput.pVertexAttributeDescriptions = depthOnly ? shadowAttributes : attributes;
     VkPipelineInputAssemblyStateCreateInfo assembly{};
     assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -235,7 +241,7 @@ VkFormat VulkanTrianglePipeline::depthFormat() const { return state_ ? state_->d
 BufferRef VulkanTrianglePipeline::vertexBuffer() const { return state_ ? state_->vertices : BufferRef{}; }
 BufferRef VulkanTrianglePipeline::indexBuffer() const { return state_ ? state_->indices : BufferRef{}; }
 uint32_t VulkanTrianglePipeline::indexCount() const { return state_ ? state_->indexCount : 0; }
-std::span<const TextureBindingRef> VulkanTrianglePipeline::materialBindings() const { return state_ ? std::span<const TextureBindingRef>(state_->materials) : std::span<const TextureBindingRef>{}; }
+std::span<const MaterialBinding> VulkanTrianglePipeline::materialBindings() const { return state_ ? std::span<const MaterialBinding>(state_->materials) : std::span<const MaterialBinding>{}; }
 VkDescriptorSetLayout VulkanTrianglePipeline::lightingLayout() const { return state_ ? state_->lightingLayout : VK_NULL_HANDLE; }
 
 bool VulkanTrianglePipeline::recordDraw(VkCommandBuffer commandBuffer, VkExtent2D extent, const DrawTransform& transform, VkDescriptorSet lighting) const
@@ -280,14 +286,16 @@ bool VulkanTrianglePipeline::recordIndexedDraw(VkCommandBuffer commandBuffer, Vk
     state.bindIndices(commandBuffer, detail::BufferAccess::handle(state.indices), 0, VK_INDEX_TYPE_UINT32);
     if (!state.materials.empty())
     {
-        const auto set = detail::TextureBindingAccess::set(state.materials[draw.material]);
+        const auto set = detail::TextureBindingAccess::set(state.materials[draw.material].baseColor);
         state.bindSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, state.layout, MaterialTextureSet, 1, &set, 0, nullptr);
         if (!state.depthOnly) { state.bindSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, state.layout, 1, 1, &lighting, 0, nullptr); }
         if (!state.depthOnly)
         {
             // The disabled Shader path still has a statically used set 2.
-            const auto shadowSet=detail::TextureBindingAccess::set(shadow ? shadow : state.materials.front());
+            const auto shadowSet=detail::TextureBindingAccess::set(shadow ? shadow : state.materials.front().baseColor);
             state.bindSets(commandBuffer,VK_PIPELINE_BIND_POINT_GRAPHICS,state.layout,2,1,&shadowSet,0,nullptr);
+            const auto mrSet=detail::TextureBindingAccess::set(state.materials[draw.material].data);
+            state.bindSets(commandBuffer,VK_PIPELINE_BIND_POINT_GRAPHICS,state.layout,MaterialDataTextureSet,1,&mrSet,0,nullptr);
         }
     }
     state.pushConstants(commandBuffer, state.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(DrawTransform), &draw.transform);

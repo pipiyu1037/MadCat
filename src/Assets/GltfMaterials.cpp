@@ -53,11 +53,25 @@ std::expected<void, std::string> importMaterials(const cgltf_data& data, GltfGeo
                     require(texture.texcoord == 0 && !texture.has_transform, "base color requires TEXCOORD_0 without texture transforms");
                     material.baseColorTexture = cgltf_texture_index(&data, texture.texture);
                 }
+                const auto& mr = pbr.metallic_roughness_texture;
+                if (mr.texture)
+                {
+                    require(mr.texcoord == 0 && !mr.has_transform, "metallic/roughness requires TEXCOORD_0 without texture transforms");
+                    material.metallicRoughnessTexture = cgltf_texture_index(&data, mr.texture);
+                }
             }
             for (const auto factor : material.baseColor) { require(std::isfinite(factor) && factor >= 0 && factor <= 1, "invalid base color factor"); }
             require(std::isfinite(material.metallic) && material.metallic >= 0 && material.metallic <= 1 &&
                 std::isfinite(material.roughness) && material.roughness >= 0 && material.roughness <= 1, "invalid metallic/roughness factor");
             material.alphaMode = source.alpha_mode == cgltf_alpha_mode_mask ? AlphaMode::Mask : source.alpha_mode == cgltf_alpha_mode_blend ? AlphaMode::Blend : AlphaMode::Opaque;
+            const auto& normal = source.normal_texture;
+            if (normal.texture)
+            {
+                require(normal.texcoord == 0 && !normal.has_transform, "normal texture requires TEXCOORD_0 without texture transforms");
+                require(std::isfinite(normal.scale), "normal texture scale must be finite");
+                material.normalTexture = cgltf_texture_index(&data, normal.texture);
+                material.normalScale = normal.scale;
+            }
             material.alphaCutoff = source.alpha_cutoff;
             require(std::isfinite(material.alphaCutoff) && material.alphaCutoff >= 0, "invalid alpha cutoff");
             material.doubleSided = source.double_sided != 0;

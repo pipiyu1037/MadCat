@@ -19,7 +19,8 @@ struct alignas(16) FrameLighting
     std::array<float, 16> shadowFromClip{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     // Depth-space constant bias, slope bias, enabled (0/1), PCF radius (0/1).
     std::array<float, 4> shadow{.001f, .003f, 0, 1};
-    // PBR view reconstruction; populated together from the selected camera.
+    // PBR view reconstruction and tangent transport for both lighting modes.
+    // Must match the camera/aspect used by every forward draw's clipFromLocal.
     std::array<float, 16> worldFromClip{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     std::array<float, 4> cameraPosition{0,0,0,1};
 

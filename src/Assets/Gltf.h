@@ -24,6 +24,8 @@ struct MeshPrimitive
     // Empty means absent; otherwise one value per position. Normals remain
     // mesh-local, UV set 0 retains source orientation/range. No generation.
     std::vector<glm::vec3> normals;
+    // Local unit tangent xyz and bitangent handedness (+1/-1). No generation.
+    std::vector<glm::vec4> tangents;
     std::vector<glm::vec2> texcoords0;
     std::optional<size_t> material;
 };
@@ -47,6 +49,9 @@ struct Material
     std::string name;
     std::array<float, 4> baseColor{1,1,1,1};
     std::optional<size_t> baseColorTexture;
+    std::optional<size_t> metallicRoughnessTexture;
+    std::optional<size_t> normalTexture;
+    float normalScale = 1;
     float metallic = 1, roughness = 1;
     AlphaMode alphaMode = AlphaMode::Opaque;
     float alphaCutoff = .5f;
@@ -89,13 +94,15 @@ struct GltfError
 
 // glTF 2.0 / GLB, local external buffers or base64 data URIs. Static TRIANGLES,
 // FLOAT VEC3 POSITION, optional FLOAT VEC3 NORMAL (unit length within 1e-4),
+// FLOAT VEC4 TANGENT (unit xyz, w=+1/-1, consistent per triangle),
 // VEC2 TEXCOORD_0 (FLOAT or normalized u8/u16), u8/u16/u32 indices (otherwise
 // generated), matrix or TRS nodes. Attributes must match POSITION count and
 // contain finite values; normals are preserved, not renormalized. Missing
 // normals/UVs stay empty. Right-handed, Y up, meters, column vectors;
 // world = parent*local. Ignores other attributes (including additional UV sets),
-// cameras/lights and extras. Imports basic material factors and base-color UV0
+// cameras/lights and extras. Imports basic material factors and base-color/MR/normal UV0
 // textures, PNG/JPEG images (external URI, base64 or bufferView) and samplers.
+// Normal textures also require NORMAL/TANGENT/UV0 before GPU upload; no generation.
 // Rejects required extensions, compression, sparse accessors, skins, animations,
 // morph targets and GPU instancing. This is static model import, not a complete
 // glTF conformance validator. Successful results own all data after parser/input

@@ -22,7 +22,8 @@ struct TextureState
         if (view) { destroyView(device, view, nullptr); }
         if (image) { destroyImage(device, image, nullptr); }
         if (memory) { freeMemory(device, memory, nullptr); }
-        if (image) { std::fprintf(stderr, "Vulkan: %s texture destroyed.\n", format == VK_FORMAT_R16G16B16A16_SFLOAT ? "HDR color" : format == VK_FORMAT_R8G8B8A8_SRGB ? "Sampled" : sampled ? "Sampled depth" : "Depth"); }
+        if (image) { std::fprintf(stderr, "Vulkan: %s texture destroyed.\n", format == VK_FORMAT_R16G16B16A16_SFLOAT ? "HDR color" :
+            format == VK_FORMAT_R8G8B8A8_SRGB || format == VK_FORMAT_R8G8B8A8_UNORM ? "Sampled" : sampled ? "Sampled depth" : "Depth"); }
     }
 };
 }

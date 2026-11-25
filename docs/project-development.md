@@ -2,9 +2,22 @@
 
 MadCat 是一个使用自研 ECS 和 Vulkan 的渲染引擎。前期服务渲染算法研究和图形效果实验，长期考虑游戏与仿真用途。开发者应能加载模型、用 C++ 编写渲染 Pass、连接多个 Pass，并在运行时调整参数、查看中间结果。
 
-本文维护开发范围、实现进度、半年计划和验收方法；架构方案独立维护于[架构设计文档](architecture-design.md)。两份文档供项目开发者及协作编码助手使用。文档更新日期为 2026 年 11 月 23 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
+本文维护开发范围、实现进度、半年计划和验收方法；架构方案独立维护于[架构设计文档](architecture-design.md)。两份文档供项目开发者及协作编码助手使用。文档更新日期为 2026 年 11 月 25 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
 
 ## 当前实现进度
+
+2026-11-25 接通 glTF 切线与法线贴图：导入 FLOAT VEC4 TANGENT、normalTexture／scale，RenderScene 校验并打包 72 字节顶点；Lambert／PBR 使用线性法线采样、正确切线变换、镜像符号与片元正交化。set3 组合 MR／法线，保持四个 set、192 字节帧 UBO 和 128 字节 Draw 常量；图新增实际法线图像及读取检查，GPU 使用寿命沿用已有完成边界。CustomPass 增加 Normal map 开关、8／9 非均匀缩放／镜像。使用与边界见[法线贴图](../README.md#法线贴图)、[接口契约](architecture-design.md#法线贴图与切线当前实现)。当前支持显式切线／UV0，不自动生成；遮蔽／发光、IBL、透明混合与完整路径追踪尚未实现，F08／F09 未整体验收。后续推进 GPU 求交所需的缓冲、能力启用、绑定、BLAS／TLAS 与计算提交。
+
+
+Debug／Release 的 MadCat、BasicScene、CustomPass 和资产检查工具构建通过，五个图形 Shader 包编译／SPIR-V 校验通过；反射核对 location4 vec3、location5 vec4、set3 法线 image2／sampler3、192 字节帧 UBO 与 128 字节 Draw 常量。两种配置各三个复杂场景、每场景 21 状态通过，共 126 次画面检查；Lantern 的贴图开关各有 151 个采样点发生可测变化，无该贴图的两个场景要求一致且通过。Debug 另用同一 Lantern 的 Lambert 模式通过 21 状态，开关有 115 个采样点变化。旋转／非均匀缩放、镜像、五种视图、Forward／法线开关、resize／最小化恢复、Cornell 最小化退出及资源退役均通过，截图已查看。RTX 5060 Ti／NVIDIA 617.42，Debug 同步验证无 warning／error，Release 未主动启用验证层。当前没有独立逐像素光照、双面法线贴图、其他 GPU／DPI 或性能验证；不恢复单元／失败注入流程。
+
+2026-11-25 按用户要求精简自动测试：仅保留 Cornell Box、Lantern 和 PBR 材质球三个复杂场景，统一使用 `MadCatComplexSceneChecks` 或 `tests/CustomPassWindowChecks.ps1`。CPU 单元检查、模拟 Vulkan、失败注入与独立简单场景流程及其构建目标已移除。当前覆盖、运行方式与限制见 [README](../README.md#复杂场景测试)。以下日期条目中的旧测试数量和结果保留为历史证据，不表示相应流程仍可执行；功能进度与后续法线贴图／路径追踪计划保持。
+
+2026 年 11 月 24～25 日接通 glTF `metallicRoughnessTexture`：CPU 导入并校验 UV0／引用，RenderScene 保存材质事实；RHI 增加显式 RGBA8 线性数据编码及 MR 固定绑定。PBR 以线性 UNORM 采样，G 粗糙度／B 金属度分别乘已有因子，缺省使用白色回退。同图兼作基础色和 MR 时分别上传 sRGB／UNORM 并生成 mip；同用途、不同采样器仍共享 GPU 图片。图显式导入两类纹理的完整 mip 范围，Forward 要求两个读取声明，遗漏 MR 时在提交前拒绝。顶点／UBO／Draw ABI 不变，没有新增依赖。使用见 [PBR 实验](custom-pass.md#pbr-直接光照实验)，职责与生命周期见 [MR 贴图契约](architecture-design.md#metallic-roughness-贴图当前实现)。
+
+Debug／Release 相关程序构建及各 4 组材质、12 组 RenderScene、17 组图、68 项管线和 32 项深度检查通过；原 19 组 glTF 检查两种配置通过，Debug 8 组静态上传通过。三个内置 Shader 包编译／SPIR-V 校验及各 12 项失败恢复通过，反射确认 set3 MR、192 字节 UBO 与原顶点／Draw 布局。两种配置各四种纹理参考场景均通过 17 状态 × 42 个独立像素，覆盖通道／因子、sRGB 用途隔离、两种 sampler、过滤／寻址／mip、五种视图、Forward 开关及窗口恢复。Debug 两组 MR 因子边界、无 MR 的平滑金属、BasicScene、投射阴影、候选图九请求及应用六项失败回归通过；Lantern 13 状态可见性冒烟和手动 Shader 更新 17 状态回归通过，参考与模型截图已检查。实际 RTX 5060 Ti／NVIDIA 617.42，Debug 同步验证无 warning／error；Release 未主动开启验证层。Lantern 无完整逐像素外观参考，其他 GPU／DPI、真实设备故障和性能未验证。
+
+当前材质仍在启动时固定，MR 和基础色均限 UV0、无纹理变换。法线／遮蔽／发光贴图、IBL、透明混合和完整路径追踪尚未实现，F08／F09 尚未整体验收。下一步先接通法线贴图所需的切线与法线变换，再按缓冲、设备能力、绑定、BLAS／TLAS 和计算提交推进 GPU 求交。以下保留历史增量及当时的状态。
 
 2026 年 11 月 23 日接入外部 Cornell Box 场景，来源为 NVIDIA RTXDI Assets 的 MIT 许可资源，固定提交及每文件 SHA256 随资产保存。原样保留 glTF、外部缓冲、图片、许可和上游说明。CustomPass 新增 `--cornell-box`，在实验层处理朝向、居中缩放、相机与方向光；导入得到 5 Mesh／5 Primitive、40 顶点／60 索引、9 节点、4 材质，八个实例共享上传。新增 Base color 视图，将本帧 Draw 副本切到无光照材质模式后复用 HDR／ToneMap，方便检查红绿墙；Final 保持 PBR 直接光。未修改引擎接口、Shader、依赖或构建配置。来源、使用及范围见 [Cornell Box](../assets/models/CornellBox/README.md)。
 
@@ -92,7 +105,7 @@ Debug／Release 构建、RenderScene 10 组、管线 66 项、材质 3 组通过
 
 2026 年 11 月 1 日完成不可变索引缓冲与真实索引绘制增量：[createIndexBuffer](../src/RHI/Vulkan/VulkanBuffer.h) 接收 uint32 索引，与顶点共用专用 coherent 上传／失败清理机制，私有记录保存用途和最大索引值；当前 Device 未启用完整 32 位索引 feature，上传按设备报告与 24 位基线较小值拒绝超限值。[三角形管线](../src/RHI/Vulkan/VulkanTrianglePipeline.h) 验证同 Device、用途、顶点步长、三角形索引数及顶点边界，绑定 UINT32 索引后按实际数量录制 DrawIndexed；应用、管线和帧上下文均保留两个缓冲。Sandbox 四顶点／九索引组成三个共享顶点的小三角形，保留原场景外轮廓与渐变；每次运行各上传一次，resize 复用。Debug／Release 各 40 项缓冲、45 项管线、26 项深度、35 项 Shader Module、5 组 SceneDraw（共 151 项／组）与主程序构建通过，无编译警告。真实 Debug／Release 遮挡／反序／resize／恢复及 Debug 相机裁剪、最小化退出和连续尺寸变化均通过，Debug 同步验证无 warning／error；索引上限检查加入后重跑两种配置的缓冲／管线构建与遮挡场景通过。Shader 沿用现有产物，本次未重编。尚未连接 glTF GPU 几何或通用 RenderScene，不表示模型与贴图阶段已完成。命令与限制见 [README](../README.md#缓冲资源与顶点上传)，契约见[索引绘制](architecture-design.md#不可变索引缓冲与索引绘制当前实现)。
 
-2026 年 11 月 1 日完成首个 CPU glTF 几何增量：[MadCatAssets](../src/Assets/Gltf.h) 使用固定提交的 cgltf 1.15 解析 glTF 2.0／GLB、本地外部缓冲和 base64，复制静态三角形位置、统一 uint32 索引、Mesh／Primitive 与节点父子、共享 Mesh 索引及局部／世界矩阵。支持交错布局、无索引、中文路径与 URI 文件名解码；有限值、缓冲范围、索引、层级和不支持项有诊断，失败不发布部分模型。Debug／Release 各 15 组[导入检查](../tests/GltfChecks.cpp)、检查工具和原主程序构建通过，无编译警告；命令行工具均成功读取固定依赖中的 Box.glb（24 顶点／36 索引／两个节点）、TriangleWithoutIndices.gltf 和中文路径资产，缺失文件返回预期错误。配置仍有两条既有 GLM 弃用提示。本次未运行 GPU 场景；法线、UV、材质、图片尚未转换，也未进行 GPU 上传、Scene 实例化或 RenderScene 提取，F03 仍未完整验收。支持清单与复现命令见 [README](../README.md#cpu-gltf-几何导入)，边界见[资产导入契约](architecture-design.md#cpu-gltf-几何当前实现)。下列旧日期条目保留各次迭代当时的状态。
+2026 年 11 月 1 日完成首个 CPU glTF 几何增量：[MadCatAssets](../src/Assets/Gltf.h) 使用固定提交的 cgltf 1.15 解析 glTF 2.0／GLB、本地外部缓冲和 base64，复制静态三角形位置、统一 uint32 索引、Mesh／Primitive 与节点父子、共享 Mesh 索引及局部／世界矩阵。支持交错布局、无索引、中文路径与 URI 文件名解码；有限值、缓冲范围、索引、层级和不支持项有诊断，失败不发布部分模型。Debug／Release 各 15 组历史导入检查、检查工具和原主程序构建通过，无编译警告；命令行工具均成功读取固定依赖中的 Box.glb（24 顶点／36 索引／两个节点）、TriangleWithoutIndices.gltf 和中文路径资产，缺失文件返回预期错误。配置仍有两条既有 GLM 弃用提示。本次未运行 GPU 场景；法线、UV、材质、图片尚未转换，也未进行 GPU 上传、Scene 实例化或 RenderScene 提取，F03 仍未完整验收。支持清单与复现命令见 [README](../README.md#cpu-gltf-几何导入)，边界见[资产导入契约](architecture-design.md#cpu-gltf-几何当前实现)。下列旧日期条目保留各次迭代当时的状态。
 
 2026 年 10 月 31 日完成深度附件与遮挡增量：[TextureRef](../src/RHI/Texture.h) 共享持有图像、深度视图和专用内存，[Vulkan 深度入口](../src/RHI/Vulkan/VulkanDepthTexture.h) 查询格式／图像用途／尺寸／采样能力，优先 D32_SFLOAT、回退 D16_UNORM，并按 memoryTypeBits 选择 DEVICE_LOCAL 内存。呈现对象和单帧上下文保留深度引用，每帧明确转换／同步布局，清除深度为 1，启用 LESS 测试与深度写入；resize 在等待 GPU／WSI 并释放命令后重建匹配实际交换链尺寸的附件。Sandbox 新增第二模型，按键 6／7 交换相交三角形绘制顺序，遮挡结果不变。Debug／Release 各 26 项深度纹理、36 项管线、19 项缓冲、35 项 Shader Module 和 5 组场景检查（共 121 项／组）及主程序构建通过，无编译警告；既有 Shader 重新编译并通过验证。实际 Debug／Release 深度场景、顺序反转、单／双模型切换、resize／恢复，以及 Debug 场景回归、最小化关闭和连续尺寸变化的像素与生命周期检查通过，全部 Debug 同步验证无 warning／error。实际为 RTX 5060 Ti／D32_SFLOAT，D16 回退只在模拟检查覆盖；无 stencil、MSAA、深度采样、通用纹理上传或 glTF。用法见 [README](../README.md#深度附件与遮挡)，边界见[深度契约](architecture-design.md#深度纹理与附件当前实现)。
 
@@ -100,15 +113,15 @@ Debug／Release 构建、RenderScene 10 组、管线 66 项、材质 3 组通过
 
 2026 年 10 月 31 日完成首个 GPU 缓冲与几何上传增量：[BufferRef](../src/RHI/Buffer.h) 使用内部共享记录保留 Buffer 与专用内存，[Vulkan 创建入口](../src/RHI/Vulkan/VulkanBuffer.h) 按实际 memoryTypeBits 选择 host-visible／coherent 内存，创建时写入后发布不可变引用。Sandbox 上传三个顶点共 60 字节，三角形管线及单帧上下文均保留引用；窗口重建复用缓冲，退出在 GPU 等待和命令释放之后销毁 Buffer／内存。顶点 Shader 已改为 location 0 的 float2 位置与 location 1 的 float3 颜色，匹配 20 字节顶点布局。该增量的 Debug／Release 各 19 项缓冲、29 项管线、35 项 Shader Module 检查与主程序构建通过，无编译警告；Shader 编译／验证及 12 项失败恢复检查通过。实际 Debug／Release resize、Debug 最小化关闭和连续尺寸变化场景的像素、上传次数与释放顺序检查通过，所有 Debug 场景开启同步验证，无 warning／error。当时仍是静态裁剪空间三角形，后续 Scene／相机接入见前文；深度接入见前文；staging 和 glTF 仍待实现，不代表 F02／F03 完整验收。命令见 [README](../README.md#缓冲资源与顶点上传)，生命周期边界见[缓冲契约](architecture-design.md#不可变顶点缓冲当前实现)。
 
-2026 年 10 月 31 日完成 CPU 相机增量：[PerspectiveCamera](../src/Scene/Camera.h) 作为普通 Entity 组件保存视野角与近远裁剪面，位姿来自 Scene 世界变换；`buildCameraMatrices` 显式接收宽高比，按值提取视图、透视投影和组合矩阵。采用局部 −Z 朝前、近处 0／远处 1 深度，并在投影中翻转 Y 以配合正高度 Vulkan 视口。视图使用完整世界矩阵的逆，保留继承缩放／剪切的影响；拒绝缺失或过期数据、无效参数、不可逆变换和不可表示的 float 结果，内部使用 double 中间值。Debug／Release 各 10 组[相机检查](../tests/CameraChecks.cpp)、原有 45 组 Scene／ECS 检查及主程序构建通过，无编译警告；配置仍有两条 GLM 上游 CMake 策略弃用提示。本次为 CPU 数学与数据接口验证，未接入 Shader、Sandbox 或 GPU，尚无交互控制；不表示 F02 实际渲染或 F03 模型验收完成。用法见 [README](../README.md#相机与视图投影)，边界见[相机契约](architecture-design.md#相机数据与矩阵当前实现)。
+2026 年 10 月 31 日完成 CPU 相机增量：[PerspectiveCamera](../src/Scene/Camera.h) 作为普通 Entity 组件保存视野角与近远裁剪面，位姿来自 Scene 世界变换；`buildCameraMatrices` 显式接收宽高比，按值提取视图、透视投影和组合矩阵。采用局部 −Z 朝前、近处 0／远处 1 深度，并在投影中翻转 Y 以配合正高度 Vulkan 视口。视图使用完整世界矩阵的逆，保留继承缩放／剪切的影响；拒绝缺失或过期数据、无效参数、不可逆变换和不可表示的 float 结果，内部使用 double 中间值。Debug／Release 各 10 组历史相机检查、原有 45 组 Scene／ECS 检查及主程序构建通过，无编译警告；配置仍有两条 GLM 上游 CMake 策略弃用提示。本次为 CPU 数学与数据接口验证，未接入 Shader、Sandbox 或 GPU，尚无交互控制；不表示 F02 实际渲染或 F03 模型验收完成。用法见 [README](../README.md#相机与视图投影)，边界见[相机契约](architecture-design.md#相机数据与矩阵当前实现)。
 
-2026 年 10 月 30 日继续完成纯 CPU Scene 增量：[Scene](../src/Scene/Scene.h) 独占 Registry，所有对象由 Entity 管理，内部组件维护局部 TRS、父子链接和派生世界矩阵，通过受控接口保持有效父节点与无环。已实现保留局部变换的挂接／解除、父先子后的全量非递归更新、拒绝普通父节点删除、显式子树删除，以及用户组件与场景系统查询。有限输入校验和四元数归一化已接通，世界结果失效后需完整更新，矩阵溢出可修正后重试。GLM 1.0.1 通过 FetchContent 固定提交，ECS 自身仍仅依赖标准库。Debug／Release 各 12 组[场景检查](../tests/SceneChecks.cpp)、原有 33 组 ECS 检查及主程序构建通过，无编译警告；包括 2048 层和 512 步层级模型。GLM 配置发出两条旧版 CMake 策略弃用提示。F02 的 CPU 场景基础已具备，但尚未进行实际渲染场景验收；该次尚无相机，后续进度见前文，glTF、RenderScene、场景版本和 Sandbox 接入仍待实现。该次未运行 GPU 场景。用法与契约见 [README](../README.md#scene-层级与-transform) 和[架构设计](architecture-design.md#scene-层级与-transform当前实现)。
+2026 年 10 月 30 日继续完成纯 CPU Scene 增量：[Scene](../src/Scene/Scene.h) 独占 Registry，所有对象由 Entity 管理，内部组件维护局部 TRS、父子链接和派生世界矩阵，通过受控接口保持有效父节点与无环。已实现保留局部变换的挂接／解除、父先子后的全量非递归更新、拒绝普通父节点删除、显式子树删除，以及用户组件与场景系统查询。有限输入校验和四元数归一化已接通，世界结果失效后需完整更新，矩阵溢出可修正后重试。GLM 1.0.1 通过 FetchContent 固定提交，ECS 自身仍仅依赖标准库。Debug／Release 各 12 组历史场景检查、原有 33 组 ECS 检查及主程序构建通过，无编译警告；包括 2048 层和 512 步层级模型。GLM 配置发出两条旧版 CMake 策略弃用提示。F02 的 CPU 场景基础已具备，但尚未进行实际渲染场景验收；该次尚无相机，后续进度见前文，glTF、RenderScene、场景版本和 Sandbox 接入仍待实现。该次未运行 GPU 场景。用法与契约见 [README](../README.md#scene-层级与-transform) 和[架构设计](architecture-design.md#scene-层级与-transform当前实现)。
 
-2026 年 10 月 30 日完成 ECS 组合查询增量：[Registry](../src/ECS/Registry.h) 新增可变／const `each<A, B, ...>(callback)`，逐个提供匹配实体及组件引用，支持单组件、多个组件交集、字段修改和嵌套查询。查询期间拒绝所属 Registry 的实体与组件增删，覆盖 const 别名；回调异常向外传播并恢复保护，已修改字段保留。调用方可收集 Entity，在最外层遍历结束后应用增删；没有自动延迟命令队列。Debug／Release 各 12 组[查询检查](../tests/QueryChecks.cpp)、13 项组件与 8 项 Entity 回归及主程序构建通过，无编译警告，包含 1024 步操作模型；未运行窗口或 GPU 场景。该查询增量当时尚未包含 Scene 层级和 Transform，后续进度见前文；自动渲染仍待实现。接口见[查询契约](architecture-design.md#ecs-查询与遍历边界当前实现)，使用与复现命令见 [README](../README.md#ecs-组合查询与遍历后修改)。
+2026 年 10 月 30 日完成 ECS 组合查询增量：[Registry](../src/ECS/Registry.h) 新增可变／const `each<A, B, ...>(callback)`，逐个提供匹配实体及组件引用，支持单组件、多个组件交集、字段修改和嵌套查询。查询期间拒绝所属 Registry 的实体与组件增删，覆盖 const 别名；回调异常向外传播并恢复保护，已修改字段保留。调用方可收集 Entity，在最外层遍历结束后应用增删；没有自动延迟命令队列。Debug／Release 各 12 组历史查询检查、13 项组件与 8 项 Entity 回归及主程序构建通过，无编译警告，包含 1024 步操作模型；未运行窗口或 GPU 场景。该查询增量当时尚未包含 Scene 层级和 Transform，后续进度见前文；自动渲染仍待实现。接口见[查询契约](architecture-design.md#ecs-查询与遍历边界当前实现)，使用与复现命令见 [README](../README.md#ecs-组合查询与遍历后修改)。
 
-2026 年 10 月 29 日继续完成 ECS 组件增量：[Registry](../src/ECS/Registry.h) 提供 `add<T>`、可变／const `tryGet<T>` 和 `remove<T>`，内部按类型使用 [Sparse Set 组件池](../src/ECS/ComponentStorage.h)。每实体每类型至多一份，重复／无效操作被拒绝；实体销毁自动清理全部组件，槽位复用不继承旧数据。组件移动和析构要求不抛异常，引用在同类型结构性修改后需重新获取。Debug／Release 各 13 项[组件检查](../tests/ComponentChecks.cpp)、原有各 8 项 Entity 检查及主程序构建通过，无编译警告；未运行渲染窗口或 GPU 场景。该增量当时尚无多组件查询、层级、Transform 及 Mesh／Material 场景渲染，未完成 F02；后续查询进度见前文。用户同时确认所有场景 Object 统一由 Entity 管理，以 Transform、Mesh、Material 等组件组合驱动后续 RenderScene 提取与渲染；完整接口见[组件存储契约](architecture-design.md#ecs-组件存储当前实现)。
+2026 年 10 月 29 日继续完成 ECS 组件增量：[Registry](../src/ECS/Registry.h) 提供 `add<T>`、可变／const `tryGet<T>` 和 `remove<T>`，内部按类型使用 [Sparse Set 组件池](../src/ECS/ComponentStorage.h)。每实体每类型至多一份，重复／无效操作被拒绝；实体销毁自动清理全部组件，槽位复用不继承旧数据。组件移动和析构要求不抛异常，引用在同类型结构性修改后需重新获取。Debug／Release 各 13 项历史组件检查、原有各 8 项 Entity 检查及主程序构建通过，无编译警告；未运行渲染窗口或 GPU 场景。该增量当时尚无多组件查询、层级、Transform 及 Mesh／Material 场景渲染，未完成 F02；后续查询进度见前文。用户同时确认所有场景 Object 统一由 Entity 管理，以 Transform、Mesh、Material 等组件组合驱动后续 RenderScene 提取与渲染；完整接口见[组件存储契约](architecture-design.md#ecs-组件存储当前实现)。
 
-2026 年 10 月 29 日完成 ECS 的首个纯 CPU 增量：[Entity](../src/ECS/Entity.h) 使用索引与 generation，[Registry](../src/ECS/Registry.h) 提供创建、销毁、存活检查和存活数量。槽位复用更换 generation，默认／越界／错误代际／已销毁句柄被拒绝；销毁不分配内存，代际达到上限后退役槽位以避免回绕。Debug／Release 构建与各 8 项 [Entity 检查](../tests/EntityChecks.cpp)通过，覆盖复制句柄失效、重复删除、4096 实体扩容、混合增删与同槽位 4096 次复用；主程序两种构建通过。句柄限所属 Registry 使用，跨 Registry 误用不检测；内存／索引耗尽和代际到顶分支未实测。该首个增量未运行 GPU 场景，也未包含组件、查询、层级、Transform 或 Sandbox 场景接入，未完成 F02；后续组件进度见上一段。命令见 [README](../README.md#entity-生命周期检查)，接口约定见[架构设计](architecture-design.md#ecs-实体生命周期当前实现)。
+2026 年 10 月 29 日完成 ECS 的首个纯 CPU 增量：[Entity](../src/ECS/Entity.h) 使用索引与 generation，[Registry](../src/ECS/Registry.h) 提供创建、销毁、存活检查和存活数量。槽位复用更换 generation，默认／越界／错误代际／已销毁句柄被拒绝；销毁不分配内存，代际达到上限后退役槽位以避免回绕。Debug／Release 构建与各 8 项 历史Entity 检查通过，覆盖复制句柄失效、重复删除、4096 实体扩容、混合增删与同槽位 4096 次复用；主程序两种构建通过。句柄限所属 Registry 使用，跨 Registry 误用不检测；内存／索引耗尽和代际到顶分支未实测。该首个增量未运行 GPU 场景，也未包含组件、查询、层级、Transform 或 Sandbox 场景接入，未完成 F02；后续组件进度见上一段。命令见 [README](../README.md#entity-生命周期检查)，接口约定见[架构设计](architecture-design.md#ecs-实体生命周期当前实现)。
 
 2026 年 10 月 26 日完成独立的 Ray Query 离线编译探针：锁定 Slang／SPIR-V 目标下的计算 Shader 通过验证，入口、capability、扩展和固定资源绑定已核对，运行时前置条件已记录。GPU 求交、加速结构构建及光追 feature 启用仍待实现；详细证据见下文路径追踪章节。
 
@@ -300,7 +313,7 @@ F09 的具体算法与实现路径仍需按架构文档中的建议验证，验�
 | 12 项构建检查 | 初次／重复构建、片元入口缺失、语法错误、版本不符、编译器／验证器／源码缺失、验证器失败、失败恢复和发布中断恢复均通过；失败时上一组四个文件哈希不变 |
 | C++ 构建独立性 | 普通 Debug／Release 构建通过；另在显式指定缺失 Shader 工具的独立配置下，MadCat 的 Debug 目标仍构建通过 |
 
-环境为 Windows 11、CMake 4.4.4、MSVC 19.44.35228、Vulkan SDK 1.4.363.0；Slang 版本如上，验证器为 `SPIRV-Tools v2026.4 v2026.4.rc2-0-gef96ed76`。本轮没有创建 Vulkan Shader Module、管线或执行新 Shader；SPIR-V 验证通过不能替代后续 GPU 场景验证。检查代码在 `tests/ShaderBuildChecks.cmake`，构建日志在 `build/verification/shader-build`，不要求安装额外测试框架。
+环境为 Windows 11、CMake 4.4.4、MSVC 19.44.35228、Vulkan SDK 1.4.363.0；Slang 版本如上，验证器为 `SPIRV-Tools v2026.4 v2026.4.rc2-0-gef96ed76`。本轮没有创建 Vulkan Shader Module、管线或执行新 Shader；SPIR-V 验证通过不能替代后续 GPU 场景验证。该次独立构建检查已移除，历史构建日志在 `build/verification/shader-build`，不要求安装额外测试框架。
 
 后续 Shader Module 增量已接通启动加载：Sandbox 从 CMake 配置记录的 `<构建目录>/shaders/triangle/` 绝对路径读取两个模块，独立于工作目录及 Swapchain 重建。`src/Shader/Spirv` 在对齐的字数组中检查头部、版本 1.0～1.6、字节序和指令边界；这不是完整 SPIR-V 语义、入口／阶段、绑定布局或 Device capability 验证，仍要求输入来自离线验证流程。`VulkanShaderModule` 先解析销毁函数再创建模块，失败不接管输出，重复初始化保留旧模块，析构释放模块并要求 Device 存活。相关主机操作须完成；管线不要求模块随 GPU 工作保活。[创建参数](https://docs.vulkan.org/refpages/latest/refpages/source/VkShaderModuleCreateInfo.html)、[销毁规则](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroyShaderModule.html)
 
@@ -311,7 +324,7 @@ F09 的具体算法与实现路径仍需按架构文档中的建议验证，验�
 | 六项真实启动失败 | 隔离目录中分别移除顶点／片元文件、置空片元文件、损坏魔数、改变大小为非 4 倍数、截断指令；均在 Vulkan 创建前拒绝对应文件、返回 1，已创建模块先于 Device 释放 |
 | Validation Layers 与同步验证 | RTX 5060 Ti、API 1.4.351、驱动 617.42；上述最终 Debug 场景启用同步验证，无 warning／error |
 
-该 Shader Module 增量沿用上述 Slang／SPIRV-Tools 版本和 `triangle.slang`，当时没有执行 Shader 或测量性能。测试源码为 `tests/ShaderModuleChecks.cpp`，通过 `MadCatShaderModuleChecks` 手动目标运行，结果在 `build/verification/shader-module/<配置>/`；该次窗口和故障脚本、日志在本机 `build/verification/`，不随 Git 分发。只在启动时加载，重新编译前先关闭程序，成功后重启；尚无并发发布／读取协议，不验证 manifest 哈希，也不支持安装包资源定位。后续图形管线与 Draw 的完成证据见下文。
+该 Shader Module 增量沿用上述 Slang／SPIRV-Tools 版本和 `triangle.slang`，当时没有执行 Shader 或测量性能。该次 Shader Module 独立检查源码及手动目标已移除，历史结果在 `build/verification/shader-module/<配置>/`；该次窗口和故障脚本、日志在本机 `build/verification/`，不随 Git 分发。只在启动时加载，重新编译前先关闭程序，成功后重启；尚无并发发布／读取协议，不验证 manifest 哈希，也不支持安装包资源定位。后续图形管线与 Draw 的完成证据见下文。
 
 ### 最小三角形管线与 Draw
 
@@ -327,7 +340,7 @@ F09 的具体算法与实现路径仍需按架构文档中的建议验证，验�
 | Debug 连续变化与退出 | 24 次尺寸变化、四次快速最小化／恢复后画面正确；另验证最小化关闭。各场景正常返回 0，管线创建／销毁数量一致且先于 Swapchain 释放 |
 | Validation Layers 与同步验证 | 所有最终 Debug 场景启用 `VK_LAYER_VALIDATE_SYNC=1`，无 warning／error；实际设备 RTX 5060 Ti，API 1.4.351，驱动 617.42 |
 
-环境与 Shader 版本沿用上述记录，未修改 Shader，未测量性能。`MadCatTriangleChecks` 复用模拟 Vulkan 程序，覆盖函数缺失、Layout／Pipeline 创建失败与重试、重复初始化、格式、动态尺寸及 Draw 参数；真实驱动上的资源耗尽未注入。可分发的窗口检查在 `tests/TriangleWindowChecks.ps1`，运行说明见 [README](../README.md#三角形绘制与检查)，截图和日志位于 `<构建目录>/verification/triangle/`。当前只显示一个裁剪空间三角形，尚无通用资源绑定、场景、相机或 Render Graph；该次尚未完成 Ray Query 编译与 GPU 求交探针，后续编译探针证据见路径追踪章节。
+环境与 Shader 版本沿用上述记录，未修改 Shader，未测量性能。`MadCatTriangleChecks` 复用模拟 Vulkan 程序，覆盖函数缺失、Layout／Pipeline 创建失败与重试、重复初始化、格式、动态尺寸及 Draw 参数；真实驱动上的资源耗尽未注入。该次窗口检查脚本已移除，当前综合检查见 [README](../README.md#复杂场景测试)，截图和日志位于 `<构建目录>/verification/triangle/`。当前只显示一个裁剪空间三角形，尚无通用资源绑定、场景、相机或 Render Graph；该次尚未完成 Ray Query 编译与 GPU 求交探针，后续编译探针证据见路径追踪章节。
 
 Shader 布局和运行期更新的目标设计见[架构设计文档](architecture-design.md#shader-布局与运行期更新设计)；固定 Forward 管线仍在启动时加载 Shader，自定义显示管线会在建图／重建／整图切换时准备。尚未验证通用反射、Shader 包一致快照及运行期手动更新流程。
 
@@ -458,28 +471,25 @@ Shader 编译与资源状态模型先做最小验证，再逐步完善；不等�
 13. 添加层级和世界 Transform 更新，再单独覆盖重新挂接与删除行为。
 14. 按几何、索引、法线、UV、贴图分别增加模型导入能力。
 
-当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、单帧同步、交换链与管线重建、Slang 到 SPIR-V 的手动编译与验证、启动时的 Shader Module 加载、最小图形管线和三角形 Draw、不可变顶点缓冲、纯深度纹理引用与遮挡、Scene／相机矩阵到 Shader 的固定 Push Constant 路径、Ray Query 离线编译探针，以及 CPU Entity 生命周期、组件增删／组合查询、Scene 层级和局部／世界 Transform、相机组件及视图／透视投影矩阵、glTF 静态几何与节点导入。遍历期间结构性修改会被拒绝，调用方可在遍历后处理。架构设计已收敛为首版实施基线，常规接口和内部存储在实现时确定，停止逐项扩展架构讨论；这不表示目标能力全部实现。索引缓冲、DrawIndexed、glTF 静态 GPU 预览与 CPU 模型资产引用／Scene 节点实例化已接通；最小 RenderScene 绘制提取与共享 GPU 几何也已接通；法线／UV 的 CPU 导入也已完成；GPU 属性传输与可视化已完成；基础材质／图片导入与纹理采样已完成；单方向光、最小 Pass／图及图内深度采样已接通，光源矩阵与阴影图生成／查看已接通，Forward 阴影比较／偏移／滤波也已接通。可复用实验入口、BasicScene、CustomPass 的 HDR／显示转换及参数面板已实现，Forward 开关、整图候选切换、主相机深度和 HDR 范围查看也已实现，阴影图统一查看与两个用户显示包的安全手动 Shader 更新也已实现，下一步继续 PBR，见[近期实施顺序](#用户使用方式与近期实施顺序)。所有场景对象继续使用 Entity，未来渲染通过 Mesh、Material 等组件组合提取。Ray Query GPU 求交仍需 Storage／设备地址缓冲、设备能力启用、绑定、加速结构和计算提交，不能把当前顶点缓冲视为这些能力已经具备。运行期 Shader 更新仍需安全替换和失败恢复验证。
+当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、单帧同步、交换链与管线重建、Slang 到 SPIR-V 的手动编译与验证、启动时的 Shader Module 加载、最小图形管线和三角形 Draw、不可变顶点缓冲、纯深度纹理引用与遮挡、Scene／相机矩阵到 Shader 的固定 Push Constant 路径、Ray Query 离线编译探针，以及 CPU Entity 生命周期、组件增删／组合查询、Scene 层级和局部／世界 Transform、相机组件及视图／透视投影矩阵、glTF 静态几何与节点导入。遍历期间结构性修改会被拒绝，调用方可在遍历后处理。架构设计已收敛为首版实施基线，常规接口和内部存储在实现时确定，停止逐项扩展架构讨论；这不表示目标能力全部实现。索引缓冲、DrawIndexed、glTF 静态 GPU 预览与 CPU 模型资产引用／Scene 节点实例化已接通；最小 RenderScene 绘制提取与共享 GPU 几何也已接通；法线／UV 的 CPU 导入也已完成；GPU 属性传输与可视化已完成；基础材质／图片导入与纹理采样已完成；单方向光、最小 Pass／图及图内深度采样已接通，光源矩阵与阴影图生成／查看已接通，Forward 阴影比较／偏移／滤波也已接通。可复用实验入口、BasicScene、CustomPass 的 HDR／显示转换及参数面板已实现，Forward 开关、整图候选切换、主相机深度和 HDR 范围查看也已实现，阴影图统一查看与两个用户显示包的安全手动 Shader 更新也已实现；PBR 常量因子与 MR 贴图已接通，下一步继续法线贴图及 GPU 求交，见[近期实施顺序](#用户使用方式与近期实施顺序)。所有场景对象继续使用 Entity，未来渲染通过 Mesh、Material 等组件组合提取。Ray Query GPU 求交仍需 Storage／设备地址缓冲、设备能力启用、绑定、加速结构和计算提交，不能把当前顶点缓冲视为这些能力已经具备。两个用户显示包的安全更新与失败恢复已验证，内置及通用 Shader 更新仍待实现。
 
 ## 验证策略与风险
 
-正确性优先于性能优化。对 ECS 生命周期、层级、图依赖、资源状态和历史重置等核心机制采用针对性测试；对界面和低风险可逆改动，使用适当构建或人工场景，不为每个小改动机械添加测试。
+当前自动测试集中在三个复杂场景，使用一个入口串行执行；不再维护 CPU 单元检查、模拟 Vulkan、失败注入或简单场景的独立测试流程。Shader 构建仍执行编译与 SPIR-V 校验。
 
-| 验证对象 | 最小验证内容 |
+| 场景 | 当前检查内容 |
 |---|---|
-| ECS | 旧句柄失效、组件添加删除、多组件查询、延迟结构性修改和引用失效约定 |
-| 层级 | 多层父子继承、重新挂接、循环拒绝、父节点删除、旋转与非均匀缩放 |
-| 图编译 | 线性依赖、分叉合并、循环、缺失输入、不明确多写者、无效尺寸或格式 |
-| 同步 | 写后读、读后写、写后写、Compute 到 Graphics、历史读写、上传与加速结构依赖 |
-| Vulkan 运行 | 开启 Validation Layers 与同步验证，检查 resize、最小化、资源销毁和正常退出 |
-| 资源与 Shader | 参数布局、纹理色彩空间、编译失败保留旧版本、绑定接口改变时正确重建 |
-| 光栅场景 | 贴图模型、父子变换、方向光阴影、不同 PBR 参数材质球 |
-| 路径追踪 | 间接照明、多次散射、累积重置、有限数值、样本增加后的噪声趋势 |
+| Cornell Box | 多实例／共享几何、红绿墙材质、五种视图、场景参数、Forward 开关与窗口生命周期，包含最小化退出 |
+| Lantern | 复杂贴图模型、线性 MR／法线图片上传与开关差异、非均匀／镜像、五种视图、场景参数与窗口生命周期 |
+| PBR 材质球 | 多金属度／粗糙度、法线开关不改变无贴图材质、非均匀／镜像、五种视图与窗口生命周期 |
 
-图编译和 ECS 测试应尽量不依赖 GPU。GPU 测试需要记录模型、相机、参数、设备、驱动与 Shader 版本。路径追踪使用固定随机种子辅助诊断，并采用数值或图像容差；不把不同驱动下逐像素一致视为必需。首次验收不设帧率门槛。
+检查记录可见性、HDR 非有限标记、Validation Layers／同步验证诊断和资源销毁数量／顺序；Debug 开启验证层，Release 不主动开启。日志需保留资产、设备、驱动和 Shader 上下文，截图用于检查实际画面。运行命令见 [复杂场景测试](../README.md#复杂场景测试)。
+
+当前测试不提供独立逐像素光照／阴影参考，也不覆盖 CPU 边界、坏输入或失败恢复。历史精确检查结果保留为已发生的证据，不能替代后续改动的验证。路径追踪接入后应扩展完整场景，检查多次散射、累积、变化重置、有限数值和噪声趋势；当前没有这些运行能力，首次验收不设帧率门槛。
 
 | 风险 | 应对和需要保留的证据 |
 |---|---|
-| Vulkan 同步复杂，隐藏访问破坏图推导 | 明确资源声明与所有权，采用单队列起步，以同步验证和小场景覆盖关键依赖 |
+| Vulkan 同步复杂，隐藏访问破坏图推导 | 明确资源声明与所有权，采用单队列起步，以同步验证和复杂场景检查实际依赖 |
 | RHI 设计过大拖慢算法开发 | 围绕实际 Pass 增加接口，当前不建设多后端抽象 |
 | ECS 先追求高性能扩大工作量 | 先验证生命周期、查询和层级，性能测量出现需要后再优化存储 |
 | Slang、SPIR-V 与设备能力不匹配 | 首月能力探针，锁定版本并记录编译目标与限制 |

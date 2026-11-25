@@ -40,7 +40,7 @@ struct VulkanClearRenderer::State
     // destructor waits and releases recorded commands before dropping this copy.
     BufferRef vertexKeepAlive;
     BufferRef indexKeepAlive;
-    std::vector<TextureBindingRef> materialKeepAlive;
+    std::vector<MaterialBinding> materialKeepAlive;
     detail::VulkanFrameLighting lighting;
     TextureRef depth;
     bool depthInitialized = false;

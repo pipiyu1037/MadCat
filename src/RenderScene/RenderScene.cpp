@@ -60,17 +60,17 @@ std::expected<rhi::FrameLighting, std::string> extractLighting(
     auto result = extractLighting(scene);
     if (!result) { return result; }
     const auto matrices = scene::buildCameraMatrices(scene, camera, aspect);
-    if (!matrices) { return std::unexpected("PBR camera is invalid"); }
+    if (!matrices) { return std::unexpected("Lighting camera is invalid"); }
     const auto inverse = glm::inverse(glm::dmat4(matrices->viewProjection));
     for (int c=0; c<4; ++c) { for (int r=0; r<4; ++r) {
         const double value = inverse[c][r];
         if (!std::isfinite(value) || std::abs(value)>std::numeric_limits<float>::max())
-        { return std::unexpected("PBR inverse camera matrix exceeds finite float range"); }
+        { return std::unexpected("Lighting inverse camera matrix exceeds finite float range"); }
         result->worldFromClip[c*4+r] = static_cast<float>(value);
     } }
     const auto& position = (*scene.worldTransform(camera))[3];
     for (int axis=0; axis<3; ++axis) { result->cameraPosition[axis] = position[axis]; }
-    if (!result->valid()) { return std::unexpected("PBR camera data is invalid"); }
+    if (!result->valid()) { return std::unexpected("Lighting camera data is invalid"); }
     return result;
 }
 
@@ -191,11 +191,19 @@ std::expected<GeometryBatch, std::string> prepareGeometry(const assets::ModelAss
                 require(std::isfinite(material.metallic) && material.metallic>=0 && material.metallic<=1 &&
                     std::isfinite(material.roughness) && material.roughness>=0 && material.roughness<=1, "Material metallic/roughness factors are invalid");
                 require(!material.baseColorTexture || *material.baseColorTexture < model->textures.size(), "Material texture is invalid");
+                require(!material.metallicRoughnessTexture || *material.metallicRoughnessTexture < model->textures.size(), "Material metallic/roughness texture is invalid");
+                require(!material.normalTexture || *material.normalTexture < model->textures.size(), "Material normal texture is invalid");
+                require(std::isfinite(material.normalScale), "Material normal scale is nonfinite");
                 result.materials.push_back({draw.geometry.model, primitive.material, std::move(material)});
             }
             require(!result.materials[materialIndex].material.baseColorTexture || primitive.texcoords0.size() == primitive.positions.size(), "Base-color texture requires TEXCOORD_0");
+            require(!result.materials[materialIndex].material.metallicRoughnessTexture || primitive.texcoords0.size() == primitive.positions.size(), "Metallic/roughness texture requires TEXCOORD_0");
+            require(!result.materials[materialIndex].material.normalTexture || (primitive.texcoords0.size() == primitive.positions.size() &&
+                primitive.normals.size() == primitive.positions.size() && primitive.tangents.size() == primitive.positions.size()),
+                "Normal texture requires NORMAL, TANGENT and TEXCOORD_0; automatic tangent generation is unsupported");
             require(!primitive.positions.empty() && !primitive.indices.empty() && primitive.indices.size() % 3 == 0, "Primitive requires positions and triangle indices");
             require(primitive.normals.empty() || primitive.normals.size() == primitive.positions.size(), "Primitive normal count differs from positions");
+            require(primitive.tangents.empty() || primitive.tangents.size() == primitive.positions.size(), "Primitive tangent count differs from positions");
             require(primitive.texcoords0.empty() || primitive.texcoords0.size() == primitive.positions.size(), "Primitive UV count differs from positions");
             constexpr size_t vertexLimit = 0x01000000;
             require(primitive.positions.size() <= vertexLimit - result.vertices.size(), "Geometry batch exceeds guaranteed vertex index range");
@@ -218,6 +226,7 @@ std::expected<GeometryBatch, std::string> prepareGeometry(const assets::ModelAss
                 const auto& material = result.materials[materialIndex].material;
                 vertex.metallicRoughness[0] = material.metallic;
                 vertex.metallicRoughness[1] = material.roughness;
+                vertex.normalScale = material.normalScale;
                 for (int axis = 0; axis < 3; ++axis)
                 {
                     vertex.position[axis] = position[axis];
@@ -230,6 +239,20 @@ std::expected<GeometryBatch, std::string> prepareGeometry(const assets::ModelAss
                     const auto length = glm::length(glm::dvec3(normal));
                     require(std::isfinite(length) && std::abs(length - 1) < .0001, "Primitive normal must be finite and unit length");
                     for (int axis = 0; axis < 3; ++axis) { vertex.normal[axis] = normal[axis]; }
+                }
+                if (!primitive.tangents.empty())
+                {
+                    const auto tangent = primitive.tangents[index];
+                    const auto direction = glm::dvec3(tangent);
+                    const auto length = glm::length(direction);
+                    require(std::isfinite(length) && std::abs(length-1) < .0001 && (tangent.w == 1 || tangent.w == -1),
+                        "Primitive tangent must be finite, unit length, with handedness +1/-1");
+                    if (!primitive.normals.empty())
+                    {
+                        require(glm::length(glm::cross(glm::dvec3(primitive.normals[index]),direction)) > 1e-6,
+                            "Primitive tangent is parallel to its normal");
+                    }
+                    for (int axis = 0; axis < 4; ++axis) { vertex.tangent[axis] = tangent[axis]; }
                 }
                 if (!primitive.texcoords0.empty())
                 {
@@ -247,7 +270,14 @@ std::expected<GeometryBatch, std::string> prepareGeometry(const assets::ModelAss
                 require(index < primitive.positions.size(), "Primitive index is out of bounds");
                 result.indices.push_back(base + index);
             }
-            const uint32_t attributes = (primitive.normals.empty() ? 0u : rhi::HasNormal) | (primitive.texcoords0.empty() ? 0u : rhi::HasTexcoord);
+            for (size_t index = 0; !primitive.tangents.empty() && index < primitive.indices.size(); index += 3)
+            {
+                const auto sign = primitive.tangents[primitive.indices[index]].w;
+                require(sign == primitive.tangents[primitive.indices[index+1]].w && sign == primitive.tangents[primitive.indices[index+2]].w,
+                    "Primitive triangle has inconsistent tangent handedness");
+            }
+            const uint32_t attributes = (primitive.normals.empty() ? 0u : rhi::HasNormal) | (primitive.texcoords0.empty() ? 0u : rhi::HasTexcoord) |
+                (primitive.tangents.empty() ? 0u : rhi::HasTangent);
             result.ranges.push_back({draw.geometry, firstIndex, static_cast<uint32_t>(primitive.indices.size()), attributes, materialIndex});
         }
         return result;
@@ -268,7 +298,7 @@ std::expected<std::vector<rhi::IndexedDraw>, std::string> resolveDraws(const Geo
         const auto& material = batch.materials[range->material].material;
         transform.attributes = (transform.attributes & (rhi::NormalTransformValid | rhi::Mirrored)) | range->attributes |
             (material.doubleSided ? rhi::DoubleSided : 0u) | (material.alphaMode == assets::AlphaMode::Mask ? rhi::AlphaMask : 0u) |
-            (material.baseColorTexture ? rhi::HasTexture : 0u);
+            (material.baseColorTexture ? rhi::HasTexture : 0u) | (material.normalTexture ? rhi::HasNormalTexture : 0u);
         transform.setBaseColor(material.baseColor); transform.alphaCutoff = material.alphaCutoff;
         result.push_back({transform, range->firstIndex, range->indexCount, range->material});
     }

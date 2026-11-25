@@ -31,7 +31,9 @@ int run(const ApplicationOptions& options, scene::Scene& scene, const assets::Mo
             if (!draws) { return std::unexpected(draws.error()); }
             auto resolved = render::resolveDraws(*geometry, *draws);
             if (!resolved) { return std::unexpected(resolved.error()); }
-            auto lighting = options.physicallyBased ? render::extractLighting(scene, camera, info.aspect) : render::extractLighting(scene);
+            // Both Lambert normal mapping and PBR need the same inverse camera
+            // used by clipFromLocal to transport local tangent directions.
+            auto lighting = render::extractLighting(scene, camera, info.aspect);
             if (!lighting) { return std::unexpected(lighting.error()); }
             RenderFrame frame;
             frame.draws = std::move(*resolved);

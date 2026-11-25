@@ -1,5 +1,6 @@
 #include "VulkanSampledTexture.h"
 #include "VulkanTextureState.h"
+#include "VulkanDepthTexture.h"
 #include "VulkanDevice.h"
 #include "VulkanFunctions.h"
 
@@ -46,9 +47,10 @@ struct Upload
 };
 }
 
-TextureRef createSampledTexture(const VulkanDevice& device, uint32_t width, uint32_t height, std::span<const uint8_t> rgba)
+TextureRef createSampledTexture(const VulkanDevice& device, uint32_t width, uint32_t height, std::span<const uint8_t> rgba, TextureEncoding encoding)
 {
-    if (!device.handle() || !width || !height || uint64_t(width) * height * 4 != rgba.size()) { return {}; }
+    if (!device.handle() || !width || !height || uint64_t(width) * height * 4 != rgba.size() ||
+        (encoding != TextureEncoding::Srgb && encoding != TextureEncoding::Linear)) { return {}; }
     const auto instance = device.physicalDeviceInfo().instance;
     const auto getProc = detail::loadFunction<PFN_vkGetDeviceProcAddr>(instance, "vkGetDeviceProcAddr");
     const auto getFormats = detail::loadFunction<PFN_vkGetPhysicalDeviceFormatProperties>(instance, "vkGetPhysicalDeviceFormatProperties");
@@ -57,7 +59,7 @@ TextureRef createSampledTexture(const VulkanDevice& device, uint32_t width, uint
     if (!getProc || !getFormats || !getImageFormats || !getMemory) { return {}; }
     auto state = std::make_shared<detail::TextureState>();
     state->device = device.handle(); state->width = width; state->height = height;
-    state->sampled = true; state->format = VK_FORMAT_R8G8B8A8_SRGB;
+    state->sampled = true; state->format = encoding == TextureEncoding::Srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
     state->mipLevels = std::bit_width(std::max(width, height));
     VkFormatProperties format{}; getFormats(device.physicalDevice(), state->format, &format);
     constexpr auto features = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
@@ -69,7 +71,7 @@ TextureRef createSampledTexture(const VulkanDevice& device, uint32_t width, uint
         width > imageLimits.maxExtent.width || height > imageLimits.maxExtent.height || state->mipLevels > imageLimits.maxMipLevels ||
         imageLimits.maxExtent.depth < 1 || imageLimits.maxArrayLayers < 1 || !(imageLimits.sampleCounts & VK_SAMPLE_COUNT_1_BIT))
     {
-        std::fprintf(stderr, "Vulkan error: RGBA8 sRGB sampled image/mipmap extent or features unsupported.\n"); return {};
+        std::fprintf(stderr, "Vulkan error: RGBA8 sampled image/mipmap extent or features unsupported.\n"); return {};
     }
     Upload upload; upload.device = device.handle();
     const auto load = [&](auto& function, const char* name) {
@@ -172,13 +174,15 @@ TextureRef createSampledTexture(const VulkanDevice& device, uint32_t width, uint
     upload.pending = true;
     if (!detail::checkResult(wait(device.handle(),1,&upload.fence,VK_TRUE,UINT64_MAX), "wait image upload")) { return {}; }
     upload.pending = false;
-    std::fprintf(stderr, "Vulkan: Sampled texture uploaded; %u x %u, %u mip levels, sRGB, shader-read-only.\n",width,height,state->mipLevels);
+    std::fprintf(stderr, "Vulkan: Sampled texture uploaded; %u x %u, %u mip levels, %s, shader-read-only.\n",width,height,state->mipLevels,
+        encoding == TextureEncoding::Srgb ? "sRGB" : "linear UNORM");
     TextureRef result; result.state_ = std::move(state); return result;
 }
 
 struct detail::TextureBindingState
 {
     TextureRef texture;
+    TextureBindingRef sources[2];
     VkDevice device{};
     VkDescriptorSetLayout layout{};
     VkDescriptorPool pool{};
@@ -199,6 +203,56 @@ VkDevice detail::TextureBindingAccess::device(const TextureBindingRef& ref) { re
 VkDescriptorSetLayout detail::TextureBindingAccess::layout(const TextureBindingRef& ref) { return ref.state_ ? ref.state_->layout : VK_NULL_HANDLE; }
 VkDescriptorSet detail::TextureBindingAccess::set(const TextureBindingRef& ref) { return ref.state_ ? ref.state_->set : VK_NULL_HANDLE; }
 TextureRef detail::TextureBindingAccess::texture(const TextureBindingRef& ref) { return ref.state_ ? ref.state_->texture : TextureRef{}; }
+TextureRef detail::TextureBindingAccess::normalTexture(const TextureBindingRef& ref)
+{ return ref.state_ ? texture(ref.state_->sources[1]) : TextureRef{}; }
+
+TextureBindingRef createMaterialDataBinding(const VulkanDevice& device, TextureBindingRef mr, TextureBindingRef normal)
+{
+    if (!device.handle() || !mr.state_ || !normal.state_ || mr.state_->device != device.handle() ||
+        normal.state_->device != device.handle() || !mr.state_->sampler || !normal.state_->sampler ||
+        detail::TextureAccess::format(mr.state_->texture) != VK_FORMAT_R8G8B8A8_UNORM ||
+        detail::TextureAccess::format(normal.state_->texture) != VK_FORMAT_R8G8B8A8_UNORM) { return {}; }
+    const auto getProc = detail::loadFunction<PFN_vkGetDeviceProcAddr>(device.physicalDeviceInfo().instance,"vkGetDeviceProcAddr");
+    if (!getProc) { return {}; }
+    auto state = std::make_shared<detail::TextureBindingState>();
+    state->device = device.handle(); state->texture = mr.state_->texture;
+    state->sources[0] = std::move(mr); state->sources[1] = std::move(normal);
+    const auto load = [&](auto& fn, const char* name) { fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(getProc(device.handle(),name)); return fn != nullptr; };
+#define LOAD(type, name) PFN_vk##type name{}; if (!load(name,"vk" #type)) { return {}; }
+    LOAD(CreateDescriptorSetLayout,createLayout) LOAD(CreateDescriptorPool,createPool)
+    LOAD(AllocateDescriptorSets,allocateSets) LOAD(UpdateDescriptorSets,updateSets)
+#undef LOAD
+    if (!load(state->destroyPool,"vkDestroyDescriptorPool") || !load(state->destroyLayout,"vkDestroyDescriptorSetLayout")) { return {}; }
+    const VkDescriptorSetLayoutBinding bindings[]{
+        {0,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr},
+        {1,VK_DESCRIPTOR_TYPE_SAMPLER,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr},
+        {NormalImageBinding,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr},
+        {NormalSamplerBinding,VK_DESCRIPTOR_TYPE_SAMPLER,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr}};
+    VkDescriptorSetLayoutCreateInfo layout{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layout.bindingCount = 4; layout.pBindings = bindings;
+    if (!createOwned(device.handle(),createLayout,layout,state->layout,"material data layout")) { return {}; }
+    const VkDescriptorPoolSize sizes[]{{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,2},{VK_DESCRIPTOR_TYPE_SAMPLER,2}};
+    VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pool.maxSets = 1; pool.poolSizeCount = 2; pool.pPoolSizes = sizes;
+    if (!createOwned(device.handle(),createPool,pool,state->pool,"material data pool")) { return {}; }
+    VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocate.descriptorPool = state->pool; allocate.descriptorSetCount = 1; allocate.pSetLayouts = &state->layout;
+    if (!detail::checkResult(allocateSets(device.handle(),&allocate,&state->set),"material data set")) { return {}; }
+    VkDescriptorImageInfo images[4]{};
+    VkWriteDescriptorSet writes[4]{};
+    for (uint32_t index=0; index<4; ++index)
+    {
+        const auto& source = *state->sources[index/2].state_;
+        if (index%2 == 0) { images[index].imageView = detail::TextureAccess::view(source.texture); images[index].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; }
+        else { images[index].sampler = source.sampler; }
+        writes[index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[index].dstSet = state->set;
+        writes[index].dstBinding = bindings[index].binding; writes[index].descriptorCount = 1;
+        writes[index].descriptorType = bindings[index].descriptorType; writes[index].pImageInfo = &images[index];
+    }
+    updateSets(device.handle(),4,writes,0,nullptr);
+    std::fprintf(stderr,"Vulkan: Texture binding created.\n");
+    TextureBindingRef result; result.state_ = std::move(state); return result;
+}
 
 TextureBindingRef createTextureBinding(const VulkanDevice& device, TextureRef texture, const SamplerDesc& sampler)
 {
@@ -209,7 +263,7 @@ TextureBindingRef createTextureBinding(const VulkanDevice& device, TextureRef te
         static_cast<unsigned>(sampler.mips) > static_cast<unsigned>(SamplerDesc::Mips::Linear)) { return {}; }
     // Depth formats need not support linear filtering. The initial depth viewer
     // uses nearest sampling; reject unsupported sampler requests explicitly.
-    if (image->format != VK_FORMAT_R8G8B8A8_SRGB &&
+    if (image->format != VK_FORMAT_R8G8B8A8_SRGB && image->format != VK_FORMAT_R8G8B8A8_UNORM &&
         (sampler.linearMag || sampler.linearMin || sampler.mips != SamplerDesc::Mips::None)) { return {}; }
     const auto getProc = detail::loadFunction<PFN_vkGetDeviceProcAddr>(device.physicalDeviceInfo().instance,"vkGetDeviceProcAddr");
     if (!getProc) { return {}; }

@@ -43,13 +43,13 @@ public:
     // An empty span is reserved for descriptor-free shader exercises; it cannot
     // record Material/Lit view. Nonempty entries share the fixed set-0 image/sampler
     // layout and create the set-1 vertex/fragment lighting layout, plus set-2
-    // sampled shadow image/sampler using the same binding layout. Each renderer owns
+    // sampled shadow image/sampler and set-3 linear MR using the same binding layout. Each renderer owns
     // its own lighting buffer/set; depthOnly omits the lighting layout and set.
     // Geometry/materials are retained until completion.
     // Failure releases partial resources; repeated initialization preserves state.
     [[nodiscard]] bool initialize(const VulkanDevice& device, VkFormat colorFormat,
         const VulkanShaderModule& vertex, const VulkanShaderModule& fragment, BufferRef vertices, BufferRef indices, VkFormat depthFormat,
-        std::span<const TextureBindingRef> materials = {}, bool depthOnly = false);
+        std::span<const MaterialBinding> materials = {}, bool depthOnly = false);
 
     [[nodiscard]] VkPipeline handle() const;
     [[nodiscard]] VkDevice deviceHandle() const;
@@ -59,7 +59,7 @@ public:
     [[nodiscard]] BufferRef vertexBuffer() const;
     [[nodiscard]] BufferRef indexBuffer() const;
     [[nodiscard]] uint32_t indexCount() const;
-    [[nodiscard]] std::span<const TextureBindingRef> materialBindings() const;
+    [[nodiscard]] std::span<const MaterialBinding> materialBindings() const;
     // Backend-only layout borrowed by each renderer's independent frame UBO.
     [[nodiscard]] VkDescriptorSetLayout lightingLayout() const;
 

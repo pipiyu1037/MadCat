@@ -12,6 +12,10 @@ struct DrawTransform
 [[vk::push_constant]] ConstantBuffer<DrawTransform> drawTransform;
 [[vk::binding(0, 0)]] Texture2D<float4> baseColorTexture;
 [[vk::binding(1, 0)]] SamplerState baseColorSampler;
+[[vk::binding(0, 3)]] Texture2D<float4> metallicRoughnessTexture;
+[[vk::binding(1, 3)]] SamplerState metallicRoughnessSampler;
+[[vk::binding(2, 3)]] Texture2D<float4> normalTexture;
+[[vk::binding(3, 3)]] SamplerState normalSampler;
 struct FrameLighting
 {
     float4 toLight;
@@ -38,18 +42,25 @@ struct VertexOutput
     float4 shadowClip : TEXCOORD5;
     float3 toCamera : TEXCOORD6;
     nointerpolation float2 metallicRoughness : TEXCOORD7;
+    float4 worldTangent : TEXCOORD8;
+    nointerpolation float normalScale : TEXCOORD9;
 };
 
 [shader("vertex")]
 VertexOutput vertexMain(float3 position : POSITION, float3 color : COLOR0, float3 normal : NORMAL, float2 uv : TEXCOORD0,
-    float2 metallicRoughness : TEXCOORD1)
+    float3 materialFactors : TEXCOORD1, float4 tangent : TANGENT)
 {
     VertexOutput output;
     output.position = mul(drawTransform.clipFromLocal, float4(position, 1.0));
     output.shadowClip = mul(frameLighting.shadowFromClip, output.position);
     float4 world = mul(frameLighting.worldFromClip, output.position);
     output.toCamera = frameLighting.cameraPosition.xyz * world.w - world.xyz;
-    output.metallicRoughness = metallicRoughness;
+    output.metallicRoughness = materialFactors.xy;
+    output.normalScale = materialFactors.z;
+    // inverse(cameraClipFromWorld) * clipFromLocal transports a direction by
+    // the world linear transform. Reuses the frame UBO and 128-byte draw ABI.
+    float3 worldTangent = mul(frameLighting.worldFromClip, mul(drawTransform.clipFromLocal, float4(tangent.xyz, 0))).xyz;
+    output.worldTangent = float4(worldTangent, tangent.w * ((drawTransform.attributes & 8) != 0 ? -1 : 1));
     output.color = color;
     output.worldNormal = drawTransform.normalColumn0.xyz * normal.x + drawTransform.normalColumn1.xyz * normal.y + drawTransform.normalColumn2.xyz * normal.z;
     output.uv = uv;
@@ -93,6 +104,10 @@ float4 fragmentMain(VertexOutput input, bool frontFace : SV_IsFrontFace) : SV_Ta
         // Unconditional derivatives/sampling keep implicit LOD valid even when
         // material parameters vary across primitives. Every draw binds a texture.
         float4 texel = baseColorTexture.Sample(baseColorSampler, input.uv);
+        // UNORM data: B is metallic, G is perceptual roughness. A white fallback
+        // leaves the factors unchanged; R and A do not affect this material.
+        float2 mr = input.metallicRoughness * metallicRoughnessTexture.Sample(metallicRoughnessSampler, input.uv).bg;
+        float3 mappedNormal = normalTexture.Sample(normalSampler, input.uv).xyz * 2 - 1;
         if ((input.attributes & 64) != 0) color *= texel;
         if ((input.attributes & 32) != 0 && color.a < input.cutoff) discard;
         if (input.view == 4 || input.view == 5)
@@ -101,8 +116,25 @@ float4 fragmentMain(VertexOutput input, bool frontFace : SV_IsFrontFace) : SV_Ta
             float magnitude = max(abs(input.worldNormal.x), max(abs(input.worldNormal.y), abs(input.worldNormal.z)));
             if (!(magnitude > 0) || !isfinite(magnitude)) return float4(1, 0, 1, 1);
             float3 normal = normalize(input.worldNormal / magnitude);
+            if ((input.attributes & 256) != 0 && input.normalScale != 0)
+            {
+                if ((input.attributes & 128) == 0 || !all(isfinite(input.worldTangent))) return float4(1,0,1,1);
+                float tangentScale = max(abs(input.worldTangent.x), max(abs(input.worldTangent.y), abs(input.worldTangent.z)));
+                if (!(tangentScale > 0)) return float4(1,0,1,1);
+                float3 tangent = input.worldTangent.xyz / tangentScale;
+                tangent -= normal * dot(normal, tangent);
+                float tangentLength = length(tangent);
+                if (!(tangentLength > 1e-6)) return float4(1,0,1,1);
+                tangent /= tangentLength;
+                float3 bitangent = cross(normal, tangent) * input.worldTangent.w;
+                mappedNormal.xy *= input.normalScale;
+                float mapScale = max(abs(mappedNormal.x), max(abs(mappedNormal.y), abs(mappedNormal.z)));
+                if (!(mapScale > 0) || !all(isfinite(mappedNormal))) return float4(1,0,1,1);
+                mappedNormal = normalize(mappedNormal / mapScale);
+                normal = normalize(tangent * mappedNormal.x + bitangent * mappedNormal.y + normal * mappedNormal.z);
+            }
             // Mirroring changes winding. Flip only the effective back face of
-            // a double-sided surface, after inverse-transpose normal transport.
+            // a double-sided surface, after constructing the perturbed normal.
             if (frontFace == mirrored) normal = -normal;
             float cosine = max(dot(normal, frameLighting.toLight.xyz), 0.0);
             if (input.view == 5)
@@ -121,8 +153,8 @@ float4 fragmentMain(VertexOutput input, bool frontFace : SV_IsFrontFace) : SV_Ta
                 float3 halfVector = normalize(halfSum / halfScale);
                 float ndh = saturate(dot(normal, halfVector));
                 float vdh = saturate(dot(view, halfVector));
-                float metal = saturate(input.metallicRoughness.x);
-                float alpha = max(input.metallicRoughness.y * input.metallicRoughness.y, .0025);
+                float metal = saturate(mr.x);
+                float alpha = max(mr.y * mr.y, .0025);
                 float alpha2 = alpha * alpha;
                 // Cross product avoids cancellation at ndh=1 for smooth materials.
                 float3 perpendicular = cross(normal, halfVector);

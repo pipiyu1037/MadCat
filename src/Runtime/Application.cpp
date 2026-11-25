@@ -71,7 +71,7 @@ class GraphicsLoop
 public:
     GraphicsLoop(GLFWwindow* window, const rhi::VulkanDevice& device, const rhi::VulkanSurface& surface,
         const rhi::VulkanShaderModule& vertex, const rhi::VulkanShaderModule& fragment,
-        rhi::BufferRef vertices, rhi::BufferRef indices, std::vector<rhi::TextureBindingRef> materials,
+        rhi::BufferRef vertices, rhi::BufferRef indices, std::vector<rhi::MaterialBinding> materials,
         const rhi::VulkanShaderModule* depthVertex, const rhi::VulkanShaderModule* depthFragment,
         const rhi::VulkanShaderModule* shadowVertex, const rhi::VulkanShaderModule* shadowFragment,
         const ApplicationOptions& options, const GraphicsCallbacks& callbacks)
@@ -245,7 +245,7 @@ private:
     const madcat::rhi::VulkanShaderModule& fragment_;
     madcat::rhi::BufferRef vertices_;
     madcat::rhi::BufferRef indices_;
-    std::vector<madcat::rhi::TextureBindingRef> materials_;
+    std::vector<madcat::rhi::MaterialBinding> materials_;
     const madcat::rhi::VulkanShaderModule* depthVertex_;
     const madcat::rhi::VulkanShaderModule* depthFragment_;
     const madcat::rhi::VulkanShaderModule* shadowVertex_;

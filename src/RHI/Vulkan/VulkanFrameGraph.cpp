@@ -11,6 +11,7 @@
 #include "VulkanGraphicsPipeline.h"
 #include "VulkanUi.h"
 #include <algorithm>
+#include <array>
 #include <type_traits>
 
 namespace madcat::rhi::detail
@@ -48,7 +49,7 @@ struct VulkanFrameGraph::State : GraphicsCommands
     std::vector<graph::Use> pending;
     bool geometrySubmitted = false;
     uint32_t colorSlot=0, depthSlot=0, vertexSlot=UINT32_MAX, indexSlot=UINT32_MAX, lightingSlot=UINT32_MAX;
-    std::vector<uint32_t> materialTextures;
+    std::vector<std::array<uint32_t,3>> materialTextures;
     TextureRef depth;
     const VulkanTrianglePipeline* pipeline=nullptr;
     const VulkanTrianglePipeline* shadow=nullptr;
@@ -142,8 +143,14 @@ struct VulkanFrameGraph::State : GraphicsCommands
         const auto depthTarget=activeDepth==depthSlot ? depth : native[activeDepth].ownedTexture;
         if (selected->colorFormat()!=activeColorFormat || selected->depthFormat()!=TextureAccess::format(depthTarget)) { return false; }
         activePipeline={};
-        if (!materialTextures.empty() && (draw.material>=materialTextures.size() ||
-            std::ranges::find(textures,materialTextures[draw.material])==textures.end())) { return false; }
+        if (!materialTextures.empty())
+        {
+            if (draw.material>=materialTextures.size()) { return false; }
+            const auto& slots=materialTextures[draw.material];
+            if (std::ranges::find(textures,slots[0])==textures.end() ||
+                (!depthOnly && (std::ranges::find(textures,slots[1])==textures.end() ||
+                    std::ranges::find(textures,slots[2])==textures.end()))) { return false; }
+        }
         TextureBindingRef binding;
         if (shadowSlot!=UINT32_MAX)
         {
@@ -206,7 +213,8 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
         BufferAccess::handle(shadow->indexBuffer())!=BufferAccess::handle(pipeline->indexBuffer()) ||
         shadow->materialBindings().size()!=pipeline->materialBindings().size())) { return false; }
     if (shadow) { for (size_t i=0; i<shadow->materialBindings().size(); ++i) {
-        if (TextureBindingAccess::set(shadow->materialBindings()[i])!=TextureBindingAccess::set(pipeline->materialBindings()[i])) { return false; }
+        if (TextureBindingAccess::set(shadow->materialBindings()[i].baseColor)!=TextureBindingAccess::set(pipeline->materialBindings()[i].baseColor) ||
+            TextureBindingAccess::set(shadow->materialBindings()[i].data)!=TextureBindingAccess::set(pipeline->materialBindings()[i].data)) { return false; }
     } }
     auto state=std::make_unique<State>();
     state->device=device.handle(); state->presentationFormat=presentationFormat;
@@ -253,11 +261,19 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
         }
         for (const auto& material : pipeline->materialBindings())
         {
-            auto texture=TextureBindingAccess::texture(material);
-            auto resource=import("BaseColor",identity(TextureAccess::image(texture)),graph::Kind::Color,graph::Use::Sampled,true,
-                {TextureAccess::image(texture),VK_NULL_HANDLE,VK_IMAGE_ASPECT_COLOR_BIT,TextureAccess::mipLevels(texture)});
-            state->materialTextures.push_back(resource.index);
-            if (std::ranges::find(input.textures,resource)==input.textures.end()) { input.textures.push_back(resource); }
+            std::array<uint32_t,3> slots{};
+            const TextureRef textures[]{TextureBindingAccess::texture(material.baseColor),TextureBindingAccess::texture(material.data),
+                TextureBindingAccess::normalTexture(material.data)};
+            const char* names[]{"BaseColor","MetallicRoughness","Normal"};
+            for (size_t index=0; index<3; ++index)
+            {
+                const auto& texture=textures[index];
+                auto resource=import(names[index],identity(TextureAccess::image(texture)),graph::Kind::Color,graph::Use::Sampled,true,
+                    {TextureAccess::image(texture),VK_NULL_HANDLE,VK_IMAGE_ASPECT_COLOR_BIT,TextureAccess::mipLevels(texture)});
+                slots[index]=resource.index;
+                if (std::ranges::find(input.textures,resource)==input.textures.end()) { input.textures.push_back(resource); }
+            }
+            state->materialTextures.push_back(slots);
         }
     }
     auto program=factory(graph,input);
