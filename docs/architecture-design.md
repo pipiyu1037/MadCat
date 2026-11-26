@@ -2,7 +2,7 @@
 
 2026-11-25 起，自动测试范围精简为 Cornell Box、Lantern 和 PBR 材质球，见 [复杂场景测试](../README.md#复杂场景测试)。本文旧测试数量与解析参考是历史证据，对应独立检查已移除；资源声明、同步和生命周期契约继续适用。
 
-更新日期：2026-11-25。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
+更新日期：2026-11-26。本文整理项目既有架构约束及讨论中已经确认的设计方向，作为首版实施基线。设计不等于实现；实际能力、工具版本、构建命令和运行验证见[项目开发文档](project-development.md)及 [README](../README.md)。
 
 ## 文档职责与设计状态
 
@@ -224,6 +224,46 @@ Pass 作者使用 `BufferRef` 等 RHI 类型，`std::shared_ptr` 及 Vulkan 对�
 该索引增量当时上传四个 20 字节顶点和九个 uint32 索引：中心、绿、红、蓝；`{2,3,0, 3,1,0, 1,2,0}` 共享顶点组成三个小三角形。中心局部位置 `(0,-.2)`、颜色各 1/3，外轮廓与原有渐变保持一致，独立解析投影／深度像素检查继续适用；顺序读顶点无法替代此索引路径。两个模型及七种姿态共享这组数据。后续三维布局曾将顶点升级为 24 字节，当前增加 PBR 因子后使用 52 字节，见[模型预览](#gltf-静态预览当前实现)。
 
 Debug／Release 各 40 项缓冲、45 项管线及既有 26 项深度、35 项 Shader Module、5 组场景检查与主程序构建通过。覆盖两种用途的失败清理、设备索引范围、错误用途／步长／顶点边界／三角形数量、索引绑定与 DrawIndexed 参数、不同索引数及双引用释放。实际两种配置的遮挡／反序／resize／恢复，Debug 相机／裁剪、最小化退出和连续尺寸变化通过，Debug 同步验证无 warning／error。Shader 未修改且沿用既有已验证产物。该索引增量当时为固定 float2 位置／float3 颜色布局；后续三维格式与 glTF GPU 预览见下文，Scene 资产组件与 RenderScene 仍待实现；无 uint16 索引、staging、通用 Draw 接口和图状态计划。[Khronos 索引绑定](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdBindIndexBuffer.html)、[DrawIndexed](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdDrawIndexed.html)、[索引范围](https://docs.vulkan.org/spec/latest/chapters/features.html#features-fullDrawIndexUint32)
+
+### Ray Query 设备选项与缓冲（当前实现）
+
+2026-11-26 增加 `VulkanDeviceOptions::enableRayQuery`，默认 false；运行层通过同名 `ApplicationOptions` 字段传递，CustomPass 通过 `--ray-query-buffers` 选择。开启时，候选必须满足已有 Vulkan 1.3／单 Graphics-Compute-Present 队列要求，并支持可查询的 bufferDeviceAddress／accelerationStructure／rayQuery 和三个扩展 VK_KHR_acceleration_structure／VK_KHR_ray_query／VK_KHR_deferred_host_operations。缺失项逐条诊断，合格候选继续按原设备优先级选择；不退回未启用光追的设备。feature 链按需附加三个结构，呈现 Fence 仍独立启用，只有 Device 创建成功才发布 `rayQueryEnabled()`。Vulkan 1.3 已覆盖这些扩展所需的核心 1.2 依赖。[加速结构依赖](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_acceleration_structure.html)、[Ray Query 依赖](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_ray_query.html)
+
+本节扩展前述静态几何接口：`createVertexBuffer`／`createIndexBuffer` 的可选 `rayQueryInput` 默认为 false；开启时额外设置 STORAGE_BUFFER、SHADER_DEVICE_ADDRESS 和 ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY 用途，要求启用了 Ray Query 的 Device。光栅管线检查所需用途位，仍校验同 Device、顶点步长、索引范围与拓扑。`createStorageBuffer(device, bytes, deviceAddress=false)` 创建一次初始化的 Storage；可寻址分配同时设置设备地址 usage 与 VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT，完成绑定后取得非零地址，再上传和发布。普通 Storage 不要求光追 Device。三种工厂复用原来的专用 coherent 分配和失败清理，没有新增映射更新、Descriptor 或 GPU 回读接口。[缓冲设备地址](https://docs.vulkan.org/refpages/latest/refpages/source/vkGetBufferDeviceAddress.html)、[设备地址分配标志](https://docs.vulkan.org/refpages/latest/refpages/source/VkMemoryAllocateFlagBits.html)
+
+`BufferRef::deviceAddress()` 暴露缓存 uint64 地址，未请求地址或空引用返回零。地址只借用分配，不保活；Device 必须覆盖全部引用，最后引用仅在 GPU 使用完成后释放。顶点／索引数据继续不可变；Storage 可由未来 GPU 命令写入，但必须声明实际访问和同步，引用计数不能代替完成判断。
+
+开启该选项时，运行层先创建普通／可寻址各一个 4 字节 Storage，检查大小和地址后释放；这两个分配从未提交，不需要图导入或 GPU 等待。真实场景几何使用组合用途，沿用管线／帧引用和窗口重建复用。分配允许的用途不等于已经发生的访问；后续 CustomPass 的真实 Storage 访问见下节，AS 构建与求交见 [BLAS／TLAS 与 Ray Query](#加速结构与-ray-query当前实现)。复杂场景的 `-RayQuery` 模式检查缓冲与 Compute，`-TraceRays` 增加实际求交，默认模式检查关闭状态。
+
+### Compute Storage 与完成回调（当前实现）
+
+2026-11-26 在设备／缓冲准备之后接通首个计算通路。[ComputePipelineDesc](../src/RHI/ComputePipeline.h) 显式描述 `computeMain` 和只读／写入 Storage 个数，set 0 以连续 binding 排列，先输入后输出。`GraphicsImports::prepareCompute` 只在建图期间借用 Device，返回不可变 ComputePipelineRef；普通 C++ Pass 通过 `PassContext::dispatch(pipeline, reads, writes, x,y,z)` 记录，禁止在动态渲染作用域内调用。上下文检查图资源版本和访问声明，后端检查绑定数量、Device、Storage 用途、完整缓冲范围和 Dispatch 组数上限。没有新增多后端或任意布局机制，Shader 的完整语义／任意 ABI 仍不在运行时验证范围。
+
+图增加 `ComputeRead`、`ComputeWrite`、`HostRead`，以及 `createStorageBuffer(name,{sizeBytes})`。首版图内 Storage 大小非零、为 4 的倍数且不超过设备 maxStorageBufferRange；后端为每张交换链图像的计划分配专用 coherent 缓冲。Overwrite 产生新的有效资源版本；图继续推导 RAW／WAR／WAW，写入映射到 COMPUTE_SHADER／SHADER_STORAGE_WRITE，读取映射到 COMPUTE_SHADER／SHADER_STORAGE_READ，回读映射到 HOST／HOST_READ。当前不支持同一节点读写同一缓冲、图内任意缓冲用途或 Storage Image。[Khronos 同步示例](https://docs.vulkan.org/guide/latest/synchronization_examples.html)
+
+`GraphicsGraph::completed` 接收 BufferReadback 视图，只包含本次成功提交最终状态含 HostRead 的图内缓冲。HostRead 节点仅录制依赖，CPU 不在录制阶段映射。成功提交后登记待回读，在提交 Fence 完成后读取 coherent 内存并同步调用回调；回读字节仅在回调期间有效。返回 false 或抛异常会报告诊断并停止应用，析构捕获回调异常，CPU 校验失败不改变已确认的 GPU 完成事实。候选图准备失败或未提交的录制不发布回读；切图、resize、最小化和正常退出等待并交付最后一次提交后才退役命令／资源。GPU 等待失败原有终止清理约束保持。
+
+计算 Descriptor 使用独立 Compute bind point。首次记录固定绑定时创建一个不可变 Descriptor Set／Pool，由当前图按管线与缓冲身份缓存；绑定记录强持有管线和全部缓冲，图在命令退役后释放缓存。这个首版仍可能在首次记录时分配失败并终止该次运行，不承诺该失败时保留上一帧继续呈现；没有异步回读或通用 Descriptor 数组。[Descriptor bind point](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdBindDescriptorSets.html)
+
+CustomPass 在 `--ray-query-buffers` 模式连接 [GeometryComputePass](../examples/CustomPass/GeometryComputePass.h) 与 HostRead 节点，读取真实共享几何，写入 16 字节结果并逐帧与 CPU 上传参考比较。该校验覆盖全部 32 位字及字节数，既有单队列、单在途帧和显示图继续运行；它验证 Storage 数据通路而非射线求交。Compute 核心能力本身不依赖光追 feature，本实验复用原选项来准备可用于 Storage 的几何。后续 AS 绑定／构建与查询扩展见下节，完整路径追踪仍未实现。
+
+### 加速结构与 Ray Query（当前实现）
+
+2026-11-26 在计算通路之后增加 [AccelerationRef](../src/RHI/AccelerationStructure.h) 与 [Vulkan 实现](../src/RHI/Vulkan/VulkanAccelerationStructure.cpp)。每个引用拥有 AS 对象、专用 DEVICE_LOCAL 存储和 scratch；TLAS 额外拥有 coherent 实例输入，并强持有全部 BLAS，BLAS 保留源几何引用。Device 覆盖全部引用寿命，图在命令退役后释放。AS 对象先于其存储释放，TLAS 持有的 BLAS 不因场景侧引用释放而提前失效。分配不隐式等待 GPU，不用引用计数推断完成。
+
+首版 BLAS 固定使用已有 72 字节 ColoredVertex、位置 offset 0／R32G32B32_SFLOAT 与全局 uint32 索引；每个共享 Primitive 单独构建，实例不重复几何。创建前查询 AS 顶点格式能力、primitive／instance／geometry 上限及 scratch 对齐；scratch 额外分配对齐余量后使用对齐的设备地址。AS 存储和 scratch 为设备本地专用分配；源几何及 TLAS 实例输入保持既有 coherent 方案。`vkGetAccelerationStructureDeviceAddressKHR` 的 BLAS 地址写入实例引用，不能用缓冲地址替代。[构建规则与输入同步](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdBuildAccelerationStructuresKHR.html)、[三角形数据格式](https://docs.vulkan.org/refpages/latest/refpages/source/VkAccelerationStructureGeometryTrianglesDataKHR.html)
+
+RenderScene 的 MeshDraw／IndexedDraw 新增 CPU 世界矩阵快照（row-major 3×4）及仿射标记，从 Scene 派生世界矩阵直接提取；不从相机矩阵反推。顶点、FrameLighting 和 Draw Push Constants 的 GPU ABI 不变。TLAS 实例使用当前世界变换及 24 位 custom index，查询前要求有限、可逆的仿射矩阵；非均匀缩放和镜像允许，首版禁用面剔除。容量按启动实例数固定，超容量拒绝，不在录制中替换底层对象。材质 alpha 和面向性尚未参与求交，原光栅材质行为保持独立。[实例结构](https://docs.vulkan.org/refpages/latest/refpages/source/VkAccelerationStructureInstanceKHR.html)
+
+图新增 Kind::Acceleration、createBottom／createTop 以及 BuildInput／BuildWrite／BuildRead／RayQueryRead。每个 BLAS 构建节点声明顶点／索引输入；TLAS 构建节点声明 BLAS 读取和 TLAS 写入；读取 TLAS 的查询节点自动展开对应 BLAS 的 RayQueryRead 声明，以免遍历访问藏在 Descriptor 后。首版每个 AS 每份计划只构建一次，该计划可逐帧执行完整重建；AS 没有独立的 Update／压缩路径或跨图缓存。
+
+BuildInput 映射到 AS_BUILD／SHADER_READ；AS 与 scratch 构建访问使用 AS_BUILD／ACCELERATION_STRUCTURE_READ|WRITE，查询使用 COMPUTE_SHADER／ACCELERATION_STRUCTURE_READ。AS 逻辑资源同时覆盖其私有存储、scratch 和实例输入，RHI 为图要求的 AS barrier 保守使用 ALL_COMMANDS／MEMORY_READ|WRITE 作为已有设备访问的源范围，覆盖遍历后的 scratch 再用；首次无状态时源范围为空。BLAS→TLAS→Query 由图版本依赖排序，不在一次未排序的多构建调用中混建。实例参数上传发生于前一提交已完成后、当前提交前，以同线程 coherent 写入交接；不把这次主机写入当作 GPU 构建已经完成。[scratch 与 AS 的访问类型](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdBuildAccelerationStructuresKHR.html)
+
+图内 coherent Storage 现可通过 HostWrite 版本及 `PassContext::uploadBuffer` 接收一份完整参数快照；前一 GPU 使用由提交 Fence 退役，当前主机写入完成后才提交。RayUpload 使用此路径写入射线，图声明 HostWrite→ComputeRead，查询结果继续走 ComputeWrite→HostRead 和 completed 回调。
+
+ComputePipelineDesc 增加可选 accelerationStructure，在所有 Storage binding 之后附加一个 TLAS Descriptor。后端验证 Ray Query feature、AS Descriptor 限制、同 Device 和顶层类型；绑定缓存同时比较 TLAS 身份，强持有它，AS 内容可在同一对象内安全重建而不重写 Descriptor。普通 C++ Pass 通过 buildBottom／buildTop／dispatch 记录，公开接口不引入 Vulkan 类型。[AS Descriptor](https://docs.vulkan.org/refpages/latest/refpages/source/VkWriteDescriptorSetAccelerationStructureKHR.html)
+
+[RayQueryPass](../examples/CustomPass/RayQueryPass.h) 把这些机制接入现有实验：26 条射线、最近三角形命中、实例／Primitive 编号和距离，提交完成后逐帧与双精度 CPU 三角形参考比较。CPU 参考仅在实例快照改变时重算；共享边允许返回任一最近三角形，候选归属检查允许 8 个 float epsilon 的重心误差，最近距离仍按固定相对容差检查。显示仍是光栅图，没有 Ray Query 图像、多次散射、材质参与或累积。入口与测试见 [实际 Ray Query](../README.md#实际-ray-query-求交)。
 
 ### 深度纹理与附件（当前实现）
 

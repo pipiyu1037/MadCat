@@ -107,7 +107,7 @@ struct VulkanClearRenderer::State
         return true;
     }
 
-    bool wait()
+    bool wait(bool validateReadback=true)
     {
         const auto complete = [&](VkFence fence, bool& pending, const char* operation) {
             if (!pending) { return true; }
@@ -120,12 +120,15 @@ struct VulkanClearRenderer::State
         const bool acquired = complete(acquireFence, acquirePending, "vkWaitForFences(acquire)");
         const bool submitted = complete(submitFence, submitPending, "vkWaitForFences(submit)");
         const bool presented = complete(presentFence, presentPending, "vkWaitForFences(present)");
-        return acquired && submitted && presented;
+        if (!acquired || !submitted || !presented) { return false; }
+        bool valid=true;
+        for (const auto& image:images) { if (image.graph && !image.graph->completed()) { valid=false; } }
+        return valid || !validateReadback;
     }
 
     ~State()
     {
-        if (!wait())
+        if (!wait(false))
         {
             // A destructor cannot report failure to its caller. If a retry here
             // still cannot prove completion, stop instead of freeing live work.

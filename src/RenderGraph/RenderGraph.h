@@ -13,10 +13,11 @@ namespace madcat::graph
 {
 // Whole resources, one graphics queue. HostWrite is an external handoff only.
 enum class Use : uint32_t { None=0, HostWrite=1, Vertex=2, Index=4, Uniform=8,
-    Sampled=16, Color=32, Depth=64, Present=128 };
+    Sampled=16, Color=32, Depth=64, Present=128, ComputeRead=256, ComputeWrite=512, HostRead=1024,
+    BuildInput=2048, BuildWrite=4096, BuildRead=8192, RayQueryRead=16384 };
 constexpr Use operator|(Use a, Use b) { return Use(uint32_t(a) | uint32_t(b)); }
 constexpr bool includes(Use a, Use b) { return (uint32_t(a) & uint32_t(b)) == uint32_t(b); }
-enum class Kind { Color, Depth, Buffer };
+enum class Kind { Color, Depth, Buffer, Acceleration };
 enum class Write { Overwrite, Preserve };
 // First managed texture: one depth mip/layer, with optional fragment sampling.
 struct DepthTextureDesc { uint32_t width, height; bool sampled = true; };
@@ -26,6 +27,7 @@ struct ColorTextureDesc
     rhi::ColorFormat format = rhi::ColorFormat::Rgba16Float;
     bool sampled = true;
 };
+struct StorageBufferDesc { uint32_t sizeBytes; };
 struct Identity {};
 struct Resource
 {
@@ -53,6 +55,11 @@ public:
     [[nodiscard]] bool pushConstants(std::span<const std::byte> bytes);
     [[nodiscard]] bool draw(uint32_t vertexCount);
     [[nodiscard]] bool drawUi(Resource font);
+    [[nodiscard]] bool dispatch(const rhi::ComputePipelineRef&, std::span<const Resource> reads,
+        std::span<const Resource> writes, uint32_t x, uint32_t y=1, uint32_t z=1, Resource acceleration={});
+    [[nodiscard]] bool uploadBuffer(Resource,std::span<const std::byte>);
+    [[nodiscard]] bool buildBottom(Resource,Resource vertices,Resource indices);
+    [[nodiscard]] bool buildTop(Resource,std::span<const Resource> bottom,std::span<const rhi::AccelerationInstance>);
     [[nodiscard]] const std::string& error() const { return error_; }
     [[nodiscard]] bool finished() const { return !rendering_; }
 private:
@@ -77,6 +84,11 @@ struct Imported
     std::vector<Version> versions;
     std::optional<DepthTextureDesc> depthTexture;
     std::optional<ColorTextureDesc> colorTexture;
+    std::optional<StorageBufferDesc> storageBuffer;
+    struct Bottom { Resource vertices,indices; uint32_t firstIndex,indexCount; };
+    struct Top { std::vector<Resource> bottom; uint32_t capacity; };
+    std::optional<Bottom> bottom;
+    std::optional<Top> top;
 };
 class Plan
 {
@@ -107,6 +119,9 @@ public:
     [[nodiscard]] Resource import(std::string name, uint64_t identity, Kind kind, Use initial, bool valid);
     [[nodiscard]] Resource createDepthTexture(std::string name, DepthTextureDesc description);
     [[nodiscard]] Resource createColorTexture(std::string name, ColorTextureDesc description);
+    [[nodiscard]] Resource createStorageBuffer(std::string name, StorageBufferDesc description);
+    [[nodiscard]] Resource createBottom(std::string name,Resource vertices,Resource indices,uint32_t firstIndex,uint32_t indexCount);
+    [[nodiscard]] Resource createTop(std::string name,std::span<const Resource> bottom,uint32_t capacity);
     [[nodiscard]] uint32_t addNode(std::string name);
     [[nodiscard]] Builder builder(uint32_t node);
     void dependsOn(uint32_t node, uint32_t prerequisite);

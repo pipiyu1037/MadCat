@@ -20,6 +20,9 @@ struct ApplicationOptions
     render::DirectionalShadowView shadowView;
     rhi::ColorFormat forwardColorFormat = rhi::ColorFormat::Presentation;
     bool physicallyBased = false; // Scene entry: constant-factor metallic/roughness direct light
+    // Opt in to required Ray Query features and addressable/storage geometry.
+    // Does not execute a query. Startup also checks plain/addressable storage.
+    bool enableRayQuery = false;
 };
 struct FrameInfo { float aspect; double deltaSeconds; };
 // A one-shot request. Factories capture structural options by value and borrow

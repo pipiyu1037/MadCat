@@ -42,6 +42,8 @@ struct MeshDraw
     ecs::Entity entity;
     PrimitiveId geometry;
     rhi::DrawTransform transform;
+    std::array<float,12> worldFromLocal{1,0,0,0,0,1,0,0,0,0,1,0};
+    bool affineWorld = true;
 };
 
 // CPU value snapshots, no Scene/component pointers, GPU objects or Vulkan types.

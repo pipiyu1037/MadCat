@@ -62,7 +62,7 @@ Shadow map 显示同一场景的方向光深度，独立执行 `Shadow → Depth
 cmake --build build --config Debug --target MadCatComplexSceneChecks
 ```
 
-将 Debug 换为 Release 可检查发布配置。已有构建产物时，也可用 `powershell -NoProfile -ExecutionPolicy Bypass -File tests/CustomPassWindowChecks.ps1 -Configuration Debug -Scenario lantern` 单独运行；Scenario 支持 `all`（默认）、`cornell`、`lantern`、`pbr-spheres`，BuildDirectory 支持相对或绝对路径。对 Lantern 可追加 `-Lambert` 检查漫反射路径；其余预设使用 PBR。
+将 Debug 换为 Release 可检查发布配置。已有构建产物时，也可用 `powershell -NoProfile -ExecutionPolicy Bypass -File tests/CustomPassWindowChecks.ps1 -Configuration Debug -Scenario lantern` 单独运行；Scenario 支持 `all`（默认）、`cornell`、`lantern`、`pbr-spheres`，BuildDirectory 支持相对或绝对路径。对 Lantern 可追加 `-Lambert` 检查漫反射路径；其余预设使用 PBR。追加 `-RayQuery` 检查设备、缓冲与 Compute 校验，需构建 `CustomPassComputeShaders`；追加 `-TraceRays` 还会真正构建 BLAS／TLAS、执行 Ray Query 并与 CPU 求交参考比较，需另构建 `CustomPassRayShaders`。三种模式使用不同的日志与截图文件名，默认模式保持普通光栅。
 
 三个场景均检查曝光／光源／模型／相机变化、五种视图、Forward／Normal map 开关、非均匀缩放／镜像、resize、最小化恢复和退出；Cornell 另检查红绿墙、共享几何与最小化退出，Lantern 检查实际 MR／法线贴图上传及开关后的画面差异；无该贴图的两个场景要求开关前后场景画面一致。检查包含可见性、HDR 非有限标记、同步验证诊断和 GPU 资源释放。需要可见桌面且窗口无遮挡；请串行运行，日志与截图位于 `build/verification/complex-scenes/`。Debug 启用验证层；Release 沿用程序的 NDEBUG 配置，不主动开启验证层。
 
@@ -133,7 +133,7 @@ Remove-Item Env:VK_LAYER_VALIDATE_SYNC
 
 报告还输出加速结构限制，并检查计算 Ray Query 所需的 feature、Compute 队列和扩展依赖；缺失时说明原因，仍继续报告其他设备。没有物理设备、查询函数缺失或枚举失败时，程序报告错误并退出。
 
-设备筛选要求设备级 Vulkan 1.3、`VK_KHR_swapchain`、可查询且支持的 `dynamicRendering`／`synchronization2`，以及非空的 Surface 格式和呈现模式、颜色附件 usage 和同一队列族的 Graphics／Compute／Present 支持。合格设备中按独显、集显、其他类型排序，同级保留枚举顺序，选择第一个兼容队列族。日志说明拒绝原因和最终选择；创建失败会报告操作、`VkResult` 与设备信息。基础初始化启用上述扩展和两项 feature，并按下文条件额外启用呈现 Fence；光追能力不作为硬性条件，也不启用光追 feature。Vulkan 1.3 的两项核心 feature 仍需显式启用，不要求同名 KHR 扩展列出。[Device 创建](https://docs.vulkan.org/refpages/latest/refpages/source/vkCreateDevice.html)、[Vulkan 1.3 feature 启用](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceVulkan13Features.html)
+设备筛选要求设备级 Vulkan 1.3、`VK_KHR_swapchain`、可查询且支持的 `dynamicRendering`／`synchronization2`，以及非空的 Surface 格式和呈现模式、颜色附件 usage 和同一队列族的 Graphics／Compute／Present 支持。合格设备中按独显、集显、其他类型排序，同级保留枚举顺序，选择第一个兼容队列族。日志说明拒绝原因和最终选择；创建失败会报告操作、`VkResult` 与设备信息。基础初始化启用上述扩展和两项 feature，并按下文条件额外启用呈现 Fence；默认不要求或启用光追能力，实验可[显式请求 Ray Query](#ray-query-设备与缓冲)。Vulkan 1.3 的两项核心 feature 仍需显式启用，不要求同名 KHR 扩展列出。[Device 创建](https://docs.vulkan.org/refpages/latest/refpages/source/vkCreateDevice.html)、[Vulkan 1.3 feature 启用](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceVulkan13Features.html)
 
 Swapchain 优先选择 `B8G8R8A8_SRGB`／`SRGB_NONLINEAR`，否则选第一个有具体格式的返回组合；使用 FIFO 和单队列独占共享。图像数量在 Surface 最小值上加一，并受非零最大值限制；`maxImageCount=0` 表示无该上限。优先使用 Surface 的固定尺寸；允许应用选择尺寸时，将 GLFW framebuffer 像素尺寸约束到支持范围。仅请求颜色附件 usage，使用当前 Surface transform，composite alpha 按 Opaque、Pre-multiplied、Post-multiplied、Inherit 顺序选择受支持项。配置与实际图像数量会记录到日志。[Surface 限制](https://docs.vulkan.org/refpages/latest/refpages/source/VkSurfaceCapabilitiesKHR.html)、[交换链创建参数](https://docs.vulkan.org/refpages/latest/refpages/source/VkSwapchainCreateInfoKHR.html)
 
@@ -565,7 +565,7 @@ Clear 清除完整颜色／深度附件并返回新版本；Forward 加载这两
 
 [Vulkan 执行适配](src/RHI/Vulkan/VulkanFrameGraph.cpp)为每个交换链图像建立独立计划，导入颜色、共享深度、顶点／索引、帧 UBO 和去重后的材质图像。图外上传交接 HostWrite 或 Fragment sampled-read；每帧 UBO 更新后交接 HostWrite，深度和交换链状态由成功提交／呈现记录提供。RHI 在上一帧完成后复用缓冲，持有实际资源至命令退役。模型／灯光参数变化不重新编图，resize 在等待完成后重建。
 
-当前支持单队列、整资源访问、已有资源导入和下节的图内深度纹理；管线与 Descriptor 仍沿用预先准备的固定接口。尚无子资源范围、Compute／Dispatch、通用 `prepare`／任意管线切换、运行期图切换、稳定提交标识或 Shader 更新；F04／F05 尚未整体验收。
+该最小图增量当时支持单队列、整资源访问、已有资源导入和下节的图内深度纹理，管线与 Descriptor 沿用固定接口。后续已接通 CustomPass 的受限图形准备、运行期图切换、用户显示包更新，以及 [Compute Storage／Dispatch／完成回读](#compute-storage-读写与回读)。子资源范围、任意布局和通用更新仍未实现，F04／F05 尚未整体验收。
 
 2026-11-06 首轮图增量的 Debug／Release 主程序、七组图检查和 66 项原管线检查通过，无编译警告。两种配置的光照八次采样每次 54 点通过；Debug 另通过模型删除至空／恢复、深度遮挡及反序、resize／最小化恢复和最小化退出。检查还核对每个交换链图像只建立一份三节点计划，材质探针共导入八个实际资源；Debug 同步验证无 warning／error，Release 未主动启用验证层。该轮未修改或重编 Shader，未测性能；后续深度采样增量见下节。
 
@@ -645,7 +645,49 @@ triangle 产物位于 `build/shaders/triangle/`；depth-view 产物位于同级 
 
 历史检查目标 对三个包分别运行 12 个真实编译与故障场景，使用独立的 `build/verification/shader-build/`、`build/verification/depth-view-build/` 与 `build/verification/shadow-build/`，核对失败前后的四个文件哈希。当前仅处理一个自包含 `.slang` 文件，尚未建立 include／import 依赖记录或反射。
 
+## Ray Query 设备与缓冲
+
+2026-11-26 接通按需设备能力与缓冲准备，随后接通 Compute Storage 读写与完成后回读。先构建计算包，再运行：
+
+```powershell
+cmake --build build --config Debug --target CustomPass CustomPassComputeShaders
+.\build\Debug\CustomPass.exe --cornell-box --ray-query-buffers
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/CustomPassWindowChecks.ps1 -Configuration Debug -RayQuery
+```
+
+`--ray-query-buffers` 对应 `ApplicationOptions::enableRayQuery=true`。运行层要求并启用 `bufferDeviceAddress`、`accelerationStructure`、`rayQuery` 及 `VK_KHR_acceleration_structure`、`VK_KHR_ray_query`、`VK_KHR_deferred_host_operations`；不合格候选逐项报告原因，没有合格设备则退出。普通入口保持默认关闭。Vulkan 1.3 基线已经覆盖所需的核心 1.2 依赖。[加速结构依赖](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_acceleration_structure.html)、[Ray Query 依赖](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_ray_query.html)
+
+现有几何上传在该模式下额外声明 Storage、设备地址和 AS 构建输入用途，继续用于光栅绘制；窗口重建复用同一分配。`BufferRef::deviceAddress()` 返回缓存地址，未请求地址时为零；地址不持有资源，调用方仍须保留 BufferRef 和 Device。后端 `createStorageBuffer(device, bytes, deviceAddress=false)` 支持非空初始数据，采用专用 HOST_VISIBLE／HOST_COHERENT 分配及一次 map／复制／unmap；可寻址分配附加设备地址内存标志。无兼容 coherent 内存时诊断失败。[设备地址查询](https://docs.vulkan.org/refpages/latest/refpages/source/vkGetBufferDeviceAddress.html)、[内存标志](https://docs.vulkan.org/refpages/latest/refpages/source/VkMemoryAllocateFlagBits.html)
+
+启动时另创建一个普通和一个可寻址的 4 字节 Storage Buffer，检查字节数与地址后立即释放，它们不提交 GPU 工作。CustomPass 的该模式还会在原显示流程前连接 `GeometryCompute → GeometryReadback`，具体见下节。真正的 AS 构建与求交由后续 `--ray-query` 模式启用，见[实际 Ray Query](#实际-ray-query-求交)。
+
+### Compute Storage 读写与回读
+
+[GeometryComputePass](examples/CustomPass/GeometryComputePass.h) 是用户侧 C++ 计算 Pass；通过 `prepareCompute` 固定计算管线，声明真实顶点／索引缓冲的 `ComputeRead` 和 16 字节图内 Storage 的 `ComputeWrite`，调用 `PassContext::dispatch`。固定布局为 set 0 binding 0／1 两个只读 Storage、binding 2 输出 Storage，无 Push Constants；[Slang](examples/CustomPass/geometry-compute.slang) 的 `computeMain` 使用 64×1×1 工作组，本例只 Dispatch 一个组。64 个线程分摊完整几何字数组，经组内同步和归约写出顶点／索引字节数及两个 32 位校验值。此校验验证数据通路，不替代模型外观或求交验证。
+
+`GeometryReadback` 声明输出的 `HostRead`。图安排 HostWrite→ComputeRead、ComputeWrite→HostRead 和后续复用依赖，RHI 等提交 Fence 完成后映射 coherent 内存，把结果交给图的 `completed` 回调。CustomPass 逐次与 CPU 初始几何参考比较，失败停止应用；回读视图只在回调期间有效。resize、图切换和退出先交付已提交帧的回调，再退役命令和资源。计算绑定保留管线和缓冲，同一图内按固定绑定缓存，Descriptor 不在仍被 GPU 使用时重写。[Khronos 回读与同步示例](https://docs.vulkan.org/guide/latest/synchronization_examples.html)
+
+原有 `-RayQuery` 复杂场景检查同时覆盖计算回读、Descriptor／管线／Storage 的创建与销毁、提交和回调数量一致；默认模式保持无计算资源。统一目标会构建 `CustomPassComputeShaders` 和 `CustomPassRayShaders`，普通 C++ 构建仍不隐式编译 Shader。计算包沿用锁定 Slang、SPIR-V 1.6、Vulkan 1.3 校验、候选发布与 manifest，未接入显示包的 Compile + apply；修改后显式重编并重启。RHI 计算接口在连续 Storage 之后可选一个 TLAS，仍无任意布局、动态偏移或 Storage Image。
+
+### 实际 Ray Query 求交
+
+在已有图形 Shader 产物的基础上运行：
+
+```powershell
+cmake --build build --config Debug --target CustomPass CustomPassComputeShaders CustomPassRayShaders
+.\build\Debug\CustomPass.exe --cornell-box --ray-query
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/CustomPassWindowChecks.ps1 -Configuration Debug -TraceRays
+```
+
+`--ray-query` 包含原缓冲／Compute 校验，并连接 [RayQueryPass](examples/CustomPass/RayQueryPass.h)：每个共享 Primitive 一个 BLAS，使用当前实例的世界变换建立 TLAS，再由 [Slang](examples/CustomPass/ray-query.slang) 执行最近三角形求交。首版每帧完整重建，不做更新或压缩。图中分别声明几何构建输入、BLAS 构建、TLAS 对 BLAS 的读取、查询和完成回读；TLAS 查询读取会展开其 BLAS 依赖。AS 的专用存储、scratch 与实例输入由 RHI 保活，相关命令退役后释放。设备同时查询格式能力、AS 限制、scratch 对齐和 Descriptor 限制，不仅凭显卡型号启用。[Khronos AS 构建与同步规则](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdBuildAccelerationStructuresKHR.html)
+
+该实验每帧查询 26 条射线，包括初始世界包围盒上的错位采样网格、指向当前实例三角形内部的射线和未命中探针。CPU 缓存随实例变换变化重算的双精度三角形参考，逐帧核对命中／未命中、有限距离、最近距离及返回实例／Primitive 的实际三角形。等距共享边可返回任一最近三角形；候选归属允许 8 个 float epsilon 的重心坐标误差，最近距离容差为 `4e-4 * max(1,t)`。相机与灯光不参与固定世界射线的定义；模型移动、非均匀缩放和镜像会改变 TLAS 与参考。Ray 输入／结果布局分别为 32／16 字节，set 0 binding 0／1 为 Storage、binding 2 为 TLAS。
+
+当前只验证不透明、双面三角形的几何求交，不读取 alpha、材质或贴图，也不生成光追图像；显示窗口继续走原光栅流程。实例须使用有限、可逆的仿射变换，容量固定为启动实例数；增加容量须重新启动。AS 在每张交换链图像的图内独立分配，构建使用保守的整资源同步，不承诺性能。多次散射、材质参与、累积与重置仍待实现，不能据此视为路径追踪完成。
+
 ## Ray Query 编译探针
+
+下述独立离线探针保留原固定 ABI；实际运行采用上节的 `CustomPassRayShaders`，两者的源码、绑定和产物分别保存。
 
 从根目录执行下面的独立手动目标，无需 GPU：
 
@@ -671,7 +713,7 @@ cmake --build build --config Debug --target MadCatRayQueryProbe
 在项目的 Vulkan 1.3 基线下，后续 GPU 实现至少需要：
 
 - 查询并启用设备扩展 `VK_KHR_acceleration_structure`、`VK_KHR_ray_query`、`VK_KHR_deferred_host_operations`。其他核心版本依赖已由 Vulkan 1.3 覆盖。[加速结构扩展依赖](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_acceleration_structure.html)、[Ray Query 扩展依赖](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_ray_query.html)
-- 查询并在 Device 创建链中启用 `bufferDeviceAddress`、`accelerationStructure`、`rayQuery`。查询为 true 不等于已启用；当前 `VulkanDevice` 尚未启用这些 feature 或三个扩展。[Ray Query feature 启用](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceRayQueryFeaturesKHR.html)、[Vulkan 1.2 feature](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceVulkan12Features.html)
+- 查询并在 Device 创建链中启用 `bufferDeviceAddress`、`accelerationStructure`、`rayQuery`。查询为 true 不等于已启用；当前可通过[显式设备选项](#ray-query-设备与缓冲)启用这三项 feature 和三个扩展。[Ray Query feature 启用](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceRayQueryFeaturesKHR.html)、[Vulkan 1.2 feature](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceVulkan12Features.html)
 - 使用 Compute 队列，补齐缓冲分配、地址、BLAS／TLAS 构建、Descriptor、计算管线、提交及回读，并同步构建写入 → 计算阶段加速结构读取、Shader 写入 → 主机读取，完成后才回收资源。
 
 本探针采用固定 Descriptor 和普通 Storage Buffer，不要求 Ray Tracing Pipeline、Shader Binding Table、Descriptor 数组或 update-after-bind。后续新增资源机制仍须按实际用途核对所需 feature。

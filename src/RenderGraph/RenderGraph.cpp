@@ -5,12 +5,13 @@ namespace madcat::graph
 {
 namespace
 {
-bool writes(Use use) { return (uint32_t(use) & uint32_t(Use::HostWrite | Use::Color | Use::Depth)) != 0; }
+bool writes(Use use) { return (uint32_t(use) & uint32_t(Use::HostWrite | Use::Color | Use::Depth | Use::ComputeWrite | Use::BuildWrite)) != 0; }
 bool compatible(Kind kind, Use use)
 {
+    if (kind==Kind::Acceleration) { return use==Use::BuildWrite || use==Use::BuildRead || use==Use::RayQueryRead; }
     if (kind != Kind::Buffer) { return use == Use::Sampled || (kind == Kind::Depth ? use == Use::Depth : (use == Use::Color || use == Use::Present)); }
-    const auto mask = Use::HostWrite|Use::Vertex|Use::Index|Use::Uniform;
-    return use != Use::None && includes(mask, use) && (use == Use::HostWrite || !includes(use, Use::HostWrite));
+    const auto reads = Use::Vertex|Use::Index|Use::Uniform|Use::ComputeRead|Use::HostRead|Use::BuildInput;
+    return use == Use::HostWrite || use == Use::ComputeWrite || (use != Use::None && includes(reads,use));
 }
 bool sameReadLayout(Kind kind, Use a, Use b) { return kind == Kind::Buffer || a == b; }
 }
@@ -98,6 +99,42 @@ bool PassContext::drawUi(Resource font)
     if (!commands_.drawUi(font.index)) { error_ = "RHI UI drawing failed"; return false; }
     return true;
 }
+bool PassContext::dispatch(const rhi::ComputePipelineRef& pipeline,std::span<const Resource> reads,
+    std::span<const Resource> outputs,uint32_t x,uint32_t y,uint32_t z,Resource acceleration)
+{
+    if (rendering_) { error_="Dispatch inside rendering"; return false; }
+    std::vector<uint32_t> readSlots,writeSlots;
+    for (auto r:reads) { if (!require(r,Use::ComputeRead)) { return false; } readSlots.push_back(r.index); }
+    for (auto r:outputs) {
+        if (!require(r,Use::ComputeWrite)) { return false; }
+        const auto access=std::ranges::find_if(accesses_,[&](const Access& a) { return a.resource==r; });
+        if (!access->write) { error_="Dispatch output is not a declared write"; return false; }
+        writeSlots.push_back(r.index);
+    }
+    if (acceleration.graph && !require(acceleration,Use::RayQueryRead)) { return false; }
+    if (!commands_.dispatch(pipeline,readSlots,writeSlots,x,y,z,acceleration.index)) { error_="RHI Dispatch failed"; return false; }
+    return true;
+}
+bool PassContext::uploadBuffer(Resource output,std::span<const std::byte> bytes)
+{
+    if (rendering_ || !require(output,Use::HostWrite) || !commands_.uploadBuffer(output.index,bytes))
+    { error_="RHI host buffer upload failed or undeclared"; return false; }
+    return true;
+}
+bool PassContext::buildBottom(Resource output,Resource vertices,Resource indices)
+{
+    if (rendering_ || !require(output,Use::BuildWrite) || !require(vertices,Use::BuildInput) || !require(indices,Use::BuildInput) ||
+        !commands_.buildBottom(output.index,vertices.index,indices.index)) { error_="RHI BLAS build failed or undeclared"; return false; }
+    return true;
+}
+bool PassContext::buildTop(Resource output,std::span<const Resource> bottom,std::span<const rhi::AccelerationInstance> instances)
+{
+    if (rendering_ || !require(output,Use::BuildWrite)) { error_="TLAS build inside rendering or undeclared"; return false; }
+    std::vector<uint32_t> slots;
+    for (auto resource:bottom) { if (!require(resource,Use::BuildRead)) { return false; } slots.push_back(resource.index); }
+    if (!commands_.buildTop(output.index,slots,instances)) { error_="RHI TLAS build failed"; return false; }
+    return true;
+}
 void Graph::fail(std::string message) { if (error_.empty()) { error_ = std::move(message); } }
 bool Graph::valid(Resource r) const
 { return r.graph == identity_ && r.index < resources_.size() && r.version < resources_[r.index].versions.size(); }
@@ -132,6 +169,32 @@ Resource Graph::createColorTexture(std::string name, ColorTextureDesc descriptio
     resources_.push_back({std::move(name), 0, Kind::Color, Use::None, {{-1, UINT32_MAX, false}}, {}, description});
     return {identity_, index, 0};
 }
+Resource Graph::createStorageBuffer(std::string name, StorageBufferDesc description)
+{
+    if (!description.sizeBytes || description.sizeBytes%4) { fail("Invalid managed storage size: "+name); return {}; }
+    const auto index=static_cast<uint32_t>(resources_.size());
+    resources_.push_back({std::move(name),0,Kind::Buffer,Use::None,{{-1,UINT32_MAX,false}},{},{},description});
+    return {identity_,index,0};
+}
+Resource Graph::createBottom(std::string name,Resource vertices,Resource indices,uint32_t firstIndex,uint32_t indexCount)
+{
+    if (!valid(vertices) || !valid(indices) || resources_[vertices.index].kind!=Kind::Buffer ||
+        resources_[indices.index].kind!=Kind::Buffer || !indexCount || indexCount%3 || firstIndex%3)
+    { fail("Invalid BLAS description: "+name); return {}; }
+    const auto index=static_cast<uint32_t>(resources_.size());
+    Imported resource{std::move(name),0,Kind::Acceleration,Use::None,{{-1,UINT32_MAX,false}}};
+    resource.bottom=Imported::Bottom{vertices,indices,firstIndex,indexCount}; resources_.push_back(std::move(resource));
+    return {identity_,index,0};
+}
+Resource Graph::createTop(std::string name,std::span<const Resource> bottom,uint32_t capacity)
+{
+    if (bottom.empty() || !capacity) { fail("Empty TLAS description: "+name); return {}; }
+    for (auto resource:bottom) { if (!valid(resource) || !resources_[resource.index].bottom) { fail("TLAS requires local BLAS resources"); return {}; } }
+    const auto index=static_cast<uint32_t>(resources_.size());
+    Imported resource{std::move(name),0,Kind::Acceleration,Use::None,{{-1,UINT32_MAX,false}}};
+    resource.top=Imported::Top{{bottom.begin(),bottom.end()},capacity}; resources_.push_back(std::move(resource));
+    return {identity_,index,0};
+}
 uint32_t Graph::addNode(std::string name)
 {
     const auto index = static_cast<uint32_t>(nodes_.size());
@@ -150,8 +213,13 @@ void Graph::access(uint32_t node, Access access)
     { fail(target.name + ": depth texture was not declared sampleable: " + resource.name); return; }
     if (resource.colorTexture && ((access.use == Use::Sampled && !resource.colorTexture->sampled) || access.use == Use::Present))
     { fail(target.name + ": unsupported managed color usage: " + resource.name); return; }
-    if (!compatible(resource.kind, access.use) || access.use == Use::HostWrite || access.use == Use::None)
+    if (!compatible(resource.kind, access.use) || (access.use == Use::HostWrite && !resource.storageBuffer) || access.use == Use::None)
     { fail(target.name + ": incompatible use of " + resource.name); return; }
+    // Traversal of a TLAS also reads every referenced BLAS. Expand that owned
+    // dependency in the plan, rather than hiding it behind descriptor binding.
+    if (access.use==Use::RayQueryRead && resource.top) {
+        for (auto bottom:resource.top->bottom) { this->access(node,{bottom,Use::RayQueryRead}); }
+    }
     for (auto& prior : target.accesses)
     {
         if (prior.resource.index != access.resource.index) { continue; }
@@ -171,8 +239,11 @@ void Builder::read(Resource resource, Use use)
 Resource Builder::write(Resource previous, Use use, Write contents)
 {
     if (!graph_.valid(previous) || node_ >= graph_.nodes_.size()) { graph_.fail("Write has missing/foreign input or Pass"); return {}; }
-    if (use != Use::Color && use != Use::Depth) { graph_.fail("Only color/depth attachment writes are implemented"); return {}; }
+    if (use != Use::Color && use != Use::Depth && use != Use::ComputeWrite && use != Use::HostWrite && use != Use::BuildWrite)
+    { graph_.fail("Unsupported write usage"); return {}; }
     auto& resource = graph_.resources_[previous.index];
+    if (resource.kind==Kind::Acceleration && resource.versions.size()!=1)
+    { graph_.fail("AS resources support one build per plan"); return {}; }
     const auto version = static_cast<uint32_t>(resource.versions.size());
     resource.versions.push_back({static_cast<int>(node_), previous.version,
         contents == Write::Overwrite || resource.versions[previous.version].valid});

@@ -13,6 +13,12 @@ struct PhysicalDeviceCandidate
     SurfaceSupport surfaceSupport;
 };
 
+struct VulkanDeviceOptions
+{
+    // Required when requested; unavailable features reject the candidate.
+    bool enableRayQuery = false;
+};
+
 // Borrows the Instance, which must outlive this owner. Queue handles are borrowed
 // from the Device and become invalid when it is destroyed. No copying or moving.
 // Before destruction, callers must finish GPU use and release owned child objects.
@@ -32,7 +38,7 @@ public:
     // Copies the selected physical device data; Surface support is not retained.
     // Initial creation failure leaves this owner empty; repeated initialization
     // preserves the existing Device.
-    [[nodiscard]] bool initialize(std::span<const PhysicalDeviceCandidate> candidates);
+    [[nodiscard]] bool initialize(std::span<const PhysicalDeviceCandidate> candidates, VulkanDeviceOptions options = {});
 
     [[nodiscard]] VkDevice handle() const { return device_; }
     [[nodiscard]] VkPhysicalDevice physicalDevice() const { return physicalDeviceInfo_.handle; }
@@ -42,6 +48,7 @@ public:
     [[nodiscard]] VkQueue queue() const { return queue_; }
     [[nodiscard]] uint32_t queueFamilyIndex() const { return queueFamilyIndex_; }
     [[nodiscard]] bool presentFencesEnabled() const { return presentFencesEnabled_; }
+    [[nodiscard]] bool rayQueryEnabled() const { return rayQueryEnabled_; }
 
 private:
     VkDevice device_ = VK_NULL_HANDLE;
@@ -49,6 +56,7 @@ private:
     VkQueue queue_ = VK_NULL_HANDLE;
     uint32_t queueFamilyIndex_ = UINT32_MAX;
     bool presentFencesEnabled_ = false;
+    bool rayQueryEnabled_ = false;
     PFN_vkDestroyDevice destroyDevice_ = nullptr;
     PFN_vkDeviceWaitIdle waitIdle_ = nullptr;
 };

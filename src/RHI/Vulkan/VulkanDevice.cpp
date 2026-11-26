@@ -4,6 +4,7 @@
 
 #include <optional>
 #include <utility>
+#include <vector>
 
 namespace
 {
@@ -17,7 +18,8 @@ int devicePreference(VkPhysicalDeviceType type)
     }
 }
 
-std::optional<uint32_t> suitableQueue(const madcat::rhi::PhysicalDeviceCandidate& candidate, size_t index)
+std::optional<uint32_t> suitableQueue(const madcat::rhi::PhysicalDeviceCandidate& candidate, size_t index,
+    madcat::rhi::VulkanDeviceOptions options)
 {
     const auto& device = candidate.device;
     const auto& support = candidate.surfaceSupport;
@@ -34,6 +36,16 @@ std::optional<uint32_t> suitableQueue(const madcat::rhi::PhysicalDeviceCandidate
     require(device.hasExtension(VK_KHR_SWAPCHAIN_EXTENSION_NAME), "missing VK_KHR_swapchain");
     require(device.features.dynamicRendering.queryable && device.features.dynamicRendering.supported, "missing dynamicRendering");
     require(device.features.synchronization2.queryable && device.features.synchronization2.supported, "missing synchronization2");
+    if (options.enableRayQuery)
+    {
+        // The Vulkan 1.3 baseline covers the core 1.2 extension dependencies.
+        require(device.hasExtension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME), "missing VK_KHR_acceleration_structure");
+        require(device.hasExtension(VK_KHR_RAY_QUERY_EXTENSION_NAME), "missing VK_KHR_ray_query");
+        require(device.hasExtension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME), "missing VK_KHR_deferred_host_operations");
+        require(device.features.bufferDeviceAddress.queryable && device.features.bufferDeviceAddress.supported, "missing bufferDeviceAddress");
+        require(device.features.accelerationStructure.queryable && device.features.accelerationStructure.supported, "missing accelerationStructure");
+        require(device.features.rayQuery.queryable && device.features.rayQuery.supported, "missing rayQuery");
+    }
     require(support.capabilities.has_value(), "no Surface capabilities");
     require(!support.formats.empty(), "no Surface formats");
     require(!support.presentModes.empty(), "no Surface present modes");
@@ -72,7 +84,7 @@ VulkanDevice::~VulkanDevice()
     }
 }
 
-bool VulkanDevice::initialize(std::span<const PhysicalDeviceCandidate> candidates)
+bool VulkanDevice::initialize(std::span<const PhysicalDeviceCandidate> candidates, VulkanDeviceOptions options)
 {
     if (device_ != VK_NULL_HANDLE)
     {
@@ -103,7 +115,7 @@ bool VulkanDevice::initialize(std::span<const PhysicalDeviceCandidate> candidate
     uint32_t queueFamilyIndex = UINT32_MAX;
     for (size_t index = 0; index < candidates.size(); ++index)
     {
-        if (const auto queueFamily = suitableQueue(candidates[index], index))
+        if (const auto queueFamily = suitableQueue(candidates[index], index, options))
         {
             const auto& device = candidates[index].device;
             std::fprintf(stderr, "Vulkan: device [%zu] %s eligible, queue family %u, preference %d.\n",
@@ -118,7 +130,8 @@ bool VulkanDevice::initialize(std::span<const PhysicalDeviceCandidate> candidate
     }
     if (!selected)
     {
-        std::fprintf(stderr, "Vulkan error: no suitable physical device for Vulkan 1.3 and a single Graphics/Compute/Present queue.\n");
+        std::fprintf(stderr, "Vulkan error: no suitable physical device for Vulkan 1.3, a single Graphics/Compute/Present queue%s.\n",
+            options.enableRayQuery ? " and required Ray Query capabilities" : "");
         return false;
     }
     std::fprintf(stderr, "Vulkan: selected %s, queue family %u (preference: discrete > integrated > other; ties use enumeration order).\n",
@@ -148,20 +161,42 @@ bool VulkanDevice::initialize(std::span<const PhysicalDeviceCandidate> candidate
     features.synchronization2 = VK_TRUE;
     features.shaderDemoteToHelperInvocation = selected->features.shaderDemoteToHelperInvocation.queryable &&
         selected->features.shaderDemoteToHelperInvocation.supported ? VK_TRUE : VK_FALSE;
+    VkPhysicalDeviceBufferDeviceAddressFeatures address{};
+    address.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+    address.bufferDeviceAddress = VK_TRUE;
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR acceleration{};
+    acceleration.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    acceleration.accelerationStructure = VK_TRUE;
+    VkPhysicalDeviceRayQueryFeaturesKHR ray{};
+    ray.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    ray.rayQuery = VK_TRUE;
+    if (options.enableRayQuery)
+    {
+        features.pNext = &address;
+        address.pNext = &acceleration;
+        acceleration.pNext = &ray;
+    }
     const bool enablePresentFences = selected->hasExtension(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME) &&
         selected->features.swapchainMaintenance1.queryable && selected->features.swapchainMaintenance1.supported;
     VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT maintenance{};
     maintenance.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT;
     maintenance.swapchainMaintenance1 = VK_TRUE;
-    if (enablePresentFences) { features.pNext = &maintenance; }
-    const char* extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME};
+    if (enablePresentFences) { maintenance.pNext = features.pNext; features.pNext = &maintenance; }
+    std::vector<const char*> extensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    if (enablePresentFences) { extensions.push_back(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME); }
+    if (options.enableRayQuery)
+    {
+        extensions.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+        extensions.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+        extensions.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+    }
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     createInfo.pNext = &features;
     createInfo.queueCreateInfoCount = 1;
     createInfo.pQueueCreateInfos = &queueInfo;
-    createInfo.enabledExtensionCount = enablePresentFences ? 2 : 1;
-    createInfo.ppEnabledExtensionNames = extensions;
+    createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+    createInfo.ppEnabledExtensionNames = extensions.data();
 
     VkDevice createdDevice = VK_NULL_HANDLE;
     if (!detail::checkResult(createDevice(selected->handle, &createInfo, nullptr, &createdDevice), "vkCreateDevice"))
@@ -190,10 +225,13 @@ bool VulkanDevice::initialize(std::span<const PhysicalDeviceCandidate> candidate
     queue_ = queue;
     queueFamilyIndex_ = queueFamilyIndex;
     presentFencesEnabled_ = enablePresentFences;
+    rayQueryEnabled_ = options.enableRayQuery;
     destroyDevice_ = destroyDevice;
     waitIdle_ = waitIdle;
     std::fprintf(stderr, "Vulkan: Device created; queue family %u, queue 0 (Graphics/Compute/Present).\n", queueFamilyIndex_);
-    std::fprintf(stderr, "Vulkan: enabled VK_KHR_swapchain, dynamicRendering and synchronization2; ray tracing features remain disabled.\n");
+    std::fprintf(stderr, "Vulkan: enabled VK_KHR_swapchain, dynamicRendering and synchronization2.\n");
+    std::fprintf(stderr, "Vulkan: Ray Query %s.\n", rayQueryEnabled_ ?
+        "enabled (bufferDeviceAddress, accelerationStructure, rayQuery; VK_KHR_acceleration_structure, VK_KHR_ray_query, VK_KHR_deferred_host_operations)" : "disabled");
     std::fprintf(stderr, "Vulkan: present fences %s (VK_EXT_swapchain_maintenance1).\n", enablePresentFences ? "enabled" : "unavailable");
     return true;
 }

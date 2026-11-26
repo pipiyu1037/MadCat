@@ -139,6 +139,8 @@ add_library(MadCatRHI STATIC
     src/RHI/Vulkan/VulkanFrameGraph.cpp
     src/RHI/Vulkan/VulkanDepthViewPipeline.cpp
     src/RHI/Vulkan/VulkanGraphicsPipeline.cpp
+    src/RHI/Vulkan/VulkanComputePipeline.cpp
+    src/RHI/Vulkan/VulkanAccelerationStructure.cpp
     src/RHI/Vulkan/VulkanUi.cpp
     src/RHI/Vulkan/VulkanDevice.cpp
     src/RHI/Vulkan/VulkanInstance.cpp
@@ -253,7 +255,7 @@ if(WIN32)
         COMMAND "${MADCAT_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
             -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/CustomPassWindowChecks.ps1"
             -Configuration "$<CONFIG>" -BuildDirectory "${CMAKE_CURRENT_BINARY_DIR}"
-        DEPENDS CustomPass MadCatShaders CustomPassShaders CustomPassHdrShaders
+        DEPENDS CustomPass MadCatShaders CustomPassShaders CustomPassHdrShaders CustomPassComputeShaders CustomPassRayShaders
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         COMMENT "Checking Cornell Box, Lantern and PBR spheres (visible desktop required)"
         USES_TERMINAL

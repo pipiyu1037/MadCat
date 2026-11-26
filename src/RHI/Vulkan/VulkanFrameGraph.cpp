@@ -9,10 +9,13 @@
 #include "VulkanTextureState.h"
 #include "VulkanTrianglePipeline.h"
 #include "VulkanGraphicsPipeline.h"
+#include "VulkanComputePipeline.h"
+#include "VulkanAccelerationStructure.h"
 #include "VulkanUi.h"
 #include <algorithm>
 #include <array>
 #include <type_traits>
+#include <exception>
 
 namespace madcat::rhi::detail
 {
@@ -29,6 +32,14 @@ Scope scope(graph::Use use)
     using enum graph::Use;
     Scope result;
     if (graph::includes(use,HostWrite)) { result.stage|=VK_PIPELINE_STAGE_2_HOST_BIT; result.access|=VK_ACCESS_2_HOST_WRITE_BIT; }
+    if (graph::includes(use,HostRead)) { result.stage|=VK_PIPELINE_STAGE_2_HOST_BIT; result.access|=VK_ACCESS_2_HOST_READ_BIT; }
+    if (graph::includes(use,ComputeRead)) { result.stage|=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; result.access|=VK_ACCESS_2_SHADER_STORAGE_READ_BIT; }
+    if (graph::includes(use,ComputeWrite)) { result.stage|=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; result.access|=VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT; }
+    if (graph::includes(use,BuildInput)) { result.stage|=VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR; result.access|=VK_ACCESS_2_SHADER_READ_BIT; }
+    if (graph::includes(use,BuildWrite)) { result.stage|=VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        result.access|=VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR|VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR|VK_ACCESS_2_SHADER_READ_BIT; }
+    if (graph::includes(use,BuildRead)) { result.stage|=VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR; result.access|=VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR; }
+    if (graph::includes(use,RayQueryRead)) { result.stage|=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; result.access|=VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR; }
     if (graph::includes(use,Vertex)) { result.stage|=VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT; result.access|=VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT; }
     if (graph::includes(use,Index)) { result.stage|=VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT; result.access|=VK_ACCESS_2_INDEX_READ_BIT; }
     if (graph::includes(use,Uniform)) { result.stage|=VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT; result.access|=VK_ACCESS_2_UNIFORM_READ_BIT; }
@@ -42,9 +53,18 @@ Scope scope(graph::Use use)
 struct VulkanFrameGraph::State : GraphicsCommands
 {
     struct Native { VkImage image=VK_NULL_HANDLE; VkBuffer buffer=VK_NULL_HANDLE; VkImageAspectFlags aspect=0; uint32_t mips=1;
-        TextureRef ownedTexture; TextureBindingRef sampled; };
+        TextureRef ownedTexture; TextureBindingRef sampled; BufferRef ownedBuffer; AccelerationRef ownedAcceleration; };
     graph::GraphicsGraph program;
     std::vector<Native> native;
+    std::vector<ComputeBinding> computeBindings;
+    const VulkanDevice* owner=nullptr;
+    bool readbackPending=false, completionFailed=false;
+    uint64_t readbackSubmissions=0,readbackCompletions=0;
+    ~State()
+    {
+        if (program.completed) { std::fprintf(stderr,"Vulkan: Readback summary; submitted %llu, completed %llu.\n",
+            static_cast<unsigned long long>(readbackSubmissions),static_cast<unsigned long long>(readbackCompletions)); }
+    }
     std::vector<graph::Use> initial;
     std::vector<graph::Use> pending;
     bool geometrySubmitted = false;
@@ -73,11 +93,62 @@ struct VulkanFrameGraph::State : GraphicsCommands
     PFN_vkCmdBeginRendering begin=nullptr;
     PFN_vkCmdEndRendering end=nullptr;
 
+    bool dispatch(const ComputePipelineRef& pipelineRef,std::span<const uint32_t> reads,
+        std::span<const uint32_t> writes,uint32_t x,uint32_t y,uint32_t z,uint32_t accelerationSlot) override
+    {
+        AccelerationRef acceleration;
+        if (accelerationSlot!=UINT32_MAX) {
+            if (accelerationSlot>=native.size() || !native[accelerationSlot].ownedAcceleration) { return false; }
+            acceleration=native[accelerationSlot].ownedAcceleration;
+        }
+        if (!ComputePipelineAccess::counts(pipelineRef,reads.size(),writes.size(),bool(acceleration))) { return false; }
+        std::vector<BufferRef> buffers;
+        for (auto slots:{reads,writes}) { for (auto slot:slots) {
+            if (slot>=native.size() || !native[slot].ownedBuffer) { return false; }
+            buffers.push_back(native[slot].ownedBuffer);
+        } }
+        auto found=std::ranges::find_if(computeBindings,[&](const auto& b) { return ComputePipelineAccess::matches(b,pipelineRef,buffers,acceleration); });
+        if (found==computeBindings.end()) {
+            auto binding=ComputePipelineAccess::bind(*owner,pipelineRef,buffers,acceleration);
+            if (!binding) { return false; }
+            computeBindings.push_back(std::move(binding)); found=computeBindings.end()-1;
+        }
+        return ComputePipelineAccess::dispatch(command,*found,x,y,z);
+    }
+    bool uploadBuffer(uint32_t slot,std::span<const std::byte> bytes) override
+    {
+        return slot<native.size() && native[slot].ownedBuffer && bytes.size()==native[slot].ownedBuffer.sizeBytes() &&
+            BufferAccess::write(native[slot].ownedBuffer,bytes);
+    }
+    bool buildBottom(uint32_t slot,uint32_t vertices,uint32_t indices) override
+    {
+        return slot<native.size() && vertices<native.size() && indices<native.size() &&
+            AccelerationAccess::buildBottom(command,native[slot].ownedAcceleration,native[vertices].ownedBuffer,native[indices].ownedBuffer);
+    }
+    bool buildTop(uint32_t slot,std::span<const uint32_t> bottom,std::span<const AccelerationInstance> instances) override
+    {
+        if (slot>=native.size()) { return false; }
+        std::vector<AccelerationRef> refs;
+        for (auto index:bottom) { if (index>=native.size()) { return false; } refs.push_back(native[index].ownedAcceleration); }
+        return AccelerationAccess::buildTop(command,native[slot].ownedAcceleration,refs,instances);
+    }
+
     bool transition(const graph::Barrier& value)
     {
         auto before=scope(value.before), after=scope(value.after);
         const auto& resource=native[value.resource];
         VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        if (resource.ownedAcceleration)
+        {
+            // One coarse AS resource includes its private scratch and instance
+            // input. Conservatively cover all previous device accesses so a
+            // later build also orders scratch reuse after a traversal-only use.
+            if (value.before!=graph::Use::None) { before.stage=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT; before.access=VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT; }
+            VkMemoryBarrier2 memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            memory.srcStageMask=before.stage; memory.srcAccessMask=before.access;
+            memory.dstStageMask=after.stage; memory.dstAccessMask=after.access;
+            dependency.memoryBarrierCount=1; dependency.pMemoryBarriers=&memory; barrier(command,&dependency); return true;
+        }
         if (resource.image)
         {
             // Swapchain transition must be in the acquire wait's stage even
@@ -217,7 +288,7 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
             TextureBindingAccess::set(shadow->materialBindings()[i].data)!=TextureBindingAccess::set(pipeline->materialBindings()[i].data)) { return false; }
     } }
     auto state=std::make_unique<State>();
-    state->device=device.handle(); state->presentationFormat=presentationFormat;
+    state->device=device.handle(); state->owner=&device; state->presentationFormat=presentationFormat;
     const auto getProc=loadFunction<PFN_vkGetDeviceProcAddr>(device.physicalDeviceInfo().instance,"vkGetDeviceProcAddr");
     if (!getProc) { return false; }
     state->barrier=reinterpret_cast<PFN_vkCmdPipelineBarrier2>(getProc(device.handle(),"vkCmdPipelineBarrier2"));
@@ -239,6 +310,7 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
     graph::GraphicsImports input{color,depthResource,{},{},{},{}};
     input.width=extent.width; input.height=extent.height;
     input.prepareGraphics=[&](const GraphicsPipelineDesc& desc) { return GraphicsPipelineAccess::create(device,presentationFormat,desc); };
+    input.prepareCompute=[&](const ComputePipelineDesc& desc) { return ComputePipelineAccess::create(device,desc); };
     input.presentationSrgb=presentationFormat==VK_FORMAT_B8G8R8A8_SRGB || presentationFormat==VK_FORMAT_R8G8B8A8_SRGB;
     if (ui)
     {
@@ -254,6 +326,10 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
         input.vertices=import("Vertices",identity(vertexBuffer),graph::Kind::Buffer,graph::Use::HostWrite,true,{VK_NULL_HANDLE,vertexBuffer});
         input.indices=import("Indices",identity(indexBuffer),graph::Kind::Buffer,graph::Use::HostWrite,true,{VK_NULL_HANDLE,indexBuffer});
         state->vertexSlot=input.vertices.index; state->indexSlot=input.indices.index;
+        state->native[input.vertices.index].ownedBuffer=pipeline->vertexBuffer();
+        state->native[input.indices.index].ownedBuffer=pipeline->indexBuffer();
+        input.storageGeometry=(BufferAccess::usage(pipeline->vertexBuffer())&VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) &&
+            (BufferAccess::usage(pipeline->indexBuffer())&VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
         if (!pipeline->materialBindings().empty())
         {
             input.lighting=import("FrameLighting",identity(lighting.buffer()),graph::Kind::Buffer,graph::Use::HostWrite,true,{VK_NULL_HANDLE,lighting.buffer()});
@@ -284,6 +360,37 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
     for (size_t slot=importedCount; slot<program->plan.resources().size(); ++slot)
     {
         const auto& resource=program->plan.resources()[slot];
+        if (resource.bottom || resource.top)
+        {
+            AccelerationRef acceleration;
+            if (resource.bottom) {
+                const auto& desc=*resource.bottom;
+                if (desc.vertices.index>=state->native.size() || desc.indices.index>=state->native.size()) { return false; }
+                acceleration=AccelerationAccess::bottom(device,state->native[desc.vertices.index].ownedBuffer,
+                    state->native[desc.indices.index].ownedBuffer,desc.firstIndex,desc.indexCount);
+            } else {
+                std::vector<AccelerationRef> refs;
+                for (auto resourceRef:resource.top->bottom) {
+                    if (resourceRef.index>=state->native.size()) { return false; }
+                    refs.push_back(state->native[resourceRef.index].ownedAcceleration);
+                }
+                acceleration=AccelerationAccess::top(device,refs,resource.top->capacity);
+            }
+            if (!acceleration) { std::fprintf(stderr,"Render Graph error: acceleration structure preparation failed.\n"); return false; }
+            State::Native native; native.ownedAcceleration=std::move(acceleration);
+            state->native.push_back(std::move(native)); state->initial.push_back(graph::Use::None); continue;
+        }
+        if (resource.storageBuffer)
+        {
+            if (resource.storageBuffer->sizeBytes>device.physicalDeviceInfo().properties.limits.maxStorageBufferRange)
+            { std::fprintf(stderr,"Render Graph error: storage size exceeds maxStorageBufferRange.\n"); return false; }
+            const std::vector<std::byte> zero(resource.storageBuffer->sizeBytes);
+            auto buffer=createStorageBuffer(device,zero);
+            if (!buffer) { return false; }
+            State::Native native; native.buffer=BufferAccess::handle(buffer); native.ownedBuffer=std::move(buffer);
+            state->native.push_back(std::move(native)); state->initial.push_back(graph::Use::None);
+            continue;
+        }
         if (!resource.depthTexture && !resource.colorTexture) { std::fprintf(stderr,"Render Graph error: unsupported managed resource.\n"); return false; }
         const bool isDepth=resource.depthTexture.has_value();
         const auto width=isDepth ? resource.depthTexture->width : resource.colorTexture->width;
@@ -316,12 +423,18 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
         for (const auto& access : node.accesses)
         {
             const auto slot=access.resource.index;
-            const auto allowed=slot>=importedCount ? (state->native[slot].aspect==VK_IMAGE_ASPECT_DEPTH_BIT ? graph::Use::Depth : graph::Use::Color)|(state->native[slot].sampled ? graph::Use::Sampled : graph::Use::None) :
+            const auto extraGeometry=input.storageGeometry ? graph::Use::ComputeRead|graph::Use::BuildInput : graph::Use::None;
+            const auto allowed=state->native[slot].ownedAcceleration ?
+                graph::Use::BuildWrite|graph::Use::RayQueryRead|(program->plan.resources()[slot].top ? graph::Use::None : graph::Use::BuildRead) :
+                slot>=importedCount ? (state->native[slot].ownedBuffer ? graph::Use::ComputeRead|graph::Use::ComputeWrite|graph::Use::HostRead|graph::Use::HostWrite :
+                (state->native[slot].aspect==VK_IMAGE_ASPECT_DEPTH_BIT ? graph::Use::Depth : graph::Use::Color)|(state->native[slot].sampled ? graph::Use::Sampled : graph::Use::None)) :
                 slot==state->colorSlot ? graph::Use::Color|graph::Use::Present :
-                slot==state->depthSlot ? graph::Use::Depth : slot==state->vertexSlot ? graph::Use::Vertex :
-                slot==state->indexSlot ? graph::Use::Index : slot==state->lightingSlot ? graph::Use::Uniform : graph::Use::Sampled;
+                slot==state->depthSlot ? graph::Use::Depth : slot==state->vertexSlot ? graph::Use::Vertex|extraGeometry :
+                slot==state->indexSlot ? graph::Use::Index|extraGeometry : slot==state->lightingSlot ? graph::Use::Uniform : graph::Use::Sampled;
             if (!graph::includes(allowed,access.use))
             { std::fprintf(stderr,"Render Graph error: %s requests an unsupported resource usage.\n",node.name.c_str()); return false; }
+            if (graph::includes(access.use,graph::Use::HostRead) && !program->completed)
+            { std::fprintf(stderr,"Render Graph error: HostRead requires a completion callback.\n"); return false; }
         }
     }
     auto finalColor=graph::Use::None;
@@ -336,7 +449,7 @@ bool VulkanFrameGraph::initialize(const VulkanDevice& device, VkImage image, VkI
     std::fprintf(stderr,"Render Graph: compiled %zu Passes, %zu imported resources; %s.\n",state->program.plan.nodes().size(),importedCount,order.c_str());
     size_t managedDepth=0,managedColor=0;
     for (size_t slot=importedCount; slot<state->native.size(); ++slot)
-    { if (state->native[slot].aspect==VK_IMAGE_ASPECT_DEPTH_BIT) { ++managedDepth; } else { ++managedColor; } }
+    { if (state->native[slot].ownedBuffer || state->native[slot].ownedAcceleration) { continue; } if (state->native[slot].aspect==VK_IMAGE_ASPECT_DEPTH_BIT) { ++managedDepth; } else { ++managedColor; } }
     if (managedDepth) { std::fprintf(stderr,"Render Graph: allocated %zu managed depth texture(s).\n",managedDepth); }
     if (managedColor) { std::fprintf(stderr,"Render Graph: allocated %zu managed color texture(s).\n",managedColor); }
     state_=std::move(state); return true;
@@ -369,10 +482,38 @@ bool VulkanFrameGraph::submitted()
 {
     if (!state_ || state_->pending.empty()) { return false; }
     const bool depthInitialized=state_->pending[state_->depthSlot]==graph::Use::Depth;
-    state_->geometrySubmitted=true;
+    state_->geometrySubmitted=true; state_->readbackPending=true;
+    if (state_->program.completed) { ++state_->readbackSubmissions; }
     for (size_t slot=0; slot<state_->native.size(); ++slot)
-    { if (state_->native[slot].ownedTexture) { state_->initial[slot]=state_->pending[slot]; } }
+    { if (state_->native[slot].ownedTexture || state_->native[slot].ownedBuffer || state_->native[slot].ownedAcceleration) { state_->initial[slot]=state_->pending[slot]; } }
     state_->pending.clear();
     return depthInitialized;
+}
+bool VulkanFrameGraph::completed()
+{
+    if (!state_) { return true; }
+    auto& state=*state_;
+    if (!state.readbackPending) { return !state.completionFailed; }
+    state.readbackPending=false;
+    try
+    {
+        if (!state.program.completed) { return true; }
+        std::vector<std::vector<std::byte>> storage;
+        std::vector<uint32_t> slots;
+        for (uint32_t slot=0;slot<state.initial.size();++slot) {
+            if (!graph::includes(state.initial[slot],graph::Use::HostRead)) { continue; }
+            const auto& buffer=state.native[slot].ownedBuffer;
+            storage.emplace_back(buffer.sizeBytes()); slots.push_back(slot);
+            if (!BufferAccess::read(buffer,storage.back())) { state.completionFailed=true; break; }
+        }
+        std::vector<BufferReadback> readbacks;
+        for (size_t i=0;i<slots.size();++i) { readbacks.push_back({slots[i],storage[i]}); }
+        if (!state.completionFailed && !state.program.completed(readbacks)) { state.completionFailed=true; }
+        if (!state.completionFailed) { ++state.readbackCompletions; }
+    }
+    catch (const std::exception& e) { std::fprintf(stderr,"Render Graph error: completion callback: %s\n",e.what()); state.completionFailed=true; }
+    catch (...) { std::fprintf(stderr,"Render Graph error: completion callback exception.\n"); state.completionFailed=true; }
+    if (state.completionFailed) { std::fprintf(stderr,"Vulkan error: completed graph readback failed.\n"); }
+    return !state.completionFailed;
 }
 }

@@ -2,6 +2,8 @@
 
 #include "IndexedDraw.h"
 #include "GraphicsPipeline.h"
+#include "ComputePipeline.h"
+#include "AccelerationStructure.h"
 #include <array>
 #include <cstdint>
 #include <span>
@@ -29,5 +31,10 @@ public:
     virtual bool draw(uint32_t) { return false; }
     // Specialized UI adapter; its atlas must be declared by the calling Pass.
     virtual bool drawUi(uint32_t) { return false; }
+    virtual bool dispatch(const ComputePipelineRef&, std::span<const uint32_t>, std::span<const uint32_t>,
+        uint32_t, uint32_t, uint32_t, uint32_t = UINT32_MAX) { return false; }
+    virtual bool uploadBuffer(uint32_t,std::span<const std::byte>) { return false; }
+    virtual bool buildBottom(uint32_t,uint32_t,uint32_t) { return false; }
+    virtual bool buildTop(uint32_t,std::span<const uint32_t>,std::span<const AccelerationInstance>) { return false; }
 };
 }

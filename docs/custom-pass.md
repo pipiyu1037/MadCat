@@ -15,6 +15,10 @@ cmake --build build --config Debug --target CustomPass MadCatShaders CustomPassS
 
 默认显示 Suzanne；也可传入一个 glTF／GLB 文件路径。启动前先构建 `CustomPassShaders` 和 `CustomPassHdrShaders`，分别生成最终显示和 HDR 范围查看的基础产物。运行中修改这两个用户 Shader 后，点击 Compile + apply 或单击场景后按 R，手动编译并安全应用；修改 C++ 或内置 Forward／Shadow／DepthView Shader 时仍需重新构建并重启。当前编译器保持固定版本，编译失败保留有效版本，完整流程见[安全手动 Shader 更新](#安全手动-shader-更新)。
 
+可追加 `--ray-query-buffers`，显式请求光追设备能力、检查 Storage 分配并让几何具备设备地址／加速结构构建输入用途。先构建 `CustomPassComputeShaders`，再运行 `CustomPass.exe --cornell-box --ray-query-buffers`，会在显示流程前执行真实几何的 Compute Storage 校验与完成后回读；画面仍走光栅流程，尚未执行 GPU 求交。计算 Pass 的源码、绑定、同步、失败边界及现有 `-RayQuery` 场景检查见 [Compute Storage 读写与回读](../README.md#compute-storage-读写与回读)。
+
+追加 `--ray-query` 则在此基础上实际构建 BLAS／TLAS 并执行最近三角形求交，需要另构建 `CustomPassRayShaders`。查询结果在提交完成后与 CPU 参考比较，随模型变换更新；现有三个复杂场景可使用 `-TraceRays` 检查。窗口显示仍为光栅结果，未实现多次散射或路径追踪图像，支持范围和复现命令见 [实际 Ray Query 求交](../README.md#实际-ray-query-求交)。
+
 仓库另包含 [Lantern](../assets/models/Lantern/README.md) 和 [Box](../assets/models/Box/README.md)。`CustomPass.exe --fit assets/models/Lantern/Lantern.gltf` 会按选中场景的节点世界空间 AABB 居中、等比缩放；不带 `--fit` 时保留原有 .7 模型缩放。源文件、节点和贴图不作转换。
 
 窗口中的参数面板支持曝光 −8～8 EV、方向光线性 RGB（各通道 0～1）、辐照度 0～32 和 Restore defaults。滑条支持拖动或 Ctrl＋单击输入；颜色可直接输入浮点数。无效、非有限或越界的请求保留上一份有效参数并显示诊断。面板占用键盘焦点时，数字键用于编辑；单击场景区域后可使用下列快捷键。

@@ -2,9 +2,25 @@
 
 MadCat 是一个使用自研 ECS 和 Vulkan 的渲染引擎。前期服务渲染算法研究和图形效果实验，长期考虑游戏与仿真用途。开发者应能加载模型、用 C++ 编写渲染 Pass、连接多个 Pass，并在运行时调整参数、查看中间结果。
 
-本文维护开发范围、实现进度、半年计划和验收方法；架构方案独立维护于[架构设计文档](architecture-design.md)。两份文档供项目开发者及协作编码助手使用。文档更新日期为 2026 年 11 月 25 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
+本文维护开发范围、实现进度、半年计划和验收方法；架构方案独立维护于[架构设计文档](architecture-design.md)。两份文档供项目开发者及协作编码助手使用。文档更新日期为 2026 年 11 月 26 日。**已确认的需求是项目约束；标为“建议”的实现方案可以随实际验证修订。功能完成状态以当前实现进度和实际代码为准。**
 
 ## 当前实现进度
+
+2026-11-26 在 Compute 数据通路之后接通实际 GPU Ray Query。新增强引用 AS 资源、每共享 Primitive 的 BLAS、当前世界变换的 TLAS、AS Descriptor 和 C++ 构建／查询 Pass。图声明几何构建输入、BLAS→TLAS→Query 及写后回读，TLAS 遍历会展开引用的 BLAS 读取；每份计划每个 AS 构建一次，逐帧执行完整重建。CustomPass 新增 `--ray-query`，26 条射线逐帧核对命中／未命中、最近距离和实例／三角形编号；CPU 双精度参考随变换修订缓存。原 `--ray-query-buffers` 保留只做缓冲／Compute 校验，默认模式不分配 AS。新手动目标 `CustomPassRayShaders` 沿用固定编译器和显式 Ray Query capability，现有三个复杂场景增加 `-TraceRays`，没有恢复独立单元或简单场景测试。入口与限制见 [实际 Ray Query](../README.md#实际-ray-query-求交)、[AS 契约](architecture-design.md#加速结构与-ray-query当前实现)。当前为不透明双面三角形求交，尚无 Ray Query 图像、材质／alpha 读取、多次散射、累积或重置，F09 未验收。
+
+本轮 Debug／Release 的 CustomPass、BasicScene、MadCat 构建通过，无编译 warning／error；统一目标编译／校验五个图形包、Geometry Compute 和 Ray Query 两个计算包。两种配置、默认／Storage／Trace 三种模式、三个场景各 21 状态通过，共 378 次画面检查。实际求交模式合计 20,782 次提交／完成回调，540,332 条射线逐次匹配 CPU；每场景六次实例变换修订覆盖移动、非均匀缩放、镜像和恢复。Cornell 的八个实例共享五个 BLAS，Lantern 为三／三，材质球为十／十；BLAS／TLAS 构建、查询、回读和资源退役计数匹配。252 对默认与 Storage／Trace 的同状态截图排除面板后逐像素一致。RTX 5060 Ti／NVIDIA 617.42，Debug 同步验证无 warning／error，Release 未主动启用验证层。新 Shader 反射确认 64×1×1、set 0 的 Storage 0／1 和 TLAS 2、输入／输出 stride 32／16，无 Push Constants，仅 Shader／RayQueryKHR capability；原离线探针回归通过且 SPIR-V 哈希不变。日志、反射和汇总在 `build/verification/ray-query-as-*`，场景产物在 `complex-scenes/`。其他 GPU、极端条件矩阵、失败注入与性能未验证。
+
+以下保留此前计算通路与缓冲准备的状态及验证证据；其中 AS／求交尚未执行的说明对应当时状态。
+
+2026-11-26 在设备与缓冲准备之后接通首个 C++ Compute Pass：显式计算管线／连续 Storage 绑定、Dispatch、图内 Storage 资源与 ComputeRead／ComputeWrite／HostRead、提交 Fence 完成后的回读回调。CustomPass 的 `--ray-query-buffers` 模式连接 `GeometryCompute → GeometryReadback`，读取真实共享几何，GPU 写出 16 字节字节数与校验值，CPU 逐次核对；原显示流程继续运行。`CustomPassComputeShaders` 为独立手动目标，沿用固定 Slang、SPIR-V 校验和候选发布，统一复杂场景目标已登记。接口、运行命令与边界见 [Compute Storage](../README.md#compute-storage-读写与回读)、[生命周期与同步](architecture-design.md#compute-storage-与完成回调当前实现)。当前仍无 AS 绑定／BLAS／TLAS、GPU Ray Query 或路径追踪；下一步接入加速结构。
+
+本轮 Debug／Release 的 CustomPass、BasicScene、MadCat 构建通过，无编译 warning／error；统一复杂场景目标编译并校验五个图形包和一个计算包。两种配置、默认／计算两种模式、三个场景各 21 状态通过，共 252 次画面检查。计算模式合计 22,743 次成功提交均收到完成回调，GPU 字节数／校验值全部与 CPU 参考一致；计算绑定数未超过对应管线数，创建／销毁计数匹配。126 对同状态截图排除面板后逐像素一致，Debug 同步验证无 warning／error，Release 未主动启用验证层，实际为 RTX 5060 Ti／NVIDIA 617.42。反射核对 computeMain、64×1×1、set 0 三个 Storage／两个只读输入、4 字节数组步长及无 Push Constants；反汇编仅有 Shader capability。日志与反射在 `build/verification/compute-storage-*`，截图在 `build/verification/complex-scenes/`。其他 GPU、失败注入、性能、AS 构建与求交未验证。
+
+以下保留此前缓冲准备增量的实现与验证证据；其中未执行 Storage GPU 访问的限制描述对应当时状态，现已由上面的计算通路扩展。
+
+2026-11-26 接通按需 Ray Query 设备能力与 Storage／设备地址缓冲。`ApplicationOptions::enableRayQuery` 默认为 false，CustomPass 可追加 `--ray-query-buffers`；开启时要求并启用三个光追扩展及 bufferDeviceAddress／accelerationStructure／rayQuery，逐项诊断缺失条件。几何保留原有绘制用途，并增加 Storage、设备地址和 AS 构建输入用途；新增一次初始化的 Storage 工厂与 `BufferRef::deviceAddress()`，沿用专用 coherent 分配和完成后回收。开启模式在启动时创建普通／可寻址各一个 4 字节 Storage，检查大小与地址后立即释放，从未提交 GPU。现有复杂场景增加 `-RayQuery` 模式，默认保持普通光栅；接口与命令见 [Ray Query 设备与缓冲](../README.md#ray-query-设备与缓冲)、[架构契约](architecture-design.md#ray-query-设备选项与缓冲当前实现)。当前仍无 Storage 绑定／GPU 写入／回读、BLAS／TLAS、Compute Dispatch 或 GPU 求交，下一步接入绑定、加速结构与计算提交，再推进完整路径追踪。
+
+本轮 Debug／Release 的 CustomPass、BasicScene、MadCat 构建通过；统一复杂场景目标完成五个既有图形 Shader 包编译及 SPIR-V 校验。两种配置、默认／光追缓冲两种模式、三个场景各 21 状态通过，共 252 次画面检查；126 对同状态截图在排除参数面板后逐像素一致。新增检查覆盖设备启用日志、普通／可寻址 Storage 的用途与地址、创建／释放，以及真实几何组合用途、非零地址和窗口重建复用；原五视图、参数／位姿、开关、resize／最小化与退出继续通过。实际 RTX 5060 Ti／NVIDIA 617.42，Debug 同步验证无 warning／error，Release 未主动启用验证层。该证据未覆盖 Storage 的 GPU 访问、AS 构建、求交、其他 GPU、失败注入或性能；日志在 `build/verification/ray-query-buffers-*.log`，场景产物在 `build/verification/complex-scenes/`。
 
 2026-11-25 接通 glTF 切线与法线贴图：导入 FLOAT VEC4 TANGENT、normalTexture／scale，RenderScene 校验并打包 72 字节顶点；Lambert／PBR 使用线性法线采样、正确切线变换、镜像符号与片元正交化。set3 组合 MR／法线，保持四个 set、192 字节帧 UBO 和 128 字节 Draw 常量；图新增实际法线图像及读取检查，GPU 使用寿命沿用已有完成边界。CustomPass 增加 Normal map 开关、8／9 非均匀缩放／镜像。使用与边界见[法线贴图](../README.md#法线贴图)、[接口契约](architecture-design.md#法线贴图与切线当前实现)。当前支持显式切线／UV0，不自动生成；遮蔽／发光、IBL、透明混合与完整路径追踪尚未实现，F08／F09 未整体验收。后续推进 GPU 求交所需的缓冲、能力启用、绑定、BLAS／TLAS 与计算提交。
 
@@ -383,7 +399,7 @@ PBR 的第一份验收场景应能比较不同粗糙度、金属度和基础色�
 | 三角形构建回归 | 原有 12 项 Shader 检查通过，重新编译后的两个三角形 SPIR-V 哈希与已有记录一致 |
 | 设备查询 | 本次 `vulkaninfo` 重新报告 RTX 5060 Ti（API 1.4.351、驱动 617.42）和 AMD 集显（API 1.3.280、驱动 24.10.24）均有 Compute 队列、三个所需扩展及三个所需 feature 支持；仅表示查询可用 |
 
-工具为 CMake 4.4.4、Vulkan SDK 1.4.363.0 和 SPIRV-Tools `v2026.4 v2026.4.rc2-0-gef96ed76`。在 Vulkan 1.3 基线下，未来 Device 仍须显式启用 `VK_KHR_acceleration_structure`、`VK_KHR_ray_query`、`VK_KHR_deferred_host_operations` 以及 `bufferDeviceAddress`、`accelerationStructure`、`rayQuery`；当前设备创建链未启用这些项目。固定 Descriptor 不要求额外启用 Descriptor 数组或 update-after-bind。尚未执行新 Shader、GPU 求交、同步验证或性能测量，不能视为完整第一阶段或路径追踪完成。失败检查日志在本地 `<构建目录>/verification/ray-query-build/`，本次设备查询报告在 `build/verification/ray-query-device-report.txt`。
+工具为 CMake 4.4.4、Vulkan SDK 1.4.363.0 和 SPIRV-Tools `v2026.4 v2026.4.rc2-0-gef96ed76`。在 Vulkan 1.3 基线下，未来 Device 仍须显式启用 `VK_KHR_acceleration_structure`、`VK_KHR_ray_query`、`VK_KHR_deferred_host_operations` 以及 `bufferDeviceAddress`、`accelerationStructure`、`rayQuery`；2026-10-26 当时设备创建链未启用这些项目；2026-11-26 已增加按需启用，见[当前实现进度](#当前实现进度)。固定 Descriptor 不要求额外启用 Descriptor 数组或 update-after-bind。尚未执行新 Shader、GPU 求交、同步验证或性能测量，不能视为完整第一阶段或路径追踪完成。失败检查日志在本地 `<构建目录>/verification/ray-query-build/`，本次设备查询报告在 `build/verification/ray-query-device-report.txt`。
 
 路径追踪按以下增量实现：
 
@@ -471,7 +487,7 @@ Shader 编译与资源状态模型先做最小验证，再逐步完善；不等�
 13. 添加层级和世界 Transform 更新，再单独覆盖重新挂接与删除行为。
 14. 按几何、索引、法线、UV、贴图分别增加模型导入能力。
 
-当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、单帧同步、交换链与管线重建、Slang 到 SPIR-V 的手动编译与验证、启动时的 Shader Module 加载、最小图形管线和三角形 Draw、不可变顶点缓冲、纯深度纹理引用与遮挡、Scene／相机矩阵到 Shader 的固定 Push Constant 路径、Ray Query 离线编译探针，以及 CPU Entity 生命周期、组件增删／组合查询、Scene 层级和局部／世界 Transform、相机组件及视图／透视投影矩阵、glTF 静态几何与节点导入。遍历期间结构性修改会被拒绝，调用方可在遍历后处理。架构设计已收敛为首版实施基线，常规接口和内部存储在实现时确定，停止逐项扩展架构讨论；这不表示目标能力全部实现。索引缓冲、DrawIndexed、glTF 静态 GPU 预览与 CPU 模型资产引用／Scene 节点实例化已接通；最小 RenderScene 绘制提取与共享 GPU 几何也已接通；法线／UV 的 CPU 导入也已完成；GPU 属性传输与可视化已完成；基础材质／图片导入与纹理采样已完成；单方向光、最小 Pass／图及图内深度采样已接通，光源矩阵与阴影图生成／查看已接通，Forward 阴影比较／偏移／滤波也已接通。可复用实验入口、BasicScene、CustomPass 的 HDR／显示转换及参数面板已实现，Forward 开关、整图候选切换、主相机深度和 HDR 范围查看也已实现，阴影图统一查看与两个用户显示包的安全手动 Shader 更新也已实现；PBR 常量因子与 MR 贴图已接通，下一步继续法线贴图及 GPU 求交，见[近期实施顺序](#用户使用方式与近期实施顺序)。所有场景对象继续使用 Entity，未来渲染通过 Mesh、Material 等组件组合提取。Ray Query GPU 求交仍需 Storage／设备地址缓冲、设备能力启用、绑定、加速结构和计算提交，不能把当前顶点缓冲视为这些能力已经具备。两个用户显示包的安全更新与失败恢复已验证，内置及通用 Shader 更新仍待实现。
+当前已完成构建、窗口、Vulkan 初始化与能力报告、Device／单队列、单帧同步、交换链与管线重建、Slang 到 SPIR-V 的手动编译与验证、启动时的 Shader Module 加载、最小图形管线和三角形 Draw、不可变顶点缓冲、纯深度纹理引用与遮挡、Scene／相机矩阵到 Shader 的固定 Push Constant 路径、Ray Query 离线编译探针，以及 CPU Entity 生命周期、组件增删／组合查询、Scene 层级和局部／世界 Transform、相机组件及视图／透视投影矩阵、glTF 静态几何与节点导入。遍历期间结构性修改会被拒绝，调用方可在遍历后处理。架构设计已收敛为首版实施基线，常规接口和内部存储在实现时确定，停止逐项扩展架构讨论；这不表示目标能力全部实现。索引缓冲、DrawIndexed、glTF 静态 GPU 预览与 CPU 模型资产引用／Scene 节点实例化已接通；最小 RenderScene 绘制提取与共享 GPU 几何也已接通；法线／UV 的 CPU 导入也已完成；GPU 属性传输与可视化已完成；基础材质／图片导入与纹理采样已完成；单方向光、最小 Pass／图及图内深度采样已接通，光源矩阵与阴影图生成／查看已接通，Forward 阴影比较／偏移／滤波也已接通。可复用实验入口、BasicScene、CustomPass 的 HDR／显示转换及参数面板已实现，Forward 开关、整图候选切换、主相机深度和 HDR 范围查看也已实现，阴影图统一查看与两个用户显示包的安全手动 Shader 更新也已实现；PBR 常量因子、MR／法线贴图已接通，Ray Query 设备能力与 Storage／设备地址缓冲已接通，连续 Storage／AS 绑定、Dispatch、BLAS／TLAS 构建及 GPU 求交已接通，下一步继续射线图像、材质读取和多次散射，见[近期实施顺序](#用户使用方式与近期实施顺序)。所有场景对象继续使用 Entity，未来渲染通过 Mesh、Material 等组件组合提取。Ray Query 已通过 AS 构建与真实几何求交验证；当前射线探针仍不能替代完整路径追踪。两个用户显示包的安全更新与失败恢复已验证，内置及通用 Shader 更新仍待实现。
 
 ## 验证策略与风险
 
@@ -484,6 +500,8 @@ Shader 编译与资源状态模型先做最小验证，再逐步完善；不等�
 | PBR 材质球 | 多金属度／粗糙度、法线开关不改变无贴图材质、非均匀／镜像、五种视图与窗口生命周期 |
 
 检查记录可见性、HDR 非有限标记、Validation Layers／同步验证诊断和资源销毁数量／顺序；Debug 开启验证层，Release 不主动开启。日志需保留资产、设备、驱动和 Shader 上下文，截图用于检查实际画面。运行命令见 [复杂场景测试](../README.md#复杂场景测试)。
+
+同一脚本的 `-RayQuery` 模式增加 Compute Storage 验证：GPU 读取完整共享几何并写出字节数／校验值，提交完成后逐帧与 CPU 参考比较，检查提交与回读数一致以及 Descriptor／管线／图内缓冲退役。该模式仍运行上述三个复杂场景，不是独立单元或简单场景测试；不能作为 AS 构建或射线求交的证据。
 
 当前测试不提供独立逐像素光照／阴影参考，也不覆盖 CPU 边界、坏输入或失败恢复。历史精确检查结果保留为已发生的证据，不能替代后续改动的验证。路径追踪接入后应扩展完整场景，检查多次散射、累积、变化重置、有限数值和噪声趋势；当前没有这些运行能力，首次验收不设帧率门槛。
 

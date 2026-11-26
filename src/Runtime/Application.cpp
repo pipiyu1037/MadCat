@@ -25,7 +25,8 @@ namespace madcat::runtime
 {
 namespace
 {
-bool initializeDevice(const madcat::rhi::VulkanInstance& instance, const madcat::rhi::VulkanSurface& surface, madcat::rhi::VulkanDevice& device)
+bool initializeDevice(const madcat::rhi::VulkanInstance& instance, const madcat::rhi::VulkanSurface& surface,
+    madcat::rhi::VulkanDevice& device, bool enableRayQuery)
 {
     std::vector<madcat::rhi::PhysicalDeviceInfo> devices;
     if (!madcat::rhi::queryPhysicalDevices(instance, devices))
@@ -51,7 +52,7 @@ bool initializeDevice(const madcat::rhi::VulkanInstance& instance, const madcat:
         candidates.push_back({std::move(devices[deviceIndex]), std::move(support)});
     }
     std::fprintf(stderr, "Vulkan: physical device capability report complete.\n");
-    return device.initialize(candidates);
+    return device.initialize(candidates, {.enableRayQuery=enableRayQuery});
 }
 
 // Renderer waits and releases commands before the pipeline, depth texture and
@@ -292,7 +293,21 @@ int runGraphics(const ApplicationOptions& options, const assets::ModelAssets& as
         rhi::VulkanInstance vulkan;
         rhi::VulkanSurface surface;
         rhi::VulkanDevice device;
-        if (!vulkan.initialize() || !surface.initialize(vulkan, window.get()) || !initializeDevice(vulkan, surface, device)) { return EXIT_FAILURE; }
+        if (!vulkan.initialize() || !surface.initialize(vulkan, window.get()) ||
+            !initializeDevice(vulkan, surface, device, options.enableRayQuery)) { return EXIT_FAILURE; }
+        if (options.enableRayQuery)
+        {
+            // Allocation preflight only: these buffers are never submitted, so
+            // they can be released here without a GPU wait or graph import.
+            const std::array<uint32_t,1> initial{0};
+            const auto bytes = std::as_bytes(std::span(initial));
+            auto plain = rhi::createStorageBuffer(device, bytes);
+            auto addressed = rhi::createStorageBuffer(device, bytes, true);
+            if (!plain || !addressed || plain.deviceAddress() || !addressed.deviceAddress() ||
+                plain.sizeBytes() != bytes.size() || addressed.sizeBytes() != bytes.size())
+            { throw std::runtime_error("Ray Query storage buffer preflight failed"); }
+            std::fprintf(stderr, "MadCat: Ray Query storage buffer preflight complete (plain and addressable; not submitted).\n");
+        }
         const auto shaderDirectory = options.shaderDirectory.empty() ?
             std::filesystem::path(u8"" MADCAT_SHADER_DIRECTORY) : options.shaderDirectory;
         rhi::VulkanShaderModule vertex, fragment, depthVertex, depthFragment, shadowVertex, shadowFragment;
@@ -305,9 +320,9 @@ int runGraphics(const ApplicationOptions& options, const assets::ModelAssets& as
         if (!vertex.initialize(device, shaderDirectory/"vertex.spv") || !fragment.initialize(device, shaderDirectory/"fragment.spv"))
         { throw std::runtime_error("Shader initialization failed; build MadCatShaders then restart"); }
         std::fprintf(stderr, "MadCat: triangle Shader Modules ready (vertexMain / fragmentMain).\n");
-        auto vertices = rhi::createVertexBuffer(device, std::as_bytes(std::span(geometry.vertices)));
+        auto vertices = rhi::createVertexBuffer(device, std::as_bytes(std::span(geometry.vertices)), options.enableRayQuery);
         if (!vertices) { throw std::runtime_error("Vertex upload failed"); }
-        auto indices = rhi::createIndexBuffer(device, geometry.indices);
+        auto indices = rhi::createIndexBuffer(device, geometry.indices, options.enableRayQuery);
         if (!indices) { throw std::runtime_error("Index upload failed"); }
         auto materials = render::prepareMaterialBindings(device, assets, geometry.materials);
         if (!materials) { throw std::runtime_error(materials.error()); }

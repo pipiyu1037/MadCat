@@ -34,6 +34,8 @@ public:
         std::span<const IndexedDraw> shadowDraws, bool shadowsEnabled);
     // Called only after successful queue submission; recording alone publishes no state.
     [[nodiscard]] bool submitted(); // returns whether external depth is initialized
+    // Caller has waited for this graph's submission fence; exceptions are caught.
+    [[nodiscard]] bool completed();
 private:
     struct State;
     std::unique_ptr<State> state_;

@@ -1,6 +1,8 @@
 #pragma once
 #include "ToneMapPass.h"
 #include "HdrRangePass.h"
+#include "GeometryComputePass.h"
+#include "RayQueryPass.h"
 #include "Passes/DepthViewPass.h"
 #include "Passes/ShadowPass.h"
 #include "Passes/UiPass.h"
@@ -21,12 +23,27 @@ inline const char* displayViewName(DisplayView view)
 // Structural settings are captured by value. Parameters remain owned by the
 // experiment, then copied at the frame's record boundary. Do not outlive run().
 inline madcat::graph::GraphicsGraphFactory makeDisplayGraph(const ToneMapPass::Parameters& display,
-    std::filesystem::path shaderRoot, DisplaySettings settings={})
+    std::filesystem::path shaderRoot, DisplaySettings settings={},std::optional<GeometryReference> reference={},std::shared_ptr<RayProbeState> probe={})
 {
-    return [&display,shaderRoot=std::move(shaderRoot),settings](madcat::graph::Graph& graph,
+    return [&display,shaderRoot=std::move(shaderRoot),settings,reference,probe=std::move(probe)](madcat::graph::Graph& graph,
         const madcat::graph::GraphicsImports& input) -> std::expected<madcat::graph::GraphicsGraph,std::string> {
         using namespace madcat;
         if (!input.presentationSrgb) { return std::unexpected("CustomPass display Shader requires an sRGB presentation attachment"); }
+        if (probe && !reference) { return std::unexpected("Ray Query experiment requires its startup geometry reference"); }
+        uint32_t computeNode=UINT32_MAX,readbackNode=UINT32_MAX,resultSlot=UINT32_MAX;
+        if (reference)
+        {
+            if (!input.storageGeometry || !input.prepareCompute) { return std::unexpected("Geometry compute requires Storage geometry and compute preparation"); }
+            auto pipeline=input.prepareCompute({std::filesystem::path(u8"" MADCAT_EXAMPLE_SHADERS)/"custom-geometry/compute.spv",2,1});
+            if (!pipeline) { return std::unexpected("Geometry compute pipeline preparation failed; build CustomPassComputeShaders"); }
+            const auto result=graph.createStorageBuffer("GeometryResult",{16});
+            const auto compute=graph.addPass("GeometryCompute",GeometryComputePass{},GeometryComputePass::Inputs{
+                input.vertices,input.indices,result},std::move(pipeline));
+            const auto readback=graph.addPass("GeometryReadback",GeometryReadbackPass{},GeometryReadbackPass::Inputs{compute.outputs.result});
+            computeNode=compute.node; readbackNode=readback.node; resultSlot=compute.outputs.result.index;
+        }
+        const auto ray=addRayGraph(graph,input,probe);
+        if (!ray) { return std::unexpected(ray.error()); }
         passes::Targets targets;
         uint32_t clearNode=UINT32_MAX, forwardNode=UINT32_MAX, shadowNode=UINT32_MAX;
         if (settings.view==DisplayView::Shadow)
@@ -74,10 +91,12 @@ inline madcat::graph::GraphicsGraphFactory makeDisplayGraph(const ToneMapPass::P
         const auto present=graph.addPass("Present",passes::PresentPass{},passes::PresentPass::Inputs{ui.outputs.color});
         auto plan=graph.compile();
         if (!plan) { return std::unexpected(plan.error()); }
-        auto parameters=[&display,view=settings.view,normalMapping=settings.normalMapping,clearNode,forwardNode,shadowNode,displayNode,uiNode=ui.node,
+        auto parameters=[&display,view=settings.view,normalMapping=settings.normalMapping,ray=*ray,computeNode,readbackNode,clearNode,forwardNode,shadowNode,displayNode,uiNode=ui.node,
             presentNode=present.node,count=plan->nodes().size()](const std::array<float,4>& color,
                 std::span<const rhi::IndexedDraw> draws,std::span<const rhi::IndexedDraw> shadowDraws) {
             std::vector<std::any> values(count);
+            ray.parameters(values,draws);
+            if (computeNode!=UINT32_MAX) { values[computeNode]=GeometryComputePass::Parameters{}; values[readbackNode]=GeometryReadbackPass::Parameters{}; }
             if (clearNode!=UINT32_MAX) { values[clearNode]=passes::ClearPass::Parameters{color}; }
             if (forwardNode!=UINT32_MAX) {
                 passes::ForwardPass::Parameters forward{{draws.begin(),draws.end()}};
@@ -93,7 +112,22 @@ inline madcat::graph::GraphicsGraphFactory makeDisplayGraph(const ToneMapPass::P
             values[presentNode]=passes::PresentPass::Parameters{};
             return values;
         };
-        return graph::GraphicsGraph{std::move(*plan),std::move(parameters)};
+        graph::GraphicsGraph result{std::move(*plan),std::move(parameters)};
+        if (reference) {
+            result.completed=[expected=*reference,resultSlot,ray=*ray,reported=false](std::span<const rhi::BufferReadback> readbacks) mutable {
+                const auto found=std::ranges::find_if(readbacks,[&](const auto& r) { return r.slot==resultSlot; });
+                if (found==readbacks.end() || found->bytes.size()!=sizeof(GeometryReference)) { return false; }
+                GeometryReference actual; std::memcpy(actual.data(),found->bytes.data(),sizeof(actual));
+                if (actual!=expected) {
+                    std::fprintf(stderr,"CustomPass failed: compute geometry mismatch; actual %u/%u/%08x/%08x, expected %u/%u/%08x/%08x.\n",
+                        actual[0],actual[1],actual[2],actual[3],expected[0],expected[1],expected[2],expected[3]); return false;
+                }
+                if (!reported) { std::fprintf(stderr,"CustomPass: compute geometry verified; %u vertex bytes, %u index bytes, hashes %08x/%08x.\n",
+                    actual[0],actual[1],actual[2],actual[3]); reported=true; }
+                return ray.completed(readbacks);
+            };
+        }
+        return result;
     };
 }
 }

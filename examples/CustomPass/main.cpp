@@ -21,7 +21,7 @@ int main(int argc, char** argv)
     try
     {
         auto path=std::filesystem::path(u8"" MADCAT_EXAMPLE_ASSETS)/"models/Suzanne/Suzanne.gltf";
-        bool fit=false,hasPath=false,pbr=false,spheres=false,cornell=false;
+        bool fit=false,hasPath=false,pbr=false,spheres=false,cornell=false,rayQuery=false,traceRays=false;
         auto shaderSources=std::filesystem::path(u8"" MADCAT_UPDATE_SOURCES);
         for (int arg=1;arg<argc;++arg) {
             const std::filesystem::path value(argv[arg]);
@@ -29,12 +29,14 @@ int main(int argc, char** argv)
             else if (value=="--pbr") { pbr=true; }
             else if (value=="--pbr-spheres") { spheres=true; pbr=true; }
             else if (value=="--cornell-box") { cornell=true; pbr=true; }
+            else if (value=="--ray-query-buffers") { rayQuery=true; }
+            else if (value=="--ray-query") { rayQuery=true; traceRays=true; }
             else if (value=="--shader-sources") {
                 if (++arg==argc) { throw std::runtime_error("--shader-sources requires a directory"); }
                 shaderSources=std::filesystem::path(argv[arg]);
             }
             else if (!hasPath && !value.native().starts_with(std::filesystem::path("--").native())) { path=value; hasPath=true; }
-            else { throw std::runtime_error("Usage: CustomPass [--fit] [--pbr | --pbr-spheres | --cornell-box] [--shader-sources directory] [model.gltf|model.glb]"); }
+            else { throw std::runtime_error("Usage: CustomPass [--fit] [--pbr | --pbr-spheres | --cornell-box] [--ray-query-buffers | --ray-query] [--shader-sources directory] [model.gltf|model.glb]"); }
         }
         if (cornell) {
             if (spheres || hasPath) { throw std::runtime_error("--cornell-box supplies its own scene"); }
@@ -93,9 +95,25 @@ int main(int argc, char** argv)
         application.title="MadCat CustomPass";
         application.forwardColorFormat=rhi::ColorFormat::Rgba16Float;
         application.physicallyBased=pbr;
+        application.enableRayQuery=rayQuery;
         if (pbr) { std::fprintf(stderr,"CustomPass: PBR constant factors; roughness floor .05.\n"); }
         application.prepareDepthView=true;
         application.prepareShadow=true;
+        std::optional<experiment::GeometryReference> computeReference;
+        std::shared_ptr<experiment::RayProbeState> rayProbe;
+        if (rayQuery) {
+            if (!scene.updateWorldTransforms()) { throw std::runtime_error("Compute reference world update failed"); }
+            const auto draws=render::extractDraws(scene,assets,camera,float(application.width)/float(application.height));
+            if (!draws) { throw std::runtime_error(draws.error()); }
+            auto geometry=render::prepareGeometry(assets,*draws);
+            if (!geometry) { throw std::runtime_error(geometry.error()); }
+            computeReference=experiment::geometryReference(*geometry);
+            if (traceRays) {
+                const auto resolved=render::resolveDraws(*geometry,*draws);
+                if (!resolved) { throw std::runtime_error(resolved.error()); }
+                rayProbe=std::make_shared<experiment::RayProbeState>(std::move(*geometry),*resolved);
+            }
+        }
         const shader::GraphicsUpdateOptions shaderUpdate{
             std::filesystem::path(u8"" MADCAT_UPDATE_CMAKE),std::filesystem::path(u8"" MADCAT_UPDATE_SCRIPT),
             std::filesystem::path(u8"" MADCAT_UPDATE_OUTPUT),shaderSources,std::filesystem::path(u8"" MADCAT_EXAMPLE_SHADERS)};
@@ -104,7 +122,7 @@ int main(int argc, char** argv)
         auto shaderRoot=std::move(*startupShaders);
         std::fprintf(stderr,"CustomPass: Shader revision 0 captured; %s.\n",shaderRoot.string().c_str());
         experiment::DisplaySettings requestedGraph,activeGraph,lastPresentedGraph;
-        application.graphFactory=experiment::makeDisplayGraph(displayParameters,shaderRoot,activeGraph);
+        application.graphFactory=experiment::makeDisplayGraph(displayParameters,shaderRoot,activeGraph,computeReference,rayProbe);
         uint64_t graphRequestId=0;
         std::optional<runtime::GraphRequest> pendingGraph;
         std::optional<std::filesystem::path> pendingShaders;
@@ -116,7 +134,7 @@ int main(int argc, char** argv)
             requestedGraph=settings;
             pendingShaders.reset();
             pendingGraph=runtime::GraphRequest{++graphRequestId,
-                experiment::makeDisplayGraph(displayParameters,shaderRoot,settings)};
+                experiment::makeDisplayGraph(displayParameters,shaderRoot,settings,computeReference,rayProbe)};
         };
         int mode=0,logged=-1;
         struct Controls
@@ -177,7 +195,7 @@ int main(int argc, char** argv)
                 {
                     pendingShaders=std::move(*candidate);
                     pendingGraph=runtime::GraphRequest{++graphRequestId,
-                        experiment::makeDisplayGraph(displayParameters,*pendingShaders,requestedGraph)};
+                        experiment::makeDisplayGraph(displayParameters,*pendingShaders,requestedGraph,computeReference,rayProbe)};
                 }
             }
             return std::exchange(pendingGraph,std::nullopt);

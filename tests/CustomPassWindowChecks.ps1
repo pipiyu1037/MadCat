@@ -2,17 +2,22 @@ param(
     [ValidateSet('Debug','Release')][string]$Configuration = 'Debug',
     [ValidateSet('all','cornell','lantern','pbr-spheres')][string]$Scenario = 'all',
     [string]$BuildDirectory = 'build',
-    [switch]$Lambert
+    [switch]$Lambert,
+    [switch]$RayQuery,
+    [switch]$TraceRays
 )
 $ErrorActionPreference = 'Stop'
+if ($TraceRays) { $RayQuery=$true }
 if ($Lambert -and $Scenario -ne 'lantern') { throw 'Lambert checks require -Scenario lantern' }
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $buildInput = if ([IO.Path]::IsPathRooted($BuildDirectory)) { $BuildDirectory } else { Join-Path $workspace $BuildDirectory }
 $buildPath = (Resolve-Path -LiteralPath $buildInput).Path
 if ($Scenario -eq 'all') {
     foreach ($scene in @('cornell','lantern','pbr-spheres')) {
-        & powershell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath `
-            -Configuration $Configuration -Scenario $scene -BuildDirectory $buildPath
+        $sceneArguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,
+            '-Configuration',$Configuration,'-Scenario',$scene,'-BuildDirectory',$buildPath)
+        if ($TraceRays) { $sceneArguments += '-TraceRays' } elseif ($RayQuery) { $sceneArguments += '-RayQuery' }
+        & powershell @sceneArguments
         if ($LASTEXITCODE -ne 0) { throw "$Configuration $scene failed" }
     }
     Write-Output "$Configuration complex scene checks passed (3 scenes)"
@@ -22,6 +27,8 @@ $outputRoot = Join-Path $buildPath 'verification/complex-scenes'
 [void][IO.Directory]::CreateDirectory($outputRoot)
 $name = "$($Configuration.ToLower())-$Scenario"
 if ($Lambert) { $name += '-lambert' }
+if ($RayQuery) { $name += '-ray-query' }
+if ($TraceRays) { $name += '-trace' }
 $errorPath = Join-Path $outputRoot "$name.stderr.log"
 $outPath = Join-Path $outputRoot "$name.stdout.log"
 $forwardEnabled = $true
@@ -58,6 +65,7 @@ try {
         }
         'pbr-spheres' { @('--pbr-spheres') }
     }
+    if ($TraceRays) { $arguments = @($arguments) + '--ray-query' } elseif ($RayQuery) { $arguments = @($arguments) + '--ray-query-buffers' }
     $appProcess = Start-Process -FilePath (Join-Path $buildPath "$Configuration/CustomPass.exe") `
         -ArgumentList $arguments -WorkingDirectory $outputRoot -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput $outPath -RedirectStandardError $errorPath
@@ -168,7 +176,10 @@ function Encode([double]$Linear) {
     return [int][Math]::Round(255*$value)
 }
 function Check-Pixels([string]$Label) {
+    $appProcess.Refresh()
+    if ($appProcess.HasExited) { throw "Application exited before screenshot $Label (see $errorPath): $(Read-Log)" }
     $size = Get-Size
+    if ($size[0] -le 0 -or $size[1] -le 0) { throw "Invalid client extent before screenshot $Label (see $errorPath): $(Read-Log)" }
     $origin = New-Object CustomPassWindowCheck+Point
     [void][CustomPassWindowCheck]::ClientToScreen($windowState.Handle,[ref]$origin)
     $bitmap = New-Object Drawing.Bitmap($size[0],$size[1])
@@ -263,6 +274,78 @@ try {
         throw 'Lantern metallic/roughness or normal texture upload is missing/duplicated'
     }
     if ($appProcess.ExitCode -ne 0 -or $log -match 'Vulkan \[(error|warning)\]|Vulkan error:|GLFW error|MadCat .*failed:|MadCat error:|CustomPass failed:') { throw "CustomPass failed (see $errorPath)" }
+    $geometryBuffers = [regex]::Matches($log,'(Vertex|Index) buffer uploaded; (\d+) bytes, coherent memory type \d+, usage 0x([0-9a-f]+), device address 0x([0-9a-f]+)\.')
+    if ($geometryBuffers.Count -ne 2) { throw 'Missing geometry buffer usage/address diagnostics' }
+    foreach ($buffer in $geometryBuffers) {
+        $usage = [Convert]::ToUInt32($buffer.Groups[3].Value,16)
+        $address = [Convert]::ToUInt64($buffer.Groups[4].Value,16)
+        $expectedUsage = if ($buffer.Groups[1].Value -eq 'Vertex') { 0x80 } else { 0x40 }
+        if ($RayQuery) { $expectedUsage = $expectedUsage -bor 0xa0020 }
+        if ($usage -ne $expectedUsage -or ($RayQuery -and $address -eq 0) -or (-not $RayQuery -and $address -ne 0)) {
+            throw 'Geometry buffer usage/address does not match the requested device mode'
+        }
+    }
+    $storageBuffers = [regex]::Matches($log,'Storage buffer uploaded; 4 bytes, coherent memory type \d+, usage 0x([0-9a-f]+), device address 0x([0-9a-f]+)\.')
+    $storageDestroyed = [regex]::Matches($log,'Storage buffer destroyed\.').Count
+    $computePipelines = [regex]::Matches($log,'Compute pipeline created;').Count
+    $computeBindings = [regex]::Matches($log,'Compute binding created\.').Count
+    $graphCount=if ($TraceRays) { $computePipelines/2 } else { $computePipelines }
+    $managedStorageCount=if ($TraceRays) { $graphCount*3 } else { $graphCount }
+    if ($RayQuery) {
+        if ($log -notmatch 'Vulkan: Ray Query enabled \(bufferDeviceAddress, accelerationStructure, rayQuery; VK_KHR_acceleration_structure, VK_KHR_ray_query, VK_KHR_deferred_host_operations\)' -or
+            $storageBuffers.Count -ne 2 -or $storageDestroyed -ne (2+$managedStorageCount) -or
+            $storageBuffers[0].Groups[1].Value -ne '20' -or $storageBuffers[0].Groups[2].Value -ne '0' -or
+            $storageBuffers[1].Groups[1].Value -ne '20020' -or [Convert]::ToUInt64($storageBuffers[1].Groups[2].Value,16) -eq 0 -or
+            $log -notmatch '(?s)storage buffer preflight complete.*?Storage buffer destroyed.*?Storage buffer destroyed.*?Vertex buffer uploaded;') {
+            throw 'Ray Query capability/storage preflight mismatch'
+        }
+        $verified=[regex]::Matches($log,'compute geometry verified; (\d+) vertex bytes, (\d+) index bytes, hashes [0-9a-f]{8}/[0-9a-f]{8}\.');
+        if ($computePipelines -lt 1 -or $computeBindings -lt 1 -or $computeBindings -gt $computePipelines -or $verified.Count -lt 3 -or
+            $computePipelines -ne [regex]::Matches($log,'Compute pipeline destroyed\.').Count -or
+            $computeBindings -ne [regex]::Matches($log,'Compute binding destroyed\.').Count -or
+            $graphCount -ne [regex]::Matches($log,'Storage buffer uploaded; 16 bytes,').Count -or
+            $log -notmatch 'GeometryCompute -> GeometryReadback' -or
+            $log -notmatch '(?s)Frame commands retired.*?Compute binding destroyed.*?Storage buffer destroyed.*?Device destroyed') {
+            throw 'Compute execution, readback or resource lifetime mismatch'
+        }
+        foreach ($result in $verified) {
+            if ($result.Groups[1].Value -ne $geometryBuffers[0].Groups[2].Value -or
+                $result.Groups[2].Value -ne $geometryBuffers[1].Groups[2].Value) { throw 'GPU geometry byte counts mismatch' }
+        }
+        $summaries=[regex]::Matches($log,'Readback summary; submitted (\d+), completed (\d+)\.');
+        if ($summaries.Count -ne $graphCount) { throw 'Missing graph completion summaries' }
+        foreach ($summary in $summaries) {
+            if ($summary.Groups[1].Value -ne $summary.Groups[2].Value) { throw 'A submitted compute frame missed its readback' }
+        }
+    } elseif ($log -notmatch 'Vulkan: Ray Query disabled\.' -or $storageBuffers.Count -ne 0 -or $storageDestroyed -ne 0) {
+        throw 'Default raster run enabled Ray Query or allocated preflight storage'
+    }
+    if (-not $RayQuery -and ($computePipelines -ne 0 -or $computeBindings -ne 0)) { throw 'Default run allocated compute resources' }
+    $blasCreated=[regex]::Matches($log,'BLAS created;').Count
+    $tlasCreated=[regex]::Matches($log,'TLAS created;').Count
+    if ($TraceRays) {
+        $queryChecks=[regex]::Matches($log,'Ray Query verified; revision (\d+), (\d+) instances, (\d+) hits, (\d+) misses\.')
+        $querySummary=[regex]::Matches($log,'Ray Query summary; (\d+) checked frames, (\d+) transform revisions\.')
+        if ($tlasCreated -ne $graphCount -or $blasCreated -lt $tlasCreated -or $queryChecks.Count -lt 4 -or $querySummary.Count -ne 1 -or
+            $blasCreated -ne [regex]::Matches($log,'BLAS destroyed;').Count -or
+            $tlasCreated -ne [regex]::Matches($log,'TLAS destroyed;').Count -or
+            $log -notmatch 'BuildTLAS -> RayUpload -> RayQuery -> RayReadback' -or
+            $graphCount -ne [regex]::Matches($log,'Storage buffer uploaded; 832 bytes,').Count -or
+            $graphCount -ne [regex]::Matches($log,'Storage buffer uploaded; 416 bytes,').Count) { throw 'Ray Query execution/resource mismatch' }
+        foreach ($check in $queryChecks) {
+            if ([int]$check.Groups[3].Value -lt 1 -or [int]$check.Groups[4].Value -lt 1 -or
+                ([int]$check.Groups[3].Value+[int]$check.Groups[4].Value) -ne 26) { throw 'Ray Query did not verify both hits and misses' }
+        }
+        [long]$completedFrames=0; foreach ($summary in $summaries) { $completedFrames += [long]$summary.Groups[2].Value }
+        [long]$topBuilds=0; foreach ($summary in [regex]::Matches($log,'TLAS destroyed; (\d+) builds recorded\.')) { $topBuilds += [long]$summary.Groups[1].Value }
+        [long]$bottomBuilds=0; foreach ($summary in [regex]::Matches($log,'BLAS destroyed; (\d+) builds recorded\.')) { $bottomBuilds += [long]$summary.Groups[1].Value }
+        if ($completedFrames -ne [long]$querySummary[0].Groups[1].Value -or $topBuilds -ne $completedFrames -or
+            $bottomBuilds -ne ($completedFrames*($blasCreated/$tlasCreated))) { throw 'AS build/query/readback count mismatch' }
+        foreach ($buffer in @('AS storage','AS scratch','AS instances')) {
+            $created=[regex]::Matches($log,"$buffer buffer allocated;").Count
+            if ($created -lt 1 -or $created -ne [regex]::Matches($log,"$buffer buffer destroyed\.").Count) { throw "$buffer allocation lifetime mismatch" }
+        }
+    } elseif ($blasCreated -ne 0 -or $tlasCreated -ne 0) { throw 'Non-tracing mode allocated acceleration structures' }
     if ($Scenario -eq 'cornell' -and ($log -notmatch 'Vertex buffer uploaded; 2880 bytes' -or $log -notmatch 'Index buffer uploaded; 240 bytes')) {
         throw 'Cornell geometry sharing/upload size mismatch'
     }

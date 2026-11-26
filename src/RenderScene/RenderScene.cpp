@@ -157,7 +157,10 @@ std::expected<std::vector<MeshDraw>, std::string> extractDraws(
             require(!primitives.empty(), "RenderScene Mesh has no Primitives");
             for (size_t primitive = 0; primitive < primitives.size(); ++primitive)
             {
-                result.push_back({entity, {instance.model, instance.meshIndex, primitive}, transform});
+                MeshDraw draw{entity,{instance.model,instance.meshIndex,primitive},transform};
+                for (int r=0;r<3;++r) { for (int c=0;c<4;++c) { draw.worldFromLocal[r*4+c]=(*world)[c][r]; } }
+                draw.affineWorld=(*world)[0][3]==0 && (*world)[1][3]==0 && (*world)[2][3]==0 && (*world)[3][3]==1;
+                result.push_back(std::move(draw));
             }
         });
         return result;
@@ -300,7 +303,7 @@ std::expected<std::vector<rhi::IndexedDraw>, std::string> resolveDraws(const Geo
             (material.doubleSided ? rhi::DoubleSided : 0u) | (material.alphaMode == assets::AlphaMode::Mask ? rhi::AlphaMask : 0u) |
             (material.baseColorTexture ? rhi::HasTexture : 0u) | (material.normalTexture ? rhi::HasNormalTexture : 0u);
         transform.setBaseColor(material.baseColor); transform.alphaCutoff = material.alphaCutoff;
-        result.push_back({transform, range->firstIndex, range->indexCount, range->material});
+        result.push_back({transform,range->firstIndex,range->indexCount,range->material,draw.worldFromLocal,draw.affineWorld});
     }
     return result;
 }

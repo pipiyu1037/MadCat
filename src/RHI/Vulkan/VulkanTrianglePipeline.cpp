@@ -90,10 +90,10 @@ bool VulkanTrianglePipeline::initialize(const VulkanDevice& device, VkFormat col
     if (!device.handle() || !vertex.handle() || !fragment.handle() ||
         vertex.deviceHandle() != device.handle() || fragment.deviceHandle() != device.handle() ||
         (depthOnly ? colorFormat != VK_FORMAT_UNDEFINED : colorFormat == VK_FORMAT_UNDEFINED) ||
-        detail::BufferAccess::device(vertices) != device.handle() || detail::BufferAccess::usage(vertices) != VK_BUFFER_USAGE_VERTEX_BUFFER_BIT ||
+        detail::BufferAccess::device(vertices) != device.handle() || (detail::BufferAccess::usage(vertices) & VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) == 0 ||
         vertices.sizeBytes() % sizeof(ColoredVertex) != 0 || vertices.sizeBytes() / sizeof(ColoredVertex) < 3 ||
         vertices.sizeBytes() / sizeof(ColoredVertex) > UINT32_MAX ||
-        detail::BufferAccess::device(indices) != device.handle() || detail::BufferAccess::usage(indices) != VK_BUFFER_USAGE_INDEX_BUFFER_BIT ||
+        detail::BufferAccess::device(indices) != device.handle() || (detail::BufferAccess::usage(indices) & VK_BUFFER_USAGE_INDEX_BUFFER_BIT) == 0 ||
         indices.sizeBytes() / sizeof(uint32_t) == 0 || indices.sizeBytes() / sizeof(uint32_t) % 3 != 0 ||
         detail::BufferAccess::maximumIndex(indices) >= vertices.sizeBytes() / sizeof(ColoredVertex) ||
         (depthFormat != VK_FORMAT_D32_SFLOAT && depthFormat != VK_FORMAT_D16_UNORM))
